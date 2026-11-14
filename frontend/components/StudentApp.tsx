@@ -1,0 +1,332 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import ReactMarkdown from "react-markdown";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import {
+  ArrowDown, ArrowUp, AudioLines, BookOpen, Check, ChevronDown, CircleHelp,
+  FileImage, GraduationCap, LoaderCircle, Menu, Mic, Paperclip, Plus, Send,
+  ShieldCheck, Sparkles, Square, X,
+} from "lucide-react";
+import ExamRunner from "@/components/ExamRunner";
+import type { BookOption, Exam, GradeOption, MajorOption, Source, TutorResponse } from "@/lib/types";
+
+type Message = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  sources?: Source[];
+  attachment?: string;
+};
+
+function errorMessage(payload: unknown, fallback: string) {
+  if (payload && typeof payload === "object" && "detail" in payload && typeof payload.detail === "string") return payload.detail;
+  return fallback;
+}
+
+function sourceText(source: Source) {
+  return source.citation ?? [
+    source.book_title,
+    source.chapter_number ? `فصل ${source.chapter_number}` : source.chapter_title,
+    source.printed_page_number ? `صفحهٔ ${source.printed_page_number}` : null,
+  ].filter(Boolean).join(" · ");
+}
+
+export default function StudentApp() {
+  const [grades, setGrades] = useState<GradeOption[]>([]);
+  const [majors, setMajors] = useState<MajorOption[]>([]);
+  const [books, setBooks] = useState<BookOption[]>([]);
+  const [gradeNumber, setGradeNumber] = useState<number | null>(null);
+  const [majorCode, setMajorCode] = useState("");
+  const [bookId, setBookId] = useState("");
+  const [curriculumError, setCurriculumError] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [messageError, setMessageError] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [audioFile, setAudioFile] = useState<File | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [examSetupOpen, setExamSetupOpen] = useState(false);
+  const [examType, setExamType] = useState<"konkoor" | "final">("konkoor");
+  const [questionCount, setQuestionCount] = useState(5);
+  const [timeLimit, setTimeLimit] = useState(15);
+  const [activeExam, setActiveExam] = useState<Exam | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioChunks = useRef<BlobPart[]>([]);
+
+  const currentGrade = grades.find((grade) => grade.number === gradeNumber);
+  const selectedBook = books.find((book) => String(book.id) === bookId);
+  const hasMajor = currentGrade?.has_major ?? false;
+  const canAsk = Boolean(bookId && !busy);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [gradeResponse, majorResponse] = await Promise.all([
+          fetch("/api/v1/curriculum/grades"),
+          fetch("/api/v1/curriculum/majors"),
+        ]);
+        if (!gradeResponse.ok || !majorResponse.ok) throw new Error("کتابخانهٔ آموزشی در دسترس نیست");
+        const gradeData = (await gradeResponse.json()) as GradeOption[];
+        const majorData = (await majorResponse.json()) as MajorOption[];
+        if (cancelled) return;
+        setGrades(gradeData);
+        setMajors(majorData);
+        setGradeNumber(gradeData.find((item) => item.number === 12)?.number ?? gradeData[0]?.number ?? null);
+      } catch (error) {
+        if (!cancelled) setCurriculumError(error instanceof Error ? error.message : "خطا در دریافت فهرست کتاب‌ها");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!gradeNumber || (hasMajor && !majorCode)) return;
+    const controller = new AbortController();
+    const query = new URLSearchParams({ grade_number: String(gradeNumber) });
+    if (hasMajor) query.set("major_code", majorCode);
+    fetch(`/api/v1/curriculum/books?${query.toString()}`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok) throw new Error(errorMessage(payload, "کتابی برای این انتخاب پیدا نشد"));
+        setBooks(payload as BookOption[]);
+        setCurriculumError("");
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setCurriculumError(error instanceof Error ? error.message : "خطا در دریافت کتاب‌ها");
+      });
+    return () => controller.abort();
+  }, [gradeNumber, majorCode, hasMajor]);
+
+  const clearAttachments = () => {
+    setImageFile(null);
+    setAudioFile(null);
+    if (imageInputRef.current) imageInputRef.current.value = "";
+  };
+
+  const sendMessage = useCallback(async () => {
+    const query = draft.trim();
+    if ((!query && !imageFile && !audioFile) || !bookId || gradeNumber === null || busy) return;
+    const attachment = imageFile?.name ?? audioFile?.name;
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: query || (imageFile ? "این سؤال را از روی تصویر حل کن." : "این سؤال را از روی صدا پاسخ بده."),
+      attachment,
+    };
+    setMessages((previous) => [...previous, userMessage]);
+    setDraft("");
+    setMessageError("");
+    setBusy(true);
+    try {
+      const response = await (imageFile || audioFile
+        ? (async () => {
+            const form = new FormData();
+            form.set(imageFile ? "image" : "audio", imageFile ?? audioFile as File);
+            form.set("grade_number", String(gradeNumber));
+            form.set("book_id", bookId);
+            if (hasMajor && majorCode) form.set("major_code", majorCode);
+            if (imageFile) return fetch("/api/v1/tutor/ask-image", { method: "POST", body: form });
+            return fetch("/api/v1/tutor/ask-audio", { method: "POST", body: form });
+          })()
+        : fetch("/api/v1/tutor/ask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query, grade_number: gradeNumber, major_code: hasMajor ? majorCode : null, book_id: Number(bookId) }),
+          }));
+      const payload = await response.json();
+      if (!response.ok) throw new Error(errorMessage(payload, "پاسخی دریافت نشد. دوباره تلاش کن."));
+      const result = payload as TutorResponse;
+      const detail = result.recognized_question ? `صورت سؤال خوانده‌شده: ${result.recognized_question}\n\n${result.answer}`
+        : result.transcript ? `متن تشخیص‌داده‌شده: ${result.transcript}\n\n${result.answer}`
+        : result.answer;
+      setMessages((previous) => [...previous, { id: crypto.randomUUID(), role: "assistant", content: detail, sources: result.sources }]);
+      if (result.uncertain_parts?.length) setMessageError(`بخش‌های نامطمئن تصویر: ${result.uncertain_parts.join("، ")}`);
+      clearAttachments();
+    } catch (error) {
+      setMessageError(error instanceof Error ? error.message : "ارتباط با معلم برقرار نشد");
+    } finally {
+      setBusy(false);
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    }
+  }, [audioFile, bookId, busy, draft, gradeNumber, hasMajor, imageFile, majorCode]);
+
+  const startRecording = async () => {
+    if (recording) {
+      recorderRef.current?.stop();
+      setRecording(false);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      audioChunks.current = [];
+      const recorder = new MediaRecorder(stream, MediaRecorder.isTypeSupported("audio/webm") ? { mimeType: "audio/webm" } : undefined);
+      recorder.ondataavailable = (event) => { if (event.data.size) audioChunks.current.push(event.data); };
+      recorder.onstop = () => {
+        const blob = new Blob(audioChunks.current, { type: recorder.mimeType || "audio/webm" });
+        setAudioFile(new File([blob], "question.webm", { type: blob.type }));
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setImageFile(null);
+      setRecording(true);
+      setMessageError("");
+    } catch {
+      setMessageError("برای ضبط صدا، دسترسی میکروفون را در مرورگر فعال کن.");
+    }
+  };
+
+  const createExam = async () => {
+    if (!bookId || gradeNumber === null) return;
+    setBusy(true);
+    setMessageError("");
+    try {
+      const response = await fetch("/api/v1/exams", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grade_number: gradeNumber,
+          major_code: hasMajor ? majorCode : null,
+          book_id: Number(bookId),
+          question_count: questionCount,
+          time_limit_minutes: timeLimit,
+          exam_type: examType,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(errorMessage(payload, "ساخت آزمون انجام نشد"));
+      setActiveExam(payload as Exam);
+      setExamSetupOpen(false);
+    } catch (error) {
+      setMessageError(error instanceof Error ? error.message : "ساخت آزمون انجام نشد");
+      setExamSetupOpen(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const suggestions = useMemo(() => [
+    "فصل حرکت بر خط راست را ساده توضیح بده",
+    "از این مبحث یک مثال مرحله‌به‌مرحله حل کن",
+    "شیب نمودار مکان-زمان چه چیزی را نشان می‌دهد؟",
+  ], []);
+
+  if (activeExam) return <ExamRunner exam={activeExam} onExit={() => setActiveExam(null)} />;
+
+  return (
+    <div className="app-shell" dir="rtl">
+      <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
+        <div className="sidebar-brand">
+          <div className="brand-mark">ه</div>
+          <div><strong>هم‌درس</strong><span>معلم خصوصی هوشمند</span></div>
+          <button className="icon-button mobile-close" aria-label="بستن منو" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
+        </div>
+        <button className="new-chat-button" onClick={() => { setMessages([]); setDraft(""); setSidebarOpen(false); }}><Plus size={18} /> گفت‌وگوی تازه <span>⌘ K</span></button>
+        <div className="sidebar-section-label">فضای یادگیری</div>
+        <button className="sidebar-item active"><BookOpen size={17} /><span>معلم خصوصی</span><span className="side-dot" /></button>
+        <button className="sidebar-item" onClick={() => setExamSetupOpen(true)}><GraduationCap size={17} /><span>آزمون‌های من</span></button>
+        <div className="sidebar-section-label recent-label">گفت‌وگوهای اخیر</div>
+        {messages.length ? <button className="recent-chat"><span className="recent-indicator" />گفت‌وگوی فعلی</button> : <div className="sidebar-empty">گفت‌وگوهای تازه‌ات اینجا<br />ذخیره می‌شوند.</div>}
+        <div className="sidebar-spacer" />
+        <Link className="admin-link" href="/admin"><ShieldCheck size={17} /><span>پنل مدیریت</span><span className="admin-local">محلی</span></Link>
+        <div className="profile-row"><div className="avatar">د</div><div><b>دانش‌آموز</b><span>پلن آزمایشی</span></div><ChevronDown size={16} /></div>
+      </aside>
+      {sidebarOpen && <button className="sidebar-scrim" aria-label="بستن منو" onClick={() => setSidebarOpen(false)} />}
+
+      <main className="main-panel">
+        <header className="topbar">
+          <button className="icon-button mobile-menu" aria-label="بازکردن منو" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
+          <div className="context-title"><span className="online-indicator" /><div><b>{selectedBook?.title ?? "کلاس درس"}</b><span>{currentGrade?.title ?? "انتخاب پایه"}{hasMajor && majorCode ? ` · ${majors.find((major) => major.code === majorCode)?.title ?? ""}` : ""}</span></div><ChevronDown size={15} /></div>
+          <div className="topbar-actions"><span className="private-badge"><ShieldCheck size={14} /> فضای خصوصی</span><button className="icon-button help-button" aria-label="راهنما"><CircleHelp size={18} /></button></div>
+        </header>
+
+        <section className="curriculum-strip">
+          <div className="strip-heading"><span className="strip-icon"><BookOpen size={17} /></span><div><b>کلاس امروزت</b><span>کتابت را انتخاب کن تا معلم دقیقاً با همان منبع کمکت کند.</span></div></div>
+          <div className="selector-row">
+            <label className="select-wrap"><span>پایه</span><select value={gradeNumber ?? ""} onChange={(event) => { setGradeNumber(Number(event.target.value)); setMajorCode(""); setBooks([]); setBookId(""); }}><option value="" disabled>انتخاب پایه</option>{grades.map((grade) => <option key={grade.number} value={grade.number}>{grade.title}</option>)}</select><ChevronDown size={15} /></label>
+            {hasMajor && <label className="select-wrap"><span>رشته</span><select value={majorCode} onChange={(event) => { setMajorCode(event.target.value); setBooks([]); setBookId(""); }}><option value="">انتخاب رشته</option>{majors.map((major) => <option key={major.code} value={major.code}>{major.title}</option>)}</select><ChevronDown size={15} /></label>}
+            <label className="select-wrap book-select"><span>کتاب</span><select value={bookId} onChange={(event) => { setBookId(event.target.value); setMessages([]); }} disabled={!books.length}><option value="">{books.length ? "انتخاب کتاب" : "کتابی در دسترس نیست"}</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title}</option>)}</select><ChevronDown size={15} /></label>
+          </div>
+          {curriculumError && <div className="notice-error">{curriculumError} · مطمئن شو بک‌اند و دیتابیس اجرا هستند.</div>}
+        </section>
+
+        <div className="mode-toolbar">
+          <div className="mode-tabs"><button className="mode-tab selected"><Sparkles size={15} />معلم خصوصی</button><button className="mode-tab" onClick={() => setExamSetupOpen(true)}><GraduationCap size={15} />آزمون واقعی</button></div>
+          <span className="grounding-note"><ShieldCheck size={14} /> پاسخ مستند از کتاب انتخابی</span>
+        </div>
+
+        <section className={`conversation ${messages.length ? "has-messages" : ""}`}>
+          {!messages.length ? (
+            <div className="welcome-state">
+              <div className="welcome-orb"><Sparkles size={25} /></div>
+              <span className="eyebrow">یادگیری با گفت‌وگو</span>
+              <h1>سلام! آماده‌ای<br /><em>با هم یاد بگیریم؟</em></h1>
+              <p>پرسشت را بنویس، از تمرین عکس بگیر یا با صدایت بپرس.<br />من پاسخ را از کتاب درسی انتخابی‌ات پیدا می‌کنم.</p>
+              <div className="suggestion-grid">{suggestions.map((text) => <button key={text} onClick={() => { setDraft(text); inputRef.current?.focus(); }}><span>{text}</span><ArrowUp size={15} /></button>)}</div>
+              <div className="trust-note"><ShieldCheck size={15} /> پاسخ‌ها همراه با ارجاع به فصل و صفحهٔ کتاب ارائه می‌شوند.</div>
+            </div>
+          ) : (
+            <div className="message-list">
+              {messages.map((message) => (
+                <article key={message.id} className={`message-row ${message.role}`}>
+                  {message.role === "assistant" ? <div className="assistant-avatar"><Sparkles size={15} /></div> : <div className="user-avatar">د</div>}
+                  <div className="message-body">
+                    {message.attachment && <div className="attachment-chip">{message.attachment.endsWith(".webm") ? <AudioLines size={15} /> : <FileImage size={15} />}{message.attachment}</div>}
+                    <div className={`message-bubble ${message.role}`}>
+                      {message.role === "assistant" ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</ReactMarkdown></div> : <p>{message.content}</p>}
+                    </div>
+                    {!!message.sources?.length && <div className="source-list"><span><BookOpen size={13} /> منابع کتاب</span>{message.sources.map((source, sourceIndex) => <div className="source-pill" key={`${source.book_id}-${source.pdf_page_index}-${sourceIndex}`}>{sourceText(source)}</div>)}</div>}
+                  </div>
+                </article>
+              ))}
+              {busy && <div className="typing-row"><div className="assistant-avatar"><Sparkles size={15} /></div><div className="typing-bubble"><span /><span /><span />معلم در حال بررسی کتاب است</div></div>}
+              <div id="message-end" />
+            </div>
+          )}
+        </section>
+
+        <footer className="composer-area">
+          {messageError && <div className="inline-error composer-error">{messageError}<button onClick={() => setMessageError("")} aria-label="بستن"><X size={15} /></button></div>}
+          {(imageFile || audioFile) && <div className="attachment-preview"><span>{imageFile ? <FileImage size={15} /> : <AudioLines size={15} />}{imageFile?.name ?? audioFile?.name}</span><button onClick={clearAttachments} aria-label="حذف فایل"><X size={15} /></button></div>}
+          <div className="composer-box">
+            <textarea ref={inputRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder={bookId ? "از معلمت هر چیزی دربارهٔ درس بپرس..." : "اول پایه، رشته و کتابت را انتخاب کن"} disabled={!bookId || busy} rows={2} />
+            <div className="composer-tools">
+              <div className="tool-group">
+                <button className="tool-button" disabled={!bookId || busy} onClick={() => imageInputRef.current?.click()} title="پیوست تصویر"><Paperclip size={18} /><span>تصویر سؤال</span></button>
+                <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) { setImageFile(file); setAudioFile(null); } }} />
+                <button className={`tool-button ${recording ? "recording" : ""}`} disabled={!bookId || busy} onClick={() => void startRecording()} title={recording ? "پایان ضبط" : "ضبط صدا"}>{recording ? <Square size={16} /> : <Mic size={18} />}<span>{recording ? "پایان ضبط" : "صدا"}</span></button>
+                {recording && <span className="recording-status"><i />در حال ضبط</span>}
+              </div>
+              <button className="send-button" disabled={!canAsk || (!draft.trim() && !imageFile && !audioFile)} onClick={() => void sendMessage()} aria-label="ارسال پرسش">{busy ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}</button>
+            </div>
+          </div>
+          <div className="composer-disclaimer"><span>هم‌درس ممکن است اشتباه کند؛ پاسخ را با کتاب درسی تطبیق بده.</span><span><Check size={13} /> اطلاعات رسانه‌ای برای این پرسش ذخیره نمی‌شود</span></div>
+        </footer>
+      </main>
+
+      {examSetupOpen && <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setExamSetupOpen(false); }}>
+        <section className="exam-setup-modal" role="dialog" aria-modal="true" aria-labelledby="exam-modal-title">
+          <button className="modal-close icon-button" onClick={() => setExamSetupOpen(false)} aria-label="بستن"><X size={18} /></button>
+          <div className="modal-icon"><GraduationCap size={22} /></div><span className="eyebrow">سنجش یادگیری</span><h2 id="exam-modal-title">آزمونت را تنظیم کن</h2><p>سؤال‌ها از صفحه‌های تأییدشدهٔ کتاب انتخابی طراحی می‌شوند.</p>
+          <label className="form-field"><span>نوع آزمون</span><select value={examType} onChange={(event) => setExamType(event.target.value as "konkoor" | "final")}><option value="konkoor">کنکوری — با نمرهٔ منفی</option><option value="final">تمرینی — نمره از ۲۰</option></select></label>
+          <div className="form-row"><label className="form-field"><span>تعداد سؤال</span><select value={questionCount} onChange={(event) => setQuestionCount(Number(event.target.value))}>{[3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count} سؤال</option>)}</select></label><label className="form-field"><span>زمان</span><select value={timeLimit} onChange={(event) => setTimeLimit(Number(event.target.value))}>{[5, 10, 15, 20, 30, 45, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} دقیقه</option>)}</select></label></div>
+          {messageError && <div className="inline-error">{messageError}</div>}
+          <button className="primary-button modal-submit" disabled={!bookId || busy} onClick={() => void createExam()}>{busy ? <LoaderCircle className="spin" size={17} /> : <GraduationCap size={17} />}شروع آزمون</button>
+          {!bookId && <small className="modal-hint">برای ساخت آزمون، ابتدا کتابت را انتخاب کن.</small>}
+        </section>
+      </div>}
+    </div>
+  );
+}
