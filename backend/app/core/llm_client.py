@@ -172,6 +172,39 @@ async def _complete(
     return response.choices[0].message.content, _usage_dict(response.usage)
 
 
+async def complete_json(model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+    """Request structured JSON through the shared LLM wrapper with retries."""
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            json_messages = list(messages)
+            guard = {"role": "system", "content": "Return only one valid JSON object."}
+            json_messages.insert(1 if json_messages and json_messages[0]["role"] == "system" else 0, guard)
+            async with _get_semaphore():
+                content, _usage = await _complete(model, json_messages)
+            return extract_json(content)
+        except Exception as error:  # noqa: BLE001 - classified below
+            if not _is_retryable(error) or attempt == MAX_RETRIES:
+                _log(
+                    logging.ERROR,
+                    "llm.complete_json.failed",
+                    model=model,
+                    error_type=type(error).__name__,
+                    error=str(error)[:300],
+                )
+                raise
+            delay = BACKOFF_BASE_SECONDS * (2**attempt) + random.uniform(0, 0.5)
+            _log(
+                logging.WARNING,
+                "llm.complete_json.retry",
+                model=model,
+                attempt=attempt + 1,
+                delay_s=round(delay, 2),
+                error_type=type(error).__name__,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 def _get_embedding_client() -> AsyncOpenAI:
     global _embedding_client
     if _embedding_client is None:

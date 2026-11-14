@@ -33,7 +33,11 @@ async def health(session: AsyncSession = Depends(get_session)) -> dict[str, str]
 
 
 from app.api.admin import router as admin_router  # noqa: E402
+from app.api.curriculum import router as curriculum_router  # noqa: E402
+from app.api.exams import router as exams_router  # noqa: E402
 from app.api.tutor import router as tutor_router  # noqa: E402
 
 app.include_router(admin_router)
+app.include_router(curriculum_router)
 app.include_router(tutor_router)
+app.include_router(exams_router)
