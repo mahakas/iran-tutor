@@ -191,7 +191,11 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
         async def fake_embed_texts(texts):
             return [[1.0, 0.0] for _ in texts]
 
+        async def no_lexical_results(*args, **kwargs):
+            return []
+
         monkeypatch.setattr(retrieval_service, "embed_texts", fake_embed_texts)
+        monkeypatch.setattr(retrieval_service, "_search_postgres", no_lexical_results)
         results = await retrieval_service.search_textbook(
             "شتاب چیست؟",
             grade_number=12,

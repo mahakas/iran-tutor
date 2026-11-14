@@ -35,6 +35,7 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 _client: AsyncOpenAI | None = None
 _embedding_client: AsyncOpenAI | None = None
+_audio_client: AsyncOpenAI | None = None
 _semaphore: asyncio.Semaphore | None = None
 # Models whose provider rejected `response_format=json_object`.
 _json_mode_unsupported: set[str] = set()
@@ -171,6 +172,39 @@ async def _complete(
     return response.choices[0].message.content, _usage_dict(response.usage)
 
 
+async def complete_json(model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+    """Request structured JSON through the shared LLM wrapper with retries."""
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            json_messages = list(messages)
+            guard = {"role": "system", "content": "Return only one valid JSON object."}
+            json_messages.insert(1 if json_messages and json_messages[0]["role"] == "system" else 0, guard)
+            async with _get_semaphore():
+                content, _usage = await _complete(model, json_messages)
+            return extract_json(content)
+        except Exception as error:  # noqa: BLE001 - classified below
+            if not _is_retryable(error) or attempt == MAX_RETRIES:
+                _log(
+                    logging.ERROR,
+                    "llm.complete_json.failed",
+                    model=model,
+                    error_type=type(error).__name__,
+                    error=str(error)[:300],
+                )
+                raise
+            delay = BACKOFF_BASE_SECONDS * (2**attempt) + random.uniform(0, 0.5)
+            _log(
+                logging.WARNING,
+                "llm.complete_json.retry",
+                model=model,
+                attempt=attempt + 1,
+                delay_s=round(delay, 2),
+                error_type=type(error).__name__,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 def _get_embedding_client() -> AsyncOpenAI:
     global _embedding_client
     if _embedding_client is None:
@@ -277,11 +311,62 @@ async def complete_text(model: str, messages: list[dict[str, str]]) -> str:
     raise RuntimeError("unreachable")  # pragma: no cover
 
 
+def _get_audio_client() -> AsyncOpenAI:
+    global _audio_client
+    if _audio_client is None:
+        settings = get_settings()
+        _audio_client = AsyncOpenAI(
+            base_url=settings.audio_base_url or settings.llm_base_url,
+            api_key=settings.audio_api_key or settings.llm_api_key,
+            timeout=settings.llm_timeout,
+            max_retries=0,
+        )
+    return _audio_client
+
+
+async def transcribe_audio(
+    audio_bytes: bytes, *, filename: str, content_type: str, model: str | None = None
+) -> str:
+    """Transcribe Persian audio through a configurable OpenAI-compatible API."""
+    settings = get_settings()
+    transcription_model = model or settings.speech_to_text_model
+    if not transcription_model:
+        raise RuntimeError("SPEECH_TO_TEXT_MODEL must be configured for voice questions")
+    if not audio_bytes:
+        raise ValueError("audio file is empty")
+
+    client = _get_audio_client()
+    async with _get_semaphore():
+        response = await client.audio.transcriptions.create(
+            model=transcription_model,
+            file=(filename, audio_bytes, content_type),
+            language="fa",
+        )
+    text = getattr(response, "text", "")
+    if not text or not text.strip():
+        raise ValueError("audio transcription returned no text")
+    _log(logging.INFO, "llm.transcribe_audio.ok", model=transcription_model)
+    return text.strip()
+
+
+async def close_llm_clients() -> None:
+    """Dispose provider HTTP clients during application shutdown."""
+    global _client, _embedding_client, _audio_client
+    clients = (_client, _embedding_client, _audio_client)
+    _client = None
+    _embedding_client = None
+    _audio_client = None
+    for client in clients:
+        if client is not None:
+            await client.close()
+
+
 async def vision_json(
     model: str,
     system_prompt: str,
     user_text: str,
     image_png_bytes: bytes,
+    image_mime_type: str = "image/png",
 ) -> tuple[dict[str, Any], dict[str, int | None]]:
     """Send one PNG plus text to a vision model and return `(parsed_dict, usage)`.
 
@@ -297,7 +382,7 @@ async def vision_json(
                 {"type": "text", "text": user_text},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                    "image_url": {"url": f"data:{image_mime_type};base64,{image_b64}"},
                 },
             ],
         },
