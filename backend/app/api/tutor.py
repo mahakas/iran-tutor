@@ -11,11 +11,11 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import resolve_book_scope
 from app.db.session import get_session
-from app.models.curriculum import Book, Grade, Major
+from app.models.curriculum import Book, Grade
 from app.services.multimodal_service import answer_audio_question, answer_image_question
 from app.services.tutor_service import answer_from_textbook
-from app.services.validation import validate_major_code
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/tutor", tags=["tutor"])
@@ -54,27 +54,6 @@ class AskRequest(BaseModel):
     major_code: str | None = Field(default=None, max_length=64)
     book_id: int = Field(gt=0)
     top_k: int = Field(default=5, ge=1, le=20)
-
-
-async def _resolve_book_scope(
-    session: AsyncSession, *, book_id: int, grade_number: int, major_code: str | None
-) -> tuple[Book, Grade, str | None]:
-    book = await session.get(Book, book_id)
-    if book is None:
-        raise HTTPException(status_code=404, detail="book not found")
-    grade = await session.get(Grade, book.grade_id)
-    if grade is None or grade.number != grade_number:
-        raise HTTPException(status_code=422, detail="book does not belong to the selected grade")
-
-    major_error = validate_major_code(grade.has_major, major_code)
-    if major_error:
-        raise HTTPException(status_code=422, detail=major_error)
-
-    book_major = await session.get(Major, book.major_id) if book.major_id is not None else None
-    expected_major = book_major.code if book_major is not None else None
-    if major_code != expected_major:
-        raise HTTPException(status_code=422, detail="book does not belong to the selected major")
-    return book, grade, expected_major
 
 
 async def _read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
@@ -121,7 +100,7 @@ def _provider_failure(error: Exception, *, operation: str) -> HTTPException:
 async def ask_tutor(
     body: AskRequest, session: AsyncSession = Depends(get_session)
 ) -> dict[str, object]:
-    book, grade, major_code = await _resolve_book_scope(
+    book, grade, major_code = await resolve_book_scope(
         session,
         book_id=body.book_id,
         grade_number=body.grade_number,
@@ -150,7 +129,7 @@ async def ask_tutor_with_image(
 ) -> dict[str, object]:
     if not 1 <= grade_number <= 12 or book_id <= 0 or not 1 <= top_k <= 20:
         raise HTTPException(status_code=422, detail="invalid grade, book, or result limit")
-    book, grade, major_code = await _resolve_book_scope(
+    book, grade, major_code = await resolve_book_scope(
         session,
         book_id=book_id,
         grade_number=grade_number,
@@ -182,7 +161,7 @@ async def ask_tutor_with_audio(
 ) -> dict[str, object]:
     if not 1 <= grade_number <= 12 or book_id <= 0 or not 1 <= top_k <= 20:
         raise HTTPException(status_code=422, detail="invalid grade, book, or result limit")
-    book, grade, major_code = await _resolve_book_scope(
+    book, grade, major_code = await resolve_book_scope(
         session,
         book_id=book_id,
         grade_number=grade_number,
