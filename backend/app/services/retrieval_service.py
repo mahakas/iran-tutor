@@ -8,7 +8,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import AsyncQdrantClient, models
-from sqlalchemy import select
+from sqlalchemy import Text, cast, func, select
 
 from app.core.config import get_settings
 from app.core.llm_client import embed_texts
@@ -165,20 +165,96 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
     }
 
 
-async def search_textbook(
+async def _search_postgres(
+    query: str, *, grade_number: int, major_code: str | None, book_id: int, limit: int
+) -> list[dict[str, Any]]:
+    """Keyword/full-text channel over approved PostgreSQL pages."""
+    ts_document = func.to_tsvector(
+        "simple",
+        func.concat(
+            func.coalesce(BookPage.markdown_content, ""),
+            " ",
+            cast(BookPage.visual_elements, Text),
+        ),
+    )
+    ts_query = func.plainto_tsquery("simple", query)
+    rank = func.ts_rank_cd(ts_document, ts_query).label("lexical_score")
+    selected_major = major_code or "general"
+
+    async with async_session_factory() as session:
+        statement = (
+            select(BookPage, Book.title, Grade.number, func.coalesce(Major.code, "general"), rank)
+            .join(Book, BookPage.book_id == Book.id)
+            .join(Grade, Book.grade_id == Grade.id)
+            .outerjoin(Major, Book.major_id == Major.id)
+            .where(
+                Book.id == book_id,
+                Grade.number == grade_number,
+                func.coalesce(Major.code, "general") == selected_major,
+                BookPage.status == PageStatus.done,
+                ts_document.op("@@")(ts_query),
+            )
+            .order_by(rank.desc(), BookPage.pdf_page_index.asc())
+            .limit(limit)
+        )
+        rows = (await session.execute(statement)).all()
+
+    matches: list[dict[str, Any]] = []
+    for page, title, grade, major, lexical_score in rows:
+        full_text = page_embedding_text(page.markdown_content, page.visual_elements)
+        matches.append(
+            {
+                "book_id": page.book_id,
+                "book_title": title,
+                "grade_number": grade,
+                "major_code": major,
+                "pdf_page_index": page.pdf_page_index,
+                "printed_page_number": page.printed_page_number,
+                "chapter_number": page.chapter_number,
+                "chapter_title": page.chapter_title,
+                "full_text": full_text,
+                "markdown_content": page.markdown_content,
+                "visual_elements": page.visual_elements or [],
+                "lexical_score": float(lexical_score),
+            }
+        )
+    return matches
+
+
+def merge_hybrid_results(
+    vector_results: Sequence[dict[str, Any]],
+    lexical_results: Sequence[dict[str, Any]],
+    *,
+    top_k: int,
+    rrf_k: int = 60,
+) -> list[dict[str, Any]]:
+    """Fuse ranked vector and lexical results using reciprocal-rank fusion."""
+    merged: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for channel, results in (("vector", vector_results), ("lexical", lexical_results)):
+        for rank, result in enumerate(results, start=1):
+            identity = (result.get("book_id"), result.get("pdf_page_index"))
+            if identity not in merged:
+                merged[identity] = {key: value for key, value in result.items() if key != "score"}
+                merged[identity]["score"] = 0.0
+            record = merged[identity]
+            for key, value in result.items():
+                if key != "score" and value is not None:
+                    record.setdefault(key, value)
+            record[f"{channel}_rank"] = rank
+            record[f"{channel}_score"] = result.get("score", result.get("lexical_score"))
+            record["score"] += 1.0 / (rrf_k + rank)
+
+    return sorted(merged.values(), key=lambda item: item["score"], reverse=True)[:top_k]
+
+
+async def _search_qdrant(
     query: str,
     *,
     grade_number: int,
     major_code: str | None,
     book_id: int,
-    top_k: int = 5,
+    limit: int,
 ) -> list[dict[str, Any]]:
-    """Search only within the exact selected grade, major, and book."""
-    if not query.strip():
-        raise ValueError("query must not be empty")
-    if top_k < 1 or top_k > 20:
-        raise ValueError("top_k must be between 1 and 20")
-
     vector = (await embed_texts([query]))[0]
     settings = get_settings()
     response = await _get_qdrant().query_points(
@@ -187,12 +263,55 @@ async def search_textbook(
         query_filter=make_textbook_filter(
             grade_number=grade_number, major_code=major_code, book_id=book_id
         ),
-        limit=top_k,
+        limit=limit,
         with_payload=True,
         score_threshold=0.15,
     )
-    results: list[dict[str, Any]] = []
-    for point in response.points:
-        payload = point.payload or {}
-        results.append({**payload, "score": float(point.score)})
-    return results
+    return [
+        {**(point.payload or {}), "score": float(point.score)} for point in response.points
+    ]
+
+
+async def search_textbook(
+    query: str,
+    *,
+    grade_number: int,
+    major_code: str | None,
+    book_id: int,
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """Hybrid search, always scoped to the exact selected grade, major, and book.
+
+    PostgreSQL's `simple` full-text search and Qdrant vector search are fused
+    with reciprocal-rank fusion. If the vector provider/Qdrant is unavailable,
+    approved PostgreSQL lexical matches remain usable.
+    """
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    if top_k < 1 or top_k > 20:
+        raise ValueError("top_k must be between 1 and 20")
+
+    candidate_limit = min(max(top_k * 4, 20), 100)
+    lexical_results = await _search_postgres(
+        query,
+        grade_number=grade_number,
+        major_code=major_code,
+        book_id=book_id,
+        limit=candidate_limit,
+    )
+
+    try:
+        vector_results = await _search_qdrant(
+            query,
+            grade_number=grade_number,
+            major_code=major_code,
+            book_id=book_id,
+            limit=candidate_limit,
+        )
+    except Exception:  # noqa: BLE001 - lexical fallback is intentional
+        logger.exception("vector search unavailable; using PostgreSQL lexical results")
+        vector_results = []
+
+    return merge_hybrid_results(
+        vector_results, lexical_results, top_k=top_k
+    )
