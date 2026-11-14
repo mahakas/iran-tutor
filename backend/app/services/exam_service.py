@@ -62,12 +62,30 @@ def validate_questions(
     return question_set.questions
 
 
-def public_exam(session: ExamSession) -> dict[str, Any]:
+def _utc_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def effective_exam_status(session: ExamSession, *, now: datetime | None = None) -> str:
+    status = session.status.value if hasattr(session.status, "value") else str(session.status)
+    if status == ExamStatus.active.value:
+        expires_at = session.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        if current > expires_at:
+            return ExamStatus.expired.value
+    return status
+
+
+def public_exam(session: ExamSession, *, include_report: bool = False) -> dict[str, Any]:
     """Return questions without answer keys or explanations before submission."""
-    expires_at = session.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    return {
+    status = effective_exam_status(session)
+    payload: dict[str, Any] = {
         "id": session.id,
         "book_id": session.book_id,
         "grade_number": session.grade_number,
@@ -75,8 +93,8 @@ def public_exam(session: ExamSession) -> dict[str, Any]:
         "title": session.title,
         "exam_type": session.exam_type,
         "time_limit_seconds": session.time_limit_seconds,
-        "expires_at": expires_at.isoformat(),
-        "status": session.status.value if hasattr(session.status, "value") else session.status,
+        "expires_at": _utc_iso(session.expires_at),
+        "status": status,
         "questions": [
             {
                 "id": question["id"],
@@ -87,6 +105,44 @@ def public_exam(session: ExamSession) -> dict[str, Any]:
             }
             for question in session.questions
         ],
+    }
+    if include_report and status == ExamStatus.submitted.value:
+        report_card = getattr(session, "report_card", None)
+        if report_card is not None:
+            payload["report_card"] = report_card
+            payload["submitted_answers"] = getattr(session, "submitted_answers", None) or {}
+    return payload
+
+
+def exam_summary(session: ExamSession, *, book_title: str | None = None) -> dict[str, Any]:
+    """Return compact metadata and score summary for the student's exam history list."""
+    status = effective_exam_status(session)
+    report_card = getattr(session, "report_card", None)
+    summary: dict[str, Any] | None = None
+    if status == ExamStatus.submitted.value and isinstance(report_card, dict):
+        summary = {
+            "score": report_card.get("score"),
+            "scale": report_card.get("scale"),
+            "correct": report_card.get("correct"),
+            "wrong": report_card.get("wrong"),
+            "unanswered": report_card.get("unanswered"),
+            "total_questions": report_card.get("total_questions"),
+        }
+    return {
+        "id": session.id,
+        "title": session.title,
+        "book_id": session.book_id,
+        "book_title": book_title,
+        "grade_number": session.grade_number,
+        "major_code": session.major_code,
+        "exam_type": session.exam_type,
+        "status": status,
+        "question_count": len(session.questions or []),
+        "time_limit_seconds": session.time_limit_seconds,
+        "expires_at": _utc_iso(session.expires_at),
+        "created_at": _utc_iso(getattr(session, "created_at", None)),
+        "submitted_at": _utc_iso(getattr(session, "submitted_at", None)),
+        "report_summary": summary,
     }
 
 

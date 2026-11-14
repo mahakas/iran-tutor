@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ArrowLeft, ArrowRight, Check, Clock3, LoaderCircle, Send } from "lucide-react";
+import MathContent from "@/components/MathContent";
 import type { Exam, ExamReport } from "@/lib/types";
 
 type Props = { exam: Exam; onExit: () => void };
@@ -24,24 +25,33 @@ function parseUtcMs(isoTimestamp: string): number {
 }
 
 export default function ExamRunner({ exam, onExit }: Props) {
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [answers, setAnswers] = useState<Record<string, string>>(() => {
+    const restored: Record<string, string> = {};
+    for (const [key, value] of Object.entries(exam.submitted_answers ?? {})) {
+      if (value) restored[key] = value;
+    }
+    return restored;
+  });
   const [index, setIndex] = useState(0);
   const [secondsLeft, setSecondsLeft] = useState(() => Math.max(0, Math.ceil((parseUtcMs(exam.expires_at) - Date.now()) / 1000)));
-  const [report, setReport] = useState<ExamReport | null>(null);
+  const [report, setReport] = useState<ExamReport | null>(() =>
+    exam.status === "submitted" && exam.report_card ? exam.report_card : null
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const sent = useRef(false);
+  const sent = useRef(exam.status === "submitted" && Boolean(exam.report_card));
   const autoSubmitted = useRef(false);
   const question = exam.questions[index];
   const answeredCount = Object.keys(answers).length;
   const progress = useMemo(() => ((index + 1) / exam.questions.length) * 100, [index, exam.questions.length]);
 
   useEffect(() => {
+    if (report) return;
     const timer = window.setInterval(() => {
       setSecondsLeft(Math.max(0, Math.ceil((parseUtcMs(exam.expires_at) - Date.now()) / 1000)));
     }, 500);
     return () => window.clearInterval(timer);
-  }, [exam.expires_at]);
+  }, [exam.expires_at, report]);
 
   const submit = useCallback(async () => {
     if (sent.current || report) return;
@@ -95,13 +105,17 @@ export default function ExamRunner({ exam, onExit }: Props) {
           </div>
           <div className="review-list">
             <h2>مرور پاسخ‌ها</h2>
-            {report.by_question.map((item, itemIndex) => (
-              <article className={`review-card ${item.correct ? "is-correct" : "is-wrong"}`} key={item.id}>
-                <div className="review-title"><span className="question-number">{itemIndex + 1}</span><b>{item.correct ? "پاسخ درست" : "نیاز به مرور"}</b><span>پاسخ شما: {item.answer ?? "بدون پاسخ"} · پاسخ درست: {item.correct_option}</span></div>
-                <p>{item.explanation}</p>
-                {sourceLabel(item.source) && <small>منبع: {sourceLabel(item.source)}</small>}
-              </article>
-            ))}
+            {report.by_question.map((item, itemIndex) => {
+              const prompt = exam.questions.find((q) => q.id === item.id)?.prompt;
+              return (
+                <article className={`review-card ${item.correct ? "is-correct" : "is-wrong"}`} key={item.id}>
+                  <div className="review-title"><span className="question-number">{itemIndex + 1}</span><b>{item.correct ? "پاسخ درست" : "نیاز به مرور"}</b><span>پاسخ شما: {item.answer ?? "بدون پاسخ"} · پاسخ درست: {item.correct_option}</span></div>
+                  {prompt && <div className="review-prompt"><MathContent content={prompt} inline /></div>}
+                  <MathContent content={item.explanation} />
+                  {sourceLabel(item.source) && <small>منبع: {sourceLabel(item.source)}</small>}
+                </article>
+              );
+            })}
           </div>
         </section>
       </main>
@@ -129,11 +143,11 @@ export default function ExamRunner({ exam, onExit }: Props) {
         <section className="exam-question card-surface">
           <div className="exam-progress"><span style={{ width: `${progress}%` }} /></div>
           <div className="exam-question-meta"><span>سؤال {index + 1} از {exam.questions.length}</span><span>{question?.points ?? 1} نمره</span></div>
-          <h1>{question?.prompt}</h1>
+          <h1><MathContent content={question?.prompt ?? ""} inline /></h1>
           <div className="choices-list">
             {(["A", "B", "C", "D"] as const).map((choice) => (
               <button key={choice} className={`choice-card ${answers[question?.id] === choice ? "selected" : ""}`} onClick={() => selectAnswer(choice)}>
-                <span className="choice-letter">{choice}</span><span>{question?.choices[choice]}</span>
+                <span className="choice-letter">{choice}</span><span className="choice-text"><MathContent content={question?.choices[choice] ?? ""} inline /></span>
                 {answers[question?.id] === choice && <Check size={18} className="choice-check" />}
               </button>
             ))}

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import io
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import resolve_book_scope
 from app.db.session import get_session
+from app.models.chat import ChatSession
 from app.models.curriculum import Book, Grade
 from app.services.multimodal_service import answer_audio_question, answer_image_question
 from app.services.tutor_service import TutorMode, answer_from_textbook
@@ -55,6 +59,54 @@ class AskRequest(BaseModel):
     book_id: int = Field(gt=0)
     top_k: int = Field(default=5, ge=1, le=20)
     mode: TutorMode = "tutor"
+
+
+class ChatMessageItem(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=20000)
+    sources: list[dict[str, Any]] | None = None
+    attachment: str | None = None
+
+
+class CreateChatSessionRequest(BaseModel):
+    book_id: int = Field(gt=0)
+    grade_number: int = Field(ge=1, le=12)
+    major_code: str | None = Field(default=None, max_length=64)
+    mode: TutorMode = "tutor"
+    title: str = Field(min_length=1, max_length=255)
+    messages: list[ChatMessageItem] = Field(min_length=1, max_length=200)
+
+
+class UpdateChatSessionRequest(BaseModel):
+    mode: TutorMode | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    messages: list[ChatMessageItem] = Field(min_length=1, max_length=200)
+
+
+def _utc_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def _serialize_chat_summary(
+    chat: ChatSession, *, book_title: str | None = None
+) -> dict[str, object]:
+    return {
+        "id": chat.id,
+        "title": chat.title,
+        "book_id": chat.book_id,
+        "book_title": book_title,
+        "grade_number": chat.grade_number,
+        "major_code": chat.major_code,
+        "mode": chat.mode,
+        "message_count": len(chat.messages or []),
+        "created_at": _utc_iso(chat.created_at),
+        "updated_at": _utc_iso(chat.updated_at),
+    }
 
 
 async def _read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
@@ -192,3 +244,99 @@ async def ask_tutor_with_audio(
         )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="voice tutor") from error
+
+
+@router.get("/sessions")
+async def list_chat_sessions(
+    limit: int = Query(default=30, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, object]]:
+    rows = (
+        await session.execute(
+            select(ChatSession, Book.title)
+            .outerjoin(Book, ChatSession.book_id == Book.id)
+            .order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return [_serialize_chat_summary(chat, book_title=book_title) for chat, book_title in rows]
+
+
+@router.post("/sessions")
+async def create_chat_session(
+    body: CreateChatSessionRequest, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    book, grade, major_code = await resolve_book_scope(
+        session,
+        book_id=body.book_id,
+        grade_number=body.grade_number,
+        major_code=body.major_code,
+    )
+    now = datetime.now(timezone.utc)
+    chat = ChatSession(
+        book_id=book.id,
+        grade_number=grade.number,
+        major_code=major_code,
+        mode=body.mode,
+        title=body.title.strip()[:255] or "گفت‌وگو با معلم",
+        messages=[item.model_dump() for item in body.messages],
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(chat)
+    await session.commit()
+    await session.refresh(chat)
+    return {**_serialize_chat_summary(chat, book_title=book.title), "messages": chat.messages}
+
+
+@router.get("/sessions/{session_id}")
+async def get_chat_session(
+    session_id: str, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    row = (
+        await session.execute(
+            select(ChatSession, Book.title)
+            .outerjoin(Book, ChatSession.book_id == Book.id)
+            .where(ChatSession.id == session_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="chat session not found")
+    chat, book_title = row
+    return {**_serialize_chat_summary(chat, book_title=book_title), "messages": chat.messages}
+
+
+@router.put("/sessions/{session_id}")
+async def update_chat_session(
+    session_id: str,
+    body: UpdateChatSessionRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    chat = await session.get(ChatSession, session_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="chat session not found")
+    if body.title is not None:
+        chat.title = body.title.strip()[:255] or chat.title
+    if body.mode is not None:
+        chat.mode = body.mode
+    chat.messages = [item.model_dump() for item in body.messages]
+    chat.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(chat)
+    book = await session.get(Book, chat.book_id)
+    return {
+        **_serialize_chat_summary(chat, book_title=book.title if book else None),
+        "messages": chat.messages,
+    }
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_chat_session(
+    session_id: str, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    chat = await session.get(ChatSession, session_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="chat session not found")
+    await session.delete(chat)
+    await session.commit()
+    return {"deleted": True, "id": session_id}

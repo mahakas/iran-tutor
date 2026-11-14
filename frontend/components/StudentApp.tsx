@@ -2,24 +2,26 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import ReactMarkdown from "react-markdown";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
 import {
-  ArrowDown, ArrowUp, AudioLines, BookOpen, Check, ChevronDown, CircleHelp,
-  FileImage, GraduationCap, LoaderCircle, Menu, Mic, Paperclip, Plus, Send,
-  ShieldCheck, Sparkles, Square, X,
+  ArrowUp, AudioLines, BookOpen, Check, ChevronDown, CircleHelp, Clock3,
+  FileImage, GraduationCap, LoaderCircle, Menu, MessageSquare, Mic, Paperclip,
+  Plus, Send, ShieldCheck, Sparkles, Square, Trash2, X,
 } from "lucide-react";
 import ExamRunner from "@/components/ExamRunner";
-import type { BookOption, Exam, GradeOption, MajorOption, Source, TutorMode, TutorResponse } from "@/lib/types";
-
-type Message = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  sources?: Source[];
-  attachment?: string;
-};
+import MathContent from "@/components/MathContent";
+import type {
+  BookOption,
+  ChatMessage,
+  ChatSessionDetail,
+  ChatSessionSummary,
+  Exam,
+  ExamSummary,
+  GradeOption,
+  MajorOption,
+  Source,
+  TutorMode,
+  TutorResponse,
+} from "@/lib/types";
 
 function errorMessage(payload: unknown, fallback: string) {
   if (payload && typeof payload === "object" && "detail" in payload && typeof payload.detail === "string") return payload.detail;
@@ -34,6 +36,23 @@ function sourceText(source: Source) {
   ].filter(Boolean).join(" · ");
 }
 
+function formatFaDate(iso: string | null) {
+  if (!iso) return "";
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return "";
+  try {
+    return new Intl.DateTimeFormat("fa-IR", { dateStyle: "short", timeStyle: "short" }).format(ms);
+  } catch {
+    return "";
+  }
+}
+
+function makeChatTitle(text: string) {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean) return "گفت‌وگو با معلم";
+  return clean.length > 44 ? `${clean.slice(0, 44)}…` : clean;
+}
+
 export default function StudentApp() {
   const [grades, setGrades] = useState<GradeOption[]>([]);
   const [majors, setMajors] = useState<MajorOption[]>([]);
@@ -43,7 +62,11 @@ export default function StudentApp() {
   const [bookId, setBookId] = useState("");
   const [curriculumError, setCurriculumError] = useState("");
   const [demoMode, setDemoMode] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [chatHistory, setChatHistory] = useState<ChatSessionSummary[]>([]);
+  const [examHistory, setExamHistory] = useState<ExamSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [messageError, setMessageError] = useState("");
@@ -53,6 +76,7 @@ export default function StudentApp() {
   const [recording, setRecording] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [examSetupOpen, setExamSetupOpen] = useState(false);
+  const [examHistoryOpen, setExamHistoryOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [examType, setExamType] = useState<"konkoor" | "final">("konkoor");
   const [questionCount, setQuestionCount] = useState(5);
@@ -68,6 +92,28 @@ export default function StudentApp() {
   const selectedBook = books.find((book) => String(book.id) === bookId);
   const hasMajor = currentGrade?.has_major ?? false;
   const canAsk = Boolean(bookId && !busy);
+
+  const loadChatHistory = useCallback(async () => {
+    try {
+      const response = await fetch("/api/v1/tutor/sessions", { cache: "no-store" });
+      if (!response.ok) return;
+      const items = (await response.json()) as ChatSessionSummary[];
+      setChatHistory(items);
+    } catch {
+      // Ignore silent history fetch failure
+    }
+  }, []);
+
+  const loadExamHistory = useCallback(async () => {
+    try {
+      const response = await fetch("/api/v1/exams", { cache: "no-store" });
+      if (!response.ok) return;
+      const items = (await response.json()) as ExamSummary[];
+      setExamHistory(items);
+    } catch {
+      // Ignore silent history fetch failure
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -97,6 +143,14 @@ export default function StudentApp() {
       .then((response) => response.ok ? response.json() : null)
       .then((status: { mode?: string } | null) => { if (active) setDemoMode(status?.mode === "demo"); })
       .catch(() => { if (active) setDemoMode(false); });
+    fetch("/api/v1/tutor/sessions", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((items: ChatSessionSummary[] | null) => { if (active && items) setChatHistory(items); })
+      .catch(() => undefined);
+    fetch("/api/v1/exams", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((items: ExamSummary[] | null) => { if (active && items) setExamHistory(items); })
+      .catch(() => undefined);
     return () => { active = false; };
   }, []);
 
@@ -127,6 +181,7 @@ export default function StudentApp() {
 
   const resetChat = useCallback(() => {
     setMessages([]);
+    setActiveChatId(null);
     setDraft("");
     setMessageError("");
     clearAttachments();
@@ -150,17 +205,65 @@ export default function StudentApp() {
     document.getElementById("message-end")?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, busy]);
 
+  const persistConversation = useCallback(
+    async (
+      existingSessionId: string | null,
+      nextMessages: ChatMessage[],
+      firstPrompt: string,
+      selectedGrade: number,
+      selectedMajor: string | null,
+      selectedBookId: number,
+      mode: TutorMode
+    ) => {
+      try {
+        if (existingSessionId) {
+          const response = await fetch(`/api/v1/tutor/sessions/${existingSessionId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode, messages: nextMessages }),
+          });
+          if (response.ok) {
+            await loadChatHistory();
+            return existingSessionId;
+          }
+        }
+        const response = await fetch("/api/v1/tutor/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            book_id: selectedBookId,
+            grade_number: selectedGrade,
+            major_code: selectedMajor,
+            mode,
+            title: makeChatTitle(firstPrompt),
+            messages: nextMessages,
+          }),
+        });
+        if (!response.ok) return existingSessionId;
+        const created = (await response.json()) as ChatSessionDetail;
+        setActiveChatId(created.id);
+        await loadChatHistory();
+        return created.id;
+      } catch {
+        return existingSessionId;
+      }
+    },
+    [loadChatHistory]
+  );
+
   const sendMessage = useCallback(async () => {
     const query = draft.trim();
     if ((!query && !imageFile && !audioFile) || !bookId || gradeNumber === null || busy) return;
     const attachment = imageFile?.name ?? audioFile?.name;
-    const userMessage: Message = {
+    const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
       content: query || (imageFile ? "این سؤال را از روی تصویر حل کن." : "این سؤال را از روی صدا پاسخ بده."),
       attachment,
     };
-    setMessages((previous) => [...previous, userMessage]);
+    const priorMessages = messages;
+    const withUser = [...priorMessages, userMessage];
+    setMessages(withUser);
     setDraft("");
     setMessageError("");
     setBusy(true);
@@ -187,16 +290,88 @@ export default function StudentApp() {
       const detail = result.recognized_question ? `صورت سؤال خوانده‌شده: ${result.recognized_question}\n\n${result.answer}`
         : result.transcript ? `متن تشخیص‌داده‌شده: ${result.transcript}\n\n${result.answer}`
         : result.answer;
-      setMessages((previous) => [...previous, { id: crypto.randomUUID(), role: "assistant", content: detail, sources: result.sources }]);
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: detail,
+        sources: result.sources,
+      };
+      const fullThread = [...withUser, assistantMessage];
+      setMessages(fullThread);
       if (result.uncertain_parts?.length) setMessageError(`بخش‌های نامطمئن تصویر: ${result.uncertain_parts.join("، ")}`);
       clearAttachments();
+      await persistConversation(
+        activeChatId,
+        fullThread,
+        userMessage.content,
+        gradeNumber,
+        hasMajor ? majorCode : null,
+        Number(bookId),
+        tutoringMode
+      );
     } catch (error) {
       setMessageError(error instanceof Error ? error.message : "ارتباط با معلم برقرار نشد");
     } finally {
       setBusy(false);
       window.setTimeout(() => inputRef.current?.focus(), 0);
     }
-  }, [audioFile, bookId, busy, clearAttachments, draft, gradeNumber, hasMajor, imageFile, majorCode, tutoringMode]);
+  }, [activeChatId, audioFile, bookId, busy, clearAttachments, draft, gradeNumber, hasMajor, imageFile, majorCode, messages, persistConversation, tutoringMode]);
+
+  const openChatSession = async (sessionId: string) => {
+    setMessageError("");
+    try {
+      const response = await fetch(`/api/v1/tutor/sessions/${sessionId}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("گفت‌وگو پیدا نشد");
+      const detail = (await response.json()) as ChatSessionDetail;
+      setGradeNumber(detail.grade_number);
+      setMajorCode(detail.major_code === "general" ? "" : detail.major_code);
+      setBookId(String(detail.book_id));
+      setTutoringMode(detail.mode);
+      setMessages(detail.messages ?? []);
+      setActiveChatId(detail.id);
+      clearAttachments();
+      setSidebarOpen(false);
+    } catch (error) {
+      setMessageError(error instanceof Error ? error.message : "بازکردن گفت‌وگو انجام نشد");
+    }
+  };
+
+  const deleteChatSession = async (sessionId: string) => {
+    try {
+      const response = await fetch(`/api/v1/tutor/sessions/${sessionId}`, { method: "DELETE" });
+      if (!response.ok) return;
+      setChatHistory((prev) => prev.filter((item) => item.id !== sessionId));
+      if (activeChatId === sessionId) {
+        resetChat();
+      }
+    } catch {
+      // Ignore silent delete error
+    }
+  };
+
+  const openExamHistory = async () => {
+    setSidebarOpen(false);
+    setExamHistoryOpen(true);
+    setHistoryLoading(true);
+    await loadExamHistory();
+    setHistoryLoading(false);
+  };
+
+  const openSavedExam = async (examId: string) => {
+    setBusy(true);
+    setMessageError("");
+    try {
+      const response = await fetch(`/api/v1/exams/${examId}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(errorMessage(payload, "دریافت آزمون انجام نشد"));
+      setActiveExam(payload as Exam);
+      setExamHistoryOpen(false);
+    } catch (error) {
+      setMessageError(error instanceof Error ? error.message : "دریافت آزمون انجام نشد");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const startRecording = async () => {
     if (recording) {
@@ -247,6 +422,7 @@ export default function StudentApp() {
       if (!response.ok) throw new Error(errorMessage(payload, "ساخت آزمون انجام نشد"));
       setActiveExam(payload as Exam);
       setExamSetupOpen(false);
+      void loadExamHistory();
     } catch (error) {
       setMessageError(error instanceof Error ? error.message : "ساخت آزمون انجام نشد");
       setExamSetupOpen(false);
@@ -261,7 +437,17 @@ export default function StudentApp() {
     "شیب نمودار مکان-زمان چه چیزی را نشان می‌دهد؟",
   ], []);
 
-  if (activeExam) return <ExamRunner exam={activeExam} onExit={() => setActiveExam(null)} />;
+  if (activeExam) {
+    return (
+      <ExamRunner
+        exam={activeExam}
+        onExit={() => {
+          setActiveExam(null);
+          void loadExamHistory();
+        }}
+      />
+    );
+  }
 
   return (
     <div className="app-shell" dir="rtl">
@@ -273,10 +459,42 @@ export default function StudentApp() {
         </div>
         <button className="new-chat-button" onClick={resetChat}><Plus size={18} /> گفت‌وگوی تازه <span>⌘ K</span></button>
         <div className="sidebar-section-label">فضای یادگیری</div>
-        <button className="sidebar-item active"><BookOpen size={17} /><span>معلم خصوصی</span><span className="side-dot" /></button>
-        <button className="sidebar-item" onClick={() => setExamSetupOpen(true)}><GraduationCap size={17} /><span>آزمون‌های من</span></button>
+        <button className="sidebar-item active" onClick={() => setSidebarOpen(false)}>
+          <BookOpen size={17} /><span>معلم خصوصی</span><span className="side-dot" />
+        </button>
+        <button className="sidebar-item" onClick={() => void openExamHistory()}>
+          <GraduationCap size={17} />
+          <span>آزمون‌های من</span>
+          {examHistory.length > 0 && <span className="side-badge">{examHistory.length}</span>}
+        </button>
         <div className="sidebar-section-label recent-label">گفت‌وگوهای اخیر</div>
-        {messages.length ? <button className="recent-chat"><span className="recent-indicator" />گفت‌وگوی فعلی</button> : <div className="sidebar-empty">گفت‌وگوهای تازه‌ات اینجا<br />ذخیره می‌شوند.</div>}
+        {chatHistory.length > 0 ? (
+          <div className="recent-list">
+            {chatHistory.map((item) => (
+              <div key={item.id} className={`recent-row ${activeChatId === item.id ? "active" : ""}`}>
+                <button
+                  type="button"
+                  className="recent-chat"
+                  onClick={() => void openChatSession(item.id)}
+                  title={`${item.title}${item.book_title ? ` · ${item.book_title}` : ""}`}
+                >
+                  <span className="recent-indicator" />
+                  <span className="recent-title">{item.title}</span>
+                </button>
+                <button
+                  type="button"
+                  className="recent-delete"
+                  aria-label="حذف گفت‌وگو"
+                  onClick={() => void deleteChatSession(item.id)}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="sidebar-empty">گفت‌وگوهای تازه‌ات اینجا<br />ذخیره می‌شوند.</div>
+        )}
         <div className="sidebar-spacer" />
         <Link className="admin-link" href="/admin"><ShieldCheck size={17} /><span>پنل مدیریت</span><span className="admin-local">محلی</span></Link>
         <div className="profile-row"><div className="avatar">د</div><div><b>دانش‌آموز</b><span>پلن آزمایشی</span></div><ChevronDown size={16} /></div>
@@ -293,9 +511,9 @@ export default function StudentApp() {
         <section className="curriculum-strip">
           <div className="strip-heading"><span className="strip-icon"><BookOpen size={17} /></span><div><b>کلاس امروزت</b><span>کتابت را انتخاب کن تا معلم دقیقاً با همان منبع کمکت کند.</span></div></div>
           <div className="selector-row">
-            <label className="select-wrap"><span>پایه</span><select value={gradeNumber ?? ""} onChange={(event) => { setGradeNumber(Number(event.target.value)); setMajorCode(""); setBooks([]); setBookId(""); setMessages([]); setMessageError(""); }}><option value="" disabled>انتخاب پایه</option>{grades.map((grade) => <option key={grade.number} value={grade.number}>{grade.title}</option>)}</select><ChevronDown size={15} /></label>
-            {hasMajor && <label className="select-wrap"><span>رشته</span><select value={majorCode} onChange={(event) => { setMajorCode(event.target.value); setBooks([]); setBookId(""); setMessages([]); setMessageError(""); }}><option value="">انتخاب رشته</option>{majors.map((major) => <option key={major.code} value={major.code}>{major.title}</option>)}</select><ChevronDown size={15} /></label>}
-            <label className="select-wrap book-select"><span>کتاب</span><select value={bookId} onChange={(event) => { setBookId(event.target.value); setMessages([]); setMessageError(""); }} disabled={!books.length}><option value="">{books.length ? "انتخاب کتاب" : "کتابی در دسترس نیست"}</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title}</option>)}</select><ChevronDown size={15} /></label>
+            <label className="select-wrap"><span>پایه</span><select value={gradeNumber ?? ""} onChange={(event) => { setGradeNumber(Number(event.target.value)); setMajorCode(""); setBooks([]); setBookId(""); setMessages([]); setActiveChatId(null); setMessageError(""); }}><option value="" disabled>انتخاب پایه</option>{grades.map((grade) => <option key={grade.number} value={grade.number}>{grade.title}</option>)}</select><ChevronDown size={15} /></label>
+            {hasMajor && <label className="select-wrap"><span>رشته</span><select value={majorCode} onChange={(event) => { setMajorCode(event.target.value); setBooks([]); setBookId(""); setMessages([]); setActiveChatId(null); setMessageError(""); }}><option value="">انتخاب رشته</option>{majors.map((major) => <option key={major.code} value={major.code}>{major.title}</option>)}</select><ChevronDown size={15} /></label>}
+            <label className="select-wrap book-select"><span>کتاب</span><select value={bookId} onChange={(event) => { setBookId(event.target.value); setMessages([]); setActiveChatId(null); setMessageError(""); }} disabled={!books.length}><option value="">{books.length ? "انتخاب کتاب" : "کتابی در دسترس نیست"}</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title}</option>)}</select><ChevronDown size={15} /></label>
           </div>
           {curriculumError && <div className="notice-error">{curriculumError} · مطمئن شو بک‌اند و دیتابیس اجرا هستند.</div>}
         </section>
@@ -328,7 +546,7 @@ export default function StudentApp() {
                   <div className="message-body">
                     {message.attachment && <div className="attachment-chip">{message.attachment.endsWith(".webm") ? <AudioLines size={15} /> : <FileImage size={15} />}{message.attachment}</div>}
                     <div className={`message-bubble ${message.role}`}>
-                      {message.role === "assistant" ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</ReactMarkdown></div> : <p>{message.content}</p>}
+                      {message.role === "assistant" ? <MathContent content={message.content} /> : <p>{message.content}</p>}
                     </div>
                     {!!message.sources?.length && <div className="source-list"><span><BookOpen size={13} /> منابع کتاب</span>{message.sources.map((source, sourceIndex) => <div className="source-pill" key={`${source.book_id}-${source.pdf_page_index}-${sourceIndex}`}>{sourceText(source)}</div>)}</div>}
                   </div>
@@ -359,6 +577,88 @@ export default function StudentApp() {
         </footer>
       </main>
 
+      {examHistoryOpen && (
+        <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setExamHistoryOpen(false); }}>
+          <section className="exam-setup-modal history-modal" role="dialog" aria-modal="true" aria-labelledby="exam-history-title">
+            <button className="modal-close icon-button" onClick={() => setExamHistoryOpen(false)} aria-label="بستن"><X size={18} /></button>
+            <div className="history-head">
+              <div>
+                <span className="eyebrow">تاریخچهٔ آزمون‌ها</span>
+                <h2 id="exam-history-title">آزمون‌های من</h2>
+                <p>کارنامهٔ آزمون‌های قبلی را مرور کن یا آزمون جدید بساز.</p>
+              </div>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => {
+                  setExamHistoryOpen(false);
+                  setExamSetupOpen(true);
+                }}
+              >
+                <Plus size={16} /> آزمون جدید
+              </button>
+            </div>
+
+            {historyLoading ? (
+              <div className="history-empty">
+                <LoaderCircle className="spin" size={18} />
+                <span>در حال بارگذاری آزمون‌ها...</span>
+              </div>
+            ) : examHistory.length === 0 ? (
+              <div className="history-empty">
+                <GraduationCap size={22} />
+                <span>هنوز آزمونی ثبت نشده است.</span>
+              </div>
+            ) : (
+              <div className="exam-history-list">
+                {examHistory.map((item) => {
+                  const summary = item.report_summary;
+                  const canOpen = item.status === "submitted" || item.status === "active";
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className="exam-history-item"
+                      disabled={!canOpen || busy}
+                      onClick={() => void openSavedExam(item.id)}
+                    >
+                      <div className="exam-history-main">
+                        <div className="exam-history-top">
+                          <b>{item.title}</b>
+                          <span className={`history-status ${item.status}`}>
+                            {item.status === "submitted"
+                              ? "کارنامه آماده"
+                              : item.status === "active"
+                              ? "در حال اجرا"
+                              : "منقضی‌شده"}
+                          </span>
+                        </div>
+                        <small>
+                          {item.book_title ?? `کتاب #${item.book_id}`} · {item.exam_type === "konkoor" ? "کنکوری" : "تمرینی"} · {item.question_count} سؤال
+                        </small>
+                        <span className="exam-history-date">
+                          <Clock3 size={12} /> {formatFaDate(item.submitted_at ?? item.created_at)}
+                        </span>
+                      </div>
+                      <div className="exam-history-score">
+                        {summary ? (
+                          <>
+                            <strong>{summary.score}</strong>
+                            <span>{summary.scale === "percent" ? "درصد" : "از ۲۰"}</span>
+                          </>
+                        ) : (
+                          <span>{item.status === "active" ? "ادامه" : "بسته"}</span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
       {examSetupOpen && <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setExamSetupOpen(false); }}>
         <section className="exam-setup-modal" role="dialog" aria-modal="true" aria-labelledby="exam-modal-title">
           <button className="modal-close icon-button" onClick={() => setExamSetupOpen(false)} aria-label="بستن"><X size={18} /></button>
@@ -367,6 +667,18 @@ export default function StudentApp() {
           <div className="form-row"><label className="form-field"><span>تعداد سؤال</span><select value={questionCount} onChange={(event) => setQuestionCount(Number(event.target.value))}>{[3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count} سؤال</option>)}</select></label><label className="form-field"><span>زمان</span><select value={timeLimit} onChange={(event) => setTimeLimit(Number(event.target.value))}>{[5, 10, 15, 20, 30, 45, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} دقیقه</option>)}</select></label></div>
           {messageError && <div className="inline-error">{messageError}</div>}
           <button className="primary-button modal-submit" disabled={!bookId || busy} onClick={() => void createExam()}>{busy ? <LoaderCircle className="spin" size={17} /> : <GraduationCap size={17} />}شروع آزمون</button>
+          {examHistory.length > 0 && (
+            <button
+              type="button"
+              className="outline-button modal-submit"
+              onClick={() => {
+                setExamSetupOpen(false);
+                void openExamHistory();
+              }}
+            >
+              <MessageSquare size={15} /> مشاهدهٔ آزمون‌های قبلی ({examHistory.length})
+            </button>
+          )}
           {!bookId && <small className="modal-hint">برای ساخت آزمون، ابتدا کتابت را انتخاب کن.</small>}
         </section>
       </div>}

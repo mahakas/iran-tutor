@@ -5,14 +5,16 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import resolve_book_scope
 from app.db.session import get_session
+from app.models.curriculum import Book
 from app.models.exam import ExamSession
-from app.services.exam_service import create_exam, public_exam, submit_exam
+from app.services.exam_service import create_exam, exam_summary, public_exam, submit_exam
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/exams", tags=["exams"])
@@ -68,12 +70,30 @@ async def start_exam(
         raise HTTPException(status_code=503, detail="exam service is temporarily unavailable") from error
 
 
+@router.get("")
+async def list_exams(
+    book_id: int | None = Query(default=None, gt=0),
+    limit: int = Query(default=30, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, object]]:
+    query = (
+        select(ExamSession, Book.title)
+        .outerjoin(Book, ExamSession.book_id == Book.id)
+        .order_by(ExamSession.created_at.desc())
+        .limit(limit)
+    )
+    if book_id is not None:
+        query = query.where(ExamSession.book_id == book_id)
+    rows = (await session.execute(query)).all()
+    return [exam_summary(exam, book_title=book_title) for exam, book_title in rows]
+
+
 @router.get("/{exam_id}")
 async def get_exam(exam_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
     exam = await session.get(ExamSession, exam_id)
     if exam is None:
         raise HTTPException(status_code=404, detail="exam not found")
-    return public_exam(exam)
+    return public_exam(exam, include_report=True)
 
 
 @router.post("/{exam_id}/submit")

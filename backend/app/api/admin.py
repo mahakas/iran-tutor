@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import async_session_factory
 from app.models.curriculum import Book, BookPage, Grade, Major
-from app.services.ingestion_service import UPLOAD_DIR, STORAGE_DIR, ingest_book_pages, model_tag, pdf_page_count
+from app.services.ingestion_service import (
+    STORAGE_DIR,
+    UPLOAD_DIR,
+    _export_assets,
+    build_export_pages,
+    ingest_book_pages,
+    model_tag,
+    pdf_page_count,
+)
 from app.services.preview import render_single_preview
 from app.services.validation import validate_major_code
 
@@ -138,6 +146,44 @@ async def upload_and_ingest(
     return {"book_id": book_id, "status": "ingesting"}
 
 
+@router.get("/books")
+async def list_admin_books() -> list[dict[str, object]]:
+    async with async_session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Book, Grade.number, Major.code)
+                .join(Grade, Book.grade_id == Grade.id)
+                .outerjoin(Major, Book.major_id == Major.id)
+                .order_by(Book.id.desc())
+            )
+        ).all()
+        page_rows = (
+            await session.execute(
+                select(BookPage.book_id, BookPage.status, func.count()).group_by(
+                    BookPage.book_id, BookPage.status
+                )
+            )
+        ).all()
+        counts_by_book: dict[int, dict[str, int]] = {}
+        for book_id, status, count in page_rows:
+            key = status.value if hasattr(status, "value") else str(status)
+            counts_by_book.setdefault(book_id, {})[key] = count
+        return [
+            {
+                "id": book.id,
+                "title": book.title,
+                "grade_id": book.grade_id,
+                "grade_number": grade_number,
+                "major_id": book.major_id,
+                "major_code": major_code,
+                "total_pdf_pages": book.total_pdf_pages,
+                "status": book.status.value if hasattr(book.status, "value") else book.status,
+                "pages": counts_by_book.get(book.id, {}),
+            }
+            for book, grade_number, major_code in rows
+        ]
+
+
 @router.get("/books/{book_id}/status")
 async def book_status(book_id: int) -> dict[str, object]:
     async with async_session_factory() as session:
@@ -163,6 +209,52 @@ async def book_status(book_id: int) -> dict[str, object]:
         }
 
 
+@router.get("/books/{book_id}/pages")
+async def list_book_pages(book_id: int) -> list[dict[str, object]]:
+    async with async_session_factory() as session:
+        book = await session.get(Book, book_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail="book not found")
+        rows = (
+            await session.scalars(
+                select(BookPage)
+                .where(BookPage.book_id == book_id)
+                .order_by(BookPage.pdf_page_index)
+            )
+        ).all()
+        return [
+            {
+                "pdf_page_index": row.pdf_page_index,
+                "printed_page_number": row.printed_page_number,
+                "chapter_number": row.chapter_number,
+                "chapter_title": row.chapter_title,
+                "status": row.status.value if hasattr(row.status, "value") else row.status,
+                "warnings": row.warnings or [],
+                "markdown_content": row.markdown_content or "",
+                "visual_elements": row.visual_elements or [],
+                "extraction_model": row.extraction_model,
+                "edited_by_human": bool(row.edited_by_human),
+                "error_message": row.error_message,
+                "image_url": f"/api/v1/admin/books/{book_id}/pages/{row.pdf_page_index}/image",
+            }
+            for row in rows
+        ]
+
+
+@router.get("/books/{book_id}/pages/{idx}/image")
+async def get_page_image(book_id: int, idx: int) -> FileResponse:
+    async with async_session_factory() as session:
+        page = await session.scalar(
+            select(BookPage).where(BookPage.book_id == book_id, BookPage.pdf_page_index == idx)
+        )
+        if page is None or not page.page_image_path:
+            raise HTTPException(status_code=404, detail="page image not found")
+        image_path = Path(page.page_image_path)
+    if not image_path.is_file():
+        raise HTTPException(status_code=404, detail="page image file missing")
+    return FileResponse(image_path, media_type="image/png")
+
+
 class PageFixBody(BaseModel):
     markdown_content: str | None = None
     printed_page_number: int | None = None
@@ -179,19 +271,33 @@ async def fix_page(book_id: int, idx: int, body: PageFixBody) -> dict[str, objec
         if page is None:
             raise HTTPException(status_code=404, detail="page not found")
 
-        if body.markdown_content is not None:
+        fields = body.model_fields_set
+        if "markdown_content" in fields and body.markdown_content is not None:
             page.markdown_content = body.markdown_content
-        if body.printed_page_number is not None:
+        if "printed_page_number" in fields:
             page.printed_page_number = body.printed_page_number
-        if body.chapter_number is not None:
+        if "chapter_number" in fields:
             page.chapter_number = body.chapter_number
-        if body.chapter_title is not None:
+        if "chapter_title" in fields:
             page.chapter_title = body.chapter_title
 
         page.status = "done"
         page.edited_by_human = True
         page.error_message = None
+        page.warnings = []
         await session.commit()
+
+        rows = list(
+            (
+                await session.scalars(
+                    select(BookPage)
+                    .where(BookPage.book_id == book_id)
+                    .order_by(BookPage.pdf_page_index)
+                )
+            ).all()
+        )
+        if rows:
+            _export_assets(book_id, build_export_pages(rows))
         return {"book_id": book_id, "pdf_page_index": idx, "status": "done", "edited_by_human": True}
 
 

@@ -112,7 +112,8 @@ def model_tag(model: str) -> str:
 
 
 def _unbalanced_dollars_warning(markdown: str) -> str | None:
-    if markdown.count("$") % 2 != 0:
+    unescaped = re.sub(r"\\\$", "", markdown)
+    if unescaped.count("$") % 2 != 0:
         return "unbalanced $ delimiters in markdown"
     return None
 

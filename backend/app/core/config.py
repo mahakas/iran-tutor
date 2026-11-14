@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -40,8 +41,9 @@ class Settings(BaseSettings):
 
     database_url: str = Field(min_length=1)
 
-    # Phase 2: textbook vector search. The embedding provider can differ from
-    # the chat/vision provider; empty values fall back to the LLM credentials.
+    # Phase 2: textbook vector search. Use "pgvector" for Supabase PostgreSQL,
+    # or "qdrant" for a Qdrant server.
+    vector_backend: Literal["qdrant", "pgvector"] = "qdrant"
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_collection: str = "iran_textbooks"
     embedding_base_url: str | None = None
