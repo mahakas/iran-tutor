@@ -36,7 +36,9 @@ MAX_PDF_BYTES = 100 * 1024 * 1024
 
 def _admin_signing_key() -> bytes:
     settings = get_settings()
-    material = f"iran-tutor-admin-v1:{settings.admin_password}:{settings.llm_api_key}".encode("utf-8")
+    material = (
+        f"iran-tutor-admin-v2:{settings.admin_username}:{settings.admin_password}:{settings.llm_api_key}"
+    ).encode("utf-8")
     return hashlib.sha256(material).digest()
 
 
@@ -68,12 +70,25 @@ def verify_admin_session_token(token: str | None) -> bool:
 
 def _is_admin_authenticated(request: Request) -> bool:
     settings = get_settings()
-    expected_pw = settings.admin_password
-    if not expected_pw:
+    if not settings.admin_username or not settings.admin_password:
         return False
+
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        bearer_token = auth_header[7:].strip()
+        if verify_admin_session_token(bearer_token):
+            return True
+
+    header_user = request.headers.get("x-admin-username")
     header_pw = request.headers.get("x-admin-password")
-    if header_pw and hmac.compare_digest(header_pw, expected_pw):
+    if (
+        header_user
+        and header_pw
+        and hmac.compare_digest(header_user, settings.admin_username)
+        and hmac.compare_digest(header_pw, settings.admin_password)
+    ):
         return True
+
     return verify_admin_session_token(request.cookies.get(ADMIN_COOKIE_NAME))
 
 
@@ -87,34 +102,63 @@ protected_router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class AdminLoginBody(BaseModel):
+    username: str
     password: str
 
 
 @router.get("/auth/session")
-async def get_admin_session(request: Request) -> dict[str, bool]:
-    return {"authenticated": _is_admin_authenticated(request)}
+async def get_admin_session(request: Request) -> dict[str, object]:
+    authed = _is_admin_authenticated(request)
+    return {
+        "authenticated": authed,
+        "username": get_settings().admin_username if authed else None,
+    }
 
 
 @router.post("/auth/login")
-async def admin_login(body: AdminLoginBody, response: Response) -> dict[str, bool]:
+async def admin_login(body: AdminLoginBody, request: Request, response: Response) -> dict[str, object]:
     settings = get_settings()
-    if not settings.admin_password or not hmac.compare_digest(body.password, settings.admin_password):
-        raise HTTPException(status_code=401, detail="رمز عبور مدیر نادرست است.")
+    valid_user = bool(settings.admin_username) and hmac.compare_digest(
+        body.username.strip(), settings.admin_username
+    )
+    valid_pass = bool(settings.admin_password) and hmac.compare_digest(
+        body.password, settings.admin_password
+    )
+    if not (valid_user and valid_pass):
+        raise HTTPException(status_code=401, detail="نام کاربری یا رمز عبور مدیر نادرست است.")
     token = create_admin_session_token()
+    is_https = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
+    )
     response.set_cookie(
         key=ADMIN_COOKIE_NAME,
         value=token,
         max_age=settings.admin_session_ttl_seconds,
         httponly=True,
-        samesite="lax",
+        samesite="none" if is_https else "lax",
+        secure=is_https,
         path="/",
     )
-    return {"authenticated": True}
+    return {
+        "authenticated": True,
+        "token": token,
+        "username": settings.admin_username,
+    }
 
 
 @router.post("/auth/logout")
-async def admin_logout(response: Response) -> dict[str, bool]:
-    response.delete_cookie(key=ADMIN_COOKIE_NAME, path="/")
+async def admin_logout(request: Request, response: Response) -> dict[str, bool]:
+    is_https = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
+    )
+    response.delete_cookie(
+        key=ADMIN_COOKIE_NAME,
+        path="/",
+        samesite="none" if is_https else "lax",
+        secure=is_https,
+    )
     return {"authenticated": False}
 
 

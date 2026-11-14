@@ -13,7 +13,7 @@ from app.main import app
 from app.services.preview import render_single_preview
 
 
-ADMIN_HEADERS = {"X-Admin-Password": "123"}
+ADMIN_HEADERS = {"X-Admin-Username": "admin", "X-Admin-Password": "123"}
 
 
 @pytest.mark.asyncio
@@ -22,7 +22,7 @@ async def test_admin_endpoints_require_authentication_and_login_flow():
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         unauth_session = await client.get("/api/v1/admin/auth/session")
         assert unauth_session.status_code == 200
-        assert unauth_session.json() == {"authenticated": False}
+        assert unauth_session.json() == {"authenticated": False, "username": None}
 
         for method, path in (
             ("GET", "/api/v1/admin/books"),
@@ -36,16 +36,28 @@ async def test_admin_endpoints_require_authentication_and_login_flow():
             res = await client.request(method, path)
             assert res.status_code == 401, f"{method} {path} returned {res.status_code}"
 
-        bad_login = await client.post("/api/v1/admin/auth/login", json={"password": "wrong"})
-        assert bad_login.status_code == 401
+        bad_user = await client.post(
+            "/api/v1/admin/auth/login", json={"username": "root", "password": "123"}
+        )
+        assert bad_user.status_code == 401
 
-        good_login = await client.post("/api/v1/admin/auth/login", json={"password": "123"})
+        bad_pass = await client.post(
+            "/api/v1/admin/auth/login", json={"username": "admin", "password": "wrong"}
+        )
+        assert bad_pass.status_code == 401
+
+        good_login = await client.post(
+            "/api/v1/admin/auth/login", json={"username": "admin", "password": "123"}
+        )
         assert good_login.status_code == 200
-        assert good_login.json() == {"authenticated": True}
+        login_payload = good_login.json()
+        assert login_payload["authenticated"] is True
+        assert login_payload["username"] == "admin"
+        assert isinstance(login_payload["token"], str) and login_payload["token"]
         assert "iran_tutor_admin" in client.cookies
 
         authed_session = await client.get("/api/v1/admin/auth/session")
-        assert authed_session.json() == {"authenticated": True}
+        assert authed_session.json() == {"authenticated": True, "username": "admin"}
 
         logout = await client.post("/api/v1/admin/auth/logout")
         assert logout.status_code == 200
@@ -53,6 +65,13 @@ async def test_admin_endpoints_require_authentication_and_login_flow():
 
         after_logout = await client.get("/api/v1/admin/books")
         assert after_logout.status_code == 401
+
+        # Bearer token works even when cookies are blocked (e.g. cross-site iframe preview).
+        bearer_session = await client.get(
+            "/api/v1/admin/auth/session",
+            headers={"Authorization": f"Bearer {login_payload['token']}"},
+        )
+        assert bearer_session.json() == {"authenticated": True, "username": "admin"}
 
 
 @pytest.mark.asyncio
