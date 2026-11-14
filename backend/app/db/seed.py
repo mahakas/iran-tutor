@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pymupdf
+from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import async_session_factory
-from app.models.curriculum import Grade, Major
+from app.core.config import BACKEND_DIR, get_settings
+from app.db.base import Base
+from app.db.session import async_session_factory, engine
+from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
 
 GRADE_TITLES: dict[int, str] = {
     1: "اول دبستان",
@@ -46,9 +52,118 @@ async def seed_majors(session: AsyncSession) -> None:
             session.add(Major(title=title, code=code))
 
 
+DEMO_BOOK_TITLE = "فیزیک ۳ — کتاب آزمایشی"
+DEMO_PAGES = [
+    {
+        "printed_page_number": 8,
+        "chapter_number": 1,
+        "chapter_title": "حرکت بر خط راست",
+        "markdown_content": (
+            "# حرکت یکنواخت\n\nدر حرکت یکنواخت، سرعت ثابت است و مکان با زمان تغییر می‌کند. "
+            "رابطهٔ سرعت متوسط برابر است با $v_{avg}=\\frac{\\Delta x}{\\Delta t}$.\n\n"
+            "اگر جسم در هر بازهٔ زمانی مساوی، جابه‌جایی مساوی داشته باشد، حرکت یکنواخت است."
+        ),
+        "visual_elements": [],
+    },
+    {
+        "printed_page_number": 9,
+        "chapter_number": 1,
+        "chapter_title": "حرکت بر خط راست",
+        "markdown_content": (
+            "# شتاب متوسط\n\nشتاب متوسط از تقسیم تغییرات سرعت بر بازهٔ زمانی به دست می‌آید: "
+            "$a_{avg}=\\frac{\\Delta v}{\\Delta t}$.\n\n"
+            "واحد شتاب در دستگاه SI، متر بر مجذور ثانیه است."
+        ),
+        "visual_elements": [],
+    },
+    {
+        "printed_page_number": 10,
+        "chapter_number": 1,
+        "chapter_title": "حرکت بر خط راست",
+        "markdown_content": (
+            "# نمودار مکان ـ زمان\n\nشیب نمودار مکان ـ زمان، سرعت را نشان می‌دهد. "
+            "شیب خط راست برابر نسبت تغییر مکان به تغییر زمان است.\n\n"
+            "در نمودار مکان بر حسب زمان، محور افقی زمان و محور عمودی مکان را نشان می‌دهد."
+        ),
+        "visual_elements": [
+            {"label": "نمودار مکان ـ زمان", "type": "graph", "scientific_description": "خط راست؛ شیب خط بیانگر سرعت است."}
+        ],
+    },
+]
+
+
+def _ensure_demo_assets() -> tuple[str, list[str]]:
+    """Create clearly labelled synthetic PDF/page images; never real textbook content."""
+    storage = BACKEND_DIR / "storage" / "demo"
+    storage.mkdir(parents=True, exist_ok=True)
+    pdf_path = storage / "sample_physics.pdf"
+    page_paths: list[str] = []
+    document = pymupdf.open()
+    for index, page_data in enumerate(DEMO_PAGES, start=1):
+        page = document.new_page(width=595, height=842)
+        page.insert_text((48, 70), "Iran AI Tutor - DEMO SAMPLE", fontsize=16)
+        page.insert_text((48, 110), f"Synthetic page {index} (not an official textbook)", fontsize=12)
+        page.insert_text((48, 165), f"Sample lesson page {index}", fontsize=18)
+        page.insert_text((48, 205), "Static demo asset; educational responses use the seeded database fixture.", fontsize=11)
+        image_path = storage / f"sample_physics_page_{index}.png"
+        image = Image.new("RGB", (595, 842), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((20, 20, 575, 822), outline="#4d9a84", width=3)
+        draw.text((45, 60), "DEMO ONLY - synthetic sample, not textbook content", fill="#177e77")
+        draw.text((45, 115), f"Sample page {index}: {page_data['chapter_title']}", fill="#33443c")
+        image.save(image_path)
+        page_paths.append(str(image_path))
+    document.save(pdf_path)
+    document.close()
+    return str(pdf_path), page_paths
+
+
+async def _seed_demo_book(session: AsyncSession, *, grade: Grade, major: Major) -> None:
+    existing = await session.scalar(select(Book).where(Book.title == DEMO_BOOK_TITLE))
+    if existing is not None:
+        return
+    pdf_path, image_paths = _ensure_demo_assets()
+    book = Book(
+        title=DEMO_BOOK_TITLE,
+        grade_id=grade.id,
+        major_id=major.id,
+        pdf_file_path=pdf_path,
+        total_pdf_pages=len(DEMO_PAGES),
+        status=BookStatus.ready,
+    )
+    session.add(book)
+    await session.flush()
+    for index, page_data in enumerate(DEMO_PAGES, start=1):
+        session.add(
+            BookPage(
+                book_id=book.id,
+                pdf_page_index=index,
+                printed_page_number=page_data["printed_page_number"],
+                chapter_number=page_data["chapter_number"],
+                chapter_title=page_data["chapter_title"],
+                markdown_content=page_data["markdown_content"],
+                visual_elements=page_data["visual_elements"],
+                page_image_path=image_paths[index - 1],
+                status=PageStatus.done,
+                warnings=[],
+                extraction_model="deterministic-demo-fixture",
+            )
+        )
+
+
 async def seed_database() -> None:
-    """Insert grades 1-12 and majors if absent. Safe to call repeatedly."""
+    """Create demo schema when requested and seed curriculum reference data."""
+    settings = get_settings()
+    if settings.demo_mode:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
     async with async_session_factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await session.flush()
+        if settings.demo_mode:
+            grade = await session.scalar(select(Grade).where(Grade.number == 12))
+            major = await session.scalar(select(Major).where(Major.code == "math_physics"))
+            if grade is not None and major is not None:
+                await _seed_demo_book(session, grade=grade, major=major)
         await session.commit()

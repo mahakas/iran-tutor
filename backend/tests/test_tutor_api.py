@@ -60,6 +60,7 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
         assert kwargs["grade_number"] == 12
         assert kwargs["major_code"] == "math_physics"
         assert kwargs["book_id"] == 1
+        assert kwargs["mode"] == "problem_solver"
         return {"answer": "پاسخ مستند", "sources": [], "retrieved_count": 0}
 
     app.dependency_overrides[get_session] = fake_session
@@ -73,6 +74,7 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
                     "grade_number": 12,
                     "major_code": "math_physics",
                     "book_id": 1,
+                    "mode": "problem_solver",
                 },
             )
     finally:

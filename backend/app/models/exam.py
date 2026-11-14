@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,9 +35,10 @@ class ExamSession(Base):
     status: Mapped[ExamStatus] = mapped_column(
         String(20), default=ExamStatus.active, nullable=False
     )
-    questions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
-    submitted_answers: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    report_card: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    _json_type = JSON().with_variant(JSONB, "postgresql")
+    questions: Mapped[list[dict[str, Any]]] = mapped_column(_json_type, nullable=False)
+    submitted_answers: Mapped[dict[str, Any] | None] = mapped_column(_json_type, nullable=True)
+    report_card: Mapped[dict[str, Any] | None] = mapped_column(_json_type, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

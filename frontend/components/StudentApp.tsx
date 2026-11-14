@@ -11,7 +11,7 @@ import {
   ShieldCheck, Sparkles, Square, X,
 } from "lucide-react";
 import ExamRunner from "@/components/ExamRunner";
-import type { BookOption, Exam, GradeOption, MajorOption, Source, TutorResponse } from "@/lib/types";
+import type { BookOption, Exam, GradeOption, MajorOption, Source, TutorMode, TutorResponse } from "@/lib/types";
 
 type Message = {
   id: string;
@@ -42,10 +42,12 @@ export default function StudentApp() {
   const [majorCode, setMajorCode] = useState("");
   const [bookId, setBookId] = useState("");
   const [curriculumError, setCurriculumError] = useState("");
+  const [demoMode, setDemoMode] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [messageError, setMessageError] = useState("");
+  const [tutoringMode, setTutoringMode] = useState<TutorMode>("tutor");
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [recording, setRecording] = useState(false);
@@ -86,6 +88,15 @@ export default function StudentApp() {
       }
     })();
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/v1/system/status")
+      .then((response) => response.ok ? response.json() : null)
+      .then((status: { mode?: string } | null) => { if (active) setDemoMode(status?.mode === "demo"); })
+      .catch(() => { if (active) setDemoMode(false); });
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -134,6 +145,7 @@ export default function StudentApp() {
             form.set(imageFile ? "image" : "audio", imageFile ?? audioFile as File);
             form.set("grade_number", String(gradeNumber));
             form.set("book_id", bookId);
+            form.set("mode", tutoringMode);
             if (hasMajor && majorCode) form.set("major_code", majorCode);
             if (imageFile) return fetch("/api/v1/tutor/ask-image", { method: "POST", body: form });
             return fetch("/api/v1/tutor/ask-audio", { method: "POST", body: form });
@@ -141,7 +153,7 @@ export default function StudentApp() {
         : fetch("/api/v1/tutor/ask", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query, grade_number: gradeNumber, major_code: hasMajor ? majorCode : null, book_id: Number(bookId) }),
+            body: JSON.stringify({ query, grade_number: gradeNumber, major_code: hasMajor ? majorCode : null, book_id: Number(bookId), mode: tutoringMode }),
           }));
       const payload = await response.json();
       if (!response.ok) throw new Error(errorMessage(payload, "پاسخی دریافت نشد. دوباره تلاش کن."));
@@ -158,7 +170,7 @@ export default function StudentApp() {
       setBusy(false);
       window.setTimeout(() => inputRef.current?.focus(), 0);
     }
-  }, [audioFile, bookId, busy, draft, gradeNumber, hasMajor, imageFile, majorCode]);
+  }, [audioFile, bookId, busy, draft, gradeNumber, hasMajor, imageFile, majorCode, tutoringMode]);
 
   const startRecording = async () => {
     if (recording) {
@@ -249,7 +261,7 @@ export default function StudentApp() {
         <header className="topbar">
           <button className="icon-button mobile-menu" aria-label="بازکردن منو" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
           <div className="context-title"><span className="online-indicator" /><div><b>{selectedBook?.title ?? "کلاس درس"}</b><span>{currentGrade?.title ?? "انتخاب پایه"}{hasMajor && majorCode ? ` · ${majors.find((major) => major.code === majorCode)?.title ?? ""}` : ""}</span></div><ChevronDown size={15} /></div>
-          <div className="topbar-actions"><span className="private-badge"><ShieldCheck size={14} /> فضای خصوصی</span><button className="icon-button help-button" aria-label="راهنما"><CircleHelp size={18} /></button></div>
+          <div className="topbar-actions">{demoMode && <span className="private-badge demo-badge"><Sparkles size={14} /> حالت آزمایشی</span>}<span className="private-badge"><ShieldCheck size={14} /> فضای خصوصی</span><button className="icon-button help-button" aria-label="راهنما"><CircleHelp size={18} /></button></div>
         </header>
 
         <section className="curriculum-strip">
@@ -263,7 +275,12 @@ export default function StudentApp() {
         </section>
 
         <div className="mode-toolbar">
-          <div className="mode-tabs"><button className="mode-tab selected"><Sparkles size={15} />معلم خصوصی</button><button className="mode-tab" onClick={() => setExamSetupOpen(true)}><GraduationCap size={15} />آزمون واقعی</button></div>
+          <div className="mode-tabs">
+            <button className={`mode-tab ${tutoringMode === "tutor" ? "selected" : ""}`} onClick={() => setTutoringMode("tutor")}><Sparkles size={15} />معلم خصوصی</button>
+            <button className={`mode-tab ${tutoringMode === "problem_solver" ? "selected" : ""}`} onClick={() => setTutoringMode("problem_solver")}><Check size={15} />حل تمرین</button>
+            <button className={`mode-tab ${tutoringMode === "question_designer" ? "selected" : ""}`} onClick={() => setTutoringMode("question_designer")}><BookOpen size={15} />طراحی سؤال</button>
+            <button className="mode-tab" onClick={() => setExamSetupOpen(true)}><GraduationCap size={15} />آزمون زمان‌دار</button>
+          </div>
           <span className="grounding-note"><ShieldCheck size={14} /> پاسخ مستند از کتاب انتخابی</span>
         </div>
 
@@ -301,7 +318,7 @@ export default function StudentApp() {
           {messageError && <div className="inline-error composer-error">{messageError}<button onClick={() => setMessageError("")} aria-label="بستن"><X size={15} /></button></div>}
           {(imageFile || audioFile) && <div className="attachment-preview"><span>{imageFile ? <FileImage size={15} /> : <AudioLines size={15} />}{imageFile?.name ?? audioFile?.name}</span><button onClick={clearAttachments} aria-label="حذف فایل"><X size={15} /></button></div>}
           <div className="composer-box">
-            <textarea ref={inputRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder={bookId ? "از معلمت هر چیزی دربارهٔ درس بپرس..." : "اول پایه، رشته و کتابت را انتخاب کن"} disabled={!bookId || busy} rows={2} />
+            <textarea ref={inputRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder={!bookId ? "اول پایه، رشته و کتابت را انتخاب کن" : tutoringMode === "problem_solver" ? "صورت تمرینت را بنویس یا از آن عکس بگیر..." : tutoringMode === "question_designer" ? "از کدام مبحث برایت سؤال طراحی کنم؟" : "از معلمت هر چیزی دربارهٔ درس بپرس..."} disabled={!bookId || busy} rows={2} />
             <div className="composer-tools">
               <div className="tool-group">
                 <button className="tool-button" disabled={!bookId || busy} onClick={() => imageInputRef.current?.click()} title="پیوست تصویر"><Paperclip size={18} /><span>تصویر سؤال</span></button>

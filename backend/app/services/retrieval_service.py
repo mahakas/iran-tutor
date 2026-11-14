@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
@@ -94,6 +95,8 @@ async def ensure_collection() -> None:
 
 async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
     """Index only accepted (`done`) pages for one curriculum book in Qdrant."""
+    if get_settings().demo_mode:
+        raise RuntimeError("Qdrant indexing is disabled in demo mode; use a production profile")
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
 
@@ -168,7 +171,54 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
 async def _search_postgres(
     query: str, *, grade_number: int, major_code: str | None, book_id: int, limit: int
 ) -> list[dict[str, Any]]:
-    """Keyword/full-text channel over approved PostgreSQL pages."""
+    """Keyword/full-text channel over approved textbook pages.
+
+    Demo mode uses a small deterministic token-overlap scorer so the project can
+    be explored with SQLite and no PostgreSQL/Qdrant/embedding credentials.
+    """
+    if get_settings().demo_mode:
+        selected_major = major_code or "general"
+        query_terms = set(re.findall(r"[\w۰-۹]+", query.casefold()))
+        async with async_session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(BookPage, Book.title, Grade.number, func.coalesce(Major.code, "general"))
+                    .join(Book, BookPage.book_id == Book.id)
+                    .join(Grade, Book.grade_id == Grade.id)
+                    .outerjoin(Major, Book.major_id == Major.id)
+                    .where(
+                        Book.id == book_id,
+                        Grade.number == grade_number,
+                        func.coalesce(Major.code, "general") == selected_major,
+                        BookPage.status == PageStatus.done,
+                    )
+                    .order_by(BookPage.pdf_page_index.asc())
+                )
+            ).all()
+        matches: list[dict[str, Any]] = []
+        for page, title, grade, major in rows:
+            full_text = page_embedding_text(page.markdown_content, page.visual_elements)
+            page_terms = set(re.findall(r"[\w۰-۹]+", full_text.casefold()))
+            overlap = len(query_terms & page_terms)
+            if overlap:
+                matches.append(
+                    {
+                        "book_id": page.book_id,
+                        "book_title": title,
+                        "grade_number": grade,
+                        "major_code": major,
+                        "pdf_page_index": page.pdf_page_index,
+                        "printed_page_number": page.printed_page_number,
+                        "chapter_number": page.chapter_number,
+                        "chapter_title": page.chapter_title,
+                        "full_text": full_text,
+                        "markdown_content": page.markdown_content,
+                        "visual_elements": page.visual_elements or [],
+                        "lexical_score": float(overlap),
+                    }
+                )
+        return sorted(matches, key=lambda item: item["lexical_score"], reverse=True)[:limit]
+
     ts_document = func.to_tsvector(
         "simple",
         func.concat(
@@ -300,17 +350,20 @@ async def search_textbook(
         limit=candidate_limit,
     )
 
-    try:
-        vector_results = await _search_qdrant(
-            query,
-            grade_number=grade_number,
-            major_code=major_code,
-            book_id=book_id,
-            limit=candidate_limit,
-        )
-    except Exception:  # noqa: BLE001 - lexical fallback is intentional
-        logger.exception("vector search unavailable; using PostgreSQL lexical results")
+    if get_settings().demo_mode:
         vector_results = []
+    else:
+        try:
+            vector_results = await _search_qdrant(
+                query,
+                grade_number=grade_number,
+                major_code=major_code,
+                book_id=book_id,
+                limit=candidate_limit,
+            )
+        except Exception:  # noqa: BLE001 - lexical fallback is intentional
+            logger.exception("vector search unavailable; using PostgreSQL lexical results")
+            vector_results = []
 
     return merge_hybrid_results(
         vector_results, lexical_results, top_k=top_k

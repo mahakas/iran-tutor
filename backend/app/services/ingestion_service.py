@@ -170,7 +170,12 @@ def _save_page_outputs(book_id: str | int, tag: str, idx: int, data: dict[str, A
 
 
 async def _upsert_page(session: AsyncSession, book_id: int, values: dict[str, Any]) -> None:
-    stmt = pg_insert(BookPage).values(**values).on_conflict_do_update(
+    insert = pg_insert
+    if session.get_bind().dialect.name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        insert = sqlite_insert
+    stmt = insert(BookPage).values(**values).on_conflict_do_update(
         index_elements=["book_id", "pdf_page_index"],
         set_={k: v for k, v in values.items() if k not in ("book_id", "pdf_page_index")},
     )
@@ -257,6 +262,8 @@ async def _run_page(
             }
 
         warnings: list[str] = []
+        if get_settings().demo_mode:
+            warnings.append("DEMO_MODE: OCR واقعی اجرا نشده؛ این صفحه قبل از RAG باید توسط انسان بازبینی شود.")
 
         if extraction.chapter_number is None and carry.get("chapter_number") is not None:
             extraction.chapter_number = carry["chapter_number"]

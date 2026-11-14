@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from app.core.config import get_settings
 from app.core.llm_client import complete_text
@@ -41,12 +41,23 @@ def _format_context(pages: list[dict[str, Any]], max_chars: int = 24_000) -> str
     return "\n\n---\n\n".join(blocks)
 
 
+TutorMode = Literal["tutor", "problem_solver", "question_designer"]
+MODE_INSTRUCTIONS: dict[TutorMode, str] = {
+    "tutor": "با پرسش‌های راهنما به درک مفهوم کمک کن و پاسخ نهایی را در پایان بیاور.",
+    "problem_solver": "تمرین را مرحله‌به‌مرحله حل کن: داده‌ها، رابطهٔ مناسب، جایگذاری با واحدها و پاسخ نهایی را جدا کن. اگر صورت تمرین ناقص است، قبل از نتیجه‌گیری ابهام را بگو.",
+    "question_designer": "سه سؤال تمرینی متنوع و هم‌سطح همین پایه فقط از منبع‌های داده‌شده طراحی کن. پاسخ‌نامه را در بخشی جداگانه پس از سؤال‌ها بده و برای هر سؤال منبع دقیق تعیین کن.",
+}
+
+
 def build_tutor_messages(
-    *, query: str, grade_number: int, context: str
+    *, query: str, grade_number: int, context: str, mode: TutorMode = "tutor"
 ) -> list[dict[str, str]]:
     """Build deterministic prompts for a user request and retrieved context."""
+    if mode not in MODE_INSTRUCTIONS:
+        raise ValueError("unsupported tutor mode")
+    system_prompt = SYSTEM_PROMPT + "\n\nحالت پاسخ: " + MODE_INSTRUCTIONS[mode]
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": (
@@ -86,6 +97,7 @@ async def answer_from_textbook(
     major_code: str | None,
     book_id: int,
     top_k: int = 5,
+    mode: TutorMode = "tutor",
 ) -> dict[str, Any]:
     """Retrieve book evidence, answer only from it, and return server-owned citations."""
     pages = await search_textbook(
@@ -115,7 +127,7 @@ async def answer_from_textbook(
         raise RuntimeError("TUTOR_MODEL must be configured before asking the tutor")
     answer = await complete_text(
         settings.tutor_model,
-        build_tutor_messages(query=query, grade_number=grade_number, context=context),
+        build_tutor_messages(query=query, grade_number=grade_number, context=context, mode=mode),
     )
 
     sources: list[dict[str, Any]] = []

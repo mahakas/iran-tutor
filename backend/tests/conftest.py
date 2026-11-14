@@ -8,6 +8,7 @@ import os
 # Settings are loaded while importing the application. These values are only
 # placeholders: unit tests do not make network or database calls.
 _TEST_SETTINGS = {
+    "DEMO_MODE": "false",
     "LLM_BASE_URL": "https://example.invalid/v1",
     "LLM_API_KEY": "unit-test-key",
     "VISION_MODEL_A": "unit-test-model-a",

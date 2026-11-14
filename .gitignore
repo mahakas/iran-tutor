@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.demo.example
 
 # --- Source material and data (never commit) ---
 *.pdf
@@ -9,6 +10,7 @@
 backend/storage/
 storage/
 data/
+*.sqlite3
 
 # --- Docker volumes / local service data ---
 docker-volumes/

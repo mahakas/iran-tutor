@@ -1,3 +1,5 @@
+export type TutorMode = "tutor" | "problem_solver" | "question_designer";
+
 export type GradeOption = {
   number: number;
   title: string;
