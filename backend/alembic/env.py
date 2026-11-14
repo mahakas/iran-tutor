@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import get_settings
 from app.db.base import Base
-from app.models import curriculum  # noqa: F401 - register tables on Base.metadata
+from app import models  # noqa: F401 - register all ORM models on Base.metadata
 
 config = context.config
 
@@ -21,11 +21,19 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def _include_object(object_, name, type_, reflected, compare_to) -> bool:
+    # `book_page_embeddings` uses pgvector on Supabase and is managed outside core ORM.
+    if type_ == "table" and name == "book_page_embeddings":
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     url = get_settings().database_url
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=_include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -34,7 +42,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=_include_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

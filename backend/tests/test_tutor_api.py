@@ -82,3 +82,89 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["answer"] == "پاسخ مستند"
+
+
+@pytest.mark.asyncio
+async def test_chat_sessions_roundtrip_crud(tmp_path):
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app.db.base import Base
+    from app.db.seed import seed_grades, seed_majors
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chat_test.sqlite3'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+    async with factory() as session:
+        await seed_grades(session)
+        await seed_majors(session)
+        await session.flush()
+        grade = await session.get(Grade, 12)
+        major = await session.get(Major, 1)
+        book = Book(
+            title="فیزیک ۳",
+            grade_id=grade.id,
+            major_id=major.id,
+            pdf_file_path="dummy.pdf",
+            total_pdf_pages=1,
+            status="ready",
+        )
+        session.add(book)
+        await session.commit()
+        await session.refresh(book)
+        book_id = book.id
+
+    async def override_session():
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            create_resp = await client.post(
+                "/api/v1/tutor/sessions",
+                json={
+                    "book_id": book_id,
+                    "grade_number": 12,
+                    "major_code": "math_physics",
+                    "mode": "tutor",
+                    "title": "حرکت بر خط راست",
+                    "messages": [
+                        {"id": "m1", "role": "user", "content": "سرعت متوسط چیست؟"},
+                        {"id": "m2", "role": "assistant", "content": "نسبت جابه‌جایی به زمان.", "sources": []},
+                    ],
+                },
+            )
+            assert create_resp.status_code == 200
+            session_id = create_resp.json()["id"]
+
+            list_resp = await client.get("/api/v1/tutor/sessions")
+            assert list_resp.status_code == 200
+            assert len(list_resp.json()) == 1
+            assert list_resp.json()[0]["message_count"] == 2
+
+            upd_resp = await client.put(
+                f"/api/v1/tutor/sessions/{session_id}",
+                json={
+                    "mode": "problem_solver",
+                    "messages": [
+                        {"id": "m1", "role": "user", "content": "سرعت متوسط چیست؟"},
+                        {"id": "m2", "role": "assistant", "content": "نسبت جابه‌جایی به زمان.", "sources": []},
+                        {"id": "m3", "role": "user", "content": "مثال حل کن"},
+                    ],
+                },
+            )
+            assert upd_resp.status_code == 200
+            assert upd_resp.json()["message_count"] == 3
+            assert upd_resp.json()["mode"] == "problem_solver"
+
+            get_resp = await client.get(f"/api/v1/tutor/sessions/{session_id}")
+            assert get_resp.status_code == 200
+            assert len(get_resp.json()["messages"]) == 3
+
+            del_resp = await client.delete(f"/api/v1/tutor/sessions/{session_id}")
+            assert del_resp.status_code == 200
+            assert (await client.get("/api/v1/tutor/sessions")).json() == []
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()

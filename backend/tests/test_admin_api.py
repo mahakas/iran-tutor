@@ -125,3 +125,142 @@ def test_single_preview_renders_each_page_without_single_queryselector_collision
     assert "t.nextElementSibling" in html_text
     assert "document.querySelector('.md-body[data-model=" not in html_text
 
+
+def test_single_preview_handles_missing_image_gracefully(tmp_path):
+    out = render_single_preview(
+        1,
+        "demo-vision",
+        [
+            {
+                "pdf_page_index": 1,
+                "image_path": str(tmp_path / "does_not_exist.png"),
+                "markdown": "صفحه بدون تصویر",
+                "status": "failed",
+                "warnings": [],
+                "visual_elements": [],
+            }
+        ],
+        tmp_path / "preview.html",
+    )
+    html_text = out.read_text(encoding="utf-8")
+    assert "تصویر صفحه موجود نیست" in html_text
+
+
+@pytest.mark.asyncio
+async def test_fix_page_clears_warnings_supports_null_and_serves_admin_lists(monkeypatch, tmp_path):
+    from PIL import Image
+    from app.api import admin as admin_api
+
+    img_path = tmp_path / "page_0015.png"
+    Image.new("RGB", (12, 12), "white").save(img_path)
+
+    book_obj = SimpleNamespace(
+        id=2,
+        title="فیزیک ۳",
+        grade_id=12,
+        major_id=1,
+        total_pdf_pages=1,
+        status="ready",
+    )
+    page_obj = SimpleNamespace(
+        book_id=2,
+        pdf_page_index=15,
+        printed_page_number=99,
+        chapter_number=1,
+        chapter_title="حرکت",
+        markdown_content="متن قبلی",
+        visual_elements=[],
+        page_image_path=str(img_path),
+        status="needs_review",
+        error_message="خطای قدیمی",
+        extraction_model="demo-vision",
+        warnings=["DEMO_MODE: OCR واقعی اجرا نشده"],
+        edited_by_human=False,
+    )
+
+    class FakeExecResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeScalarsResult:
+        def __init__(self, items):
+            self._items = items
+
+        def all(self):
+            return self._items
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, model, key):
+            if key == 2:
+                return book_obj
+            return None
+
+        async def scalar(self, stmt):
+            return page_obj
+
+        async def scalars(self, stmt):
+            return FakeScalarsResult([page_obj])
+
+        async def execute(self, stmt):
+            sql = str(stmt)
+            if "COUNT" in sql.upper() or "count(" in sql.lower():
+                return FakeExecResult([(2, page_obj.status, 1)])
+            return FakeExecResult([(book_obj, 12, "math_physics")])
+
+        async def commit(self):
+            return None
+
+    monkeypatch.setattr(admin_api, "async_session_factory", lambda: FakeSession())
+    monkeypatch.setattr("app.services.ingestion_service.STORAGE_DIR", tmp_path)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        books_resp = await client.get("/api/v1/admin/books")
+        assert books_resp.status_code == 200
+        assert books_resp.json()[0]["id"] == 2
+        assert books_resp.json()[0]["pages"] == {"needs_review": 1}
+
+        pages_resp = await client.get("/api/v1/admin/books/2/pages")
+        assert pages_resp.status_code == 200
+        assert pages_resp.json()[0]["image_url"] == "/api/v1/admin/books/2/pages/15/image"
+
+        img_resp = await client.get("/api/v1/admin/books/2/pages/15/image")
+        assert img_resp.status_code == 200
+        assert img_resp.headers["content-type"].startswith("image/png")
+
+        fix_resp = await client.put(
+            "/api/v1/admin/books/2/pages/15",
+            json={
+                "printed_page_number": None,
+                "chapter_number": 1,
+                "chapter_title": "حرکت بر خط راست",
+                "markdown_content": "# مثال اصلاح‌شده",
+            },
+        )
+        assert fix_resp.status_code == 200
+        assert fix_resp.json()["status"] == "done"
+        assert fix_resp.json()["edited_by_human"] is True
+
+    assert page_obj.printed_page_number is None
+    assert page_obj.chapter_title == "حرکت بر خط راست"
+    assert page_obj.markdown_content == "# مثال اصلاح‌شده"
+    assert page_obj.warnings == []
+    assert page_obj.error_message is None
+    assert (tmp_path / "books" / "2" / "book.md").is_file()
+    assert (tmp_path / "books" / "2" / "book.json").is_file()
+
+
+def test_unbalanced_dollars_warning_ignores_escaped_currency():
+    from app.services.ingestion_service import _unbalanced_dollars_warning
+
+    assert _unbalanced_dollars_warning(r"قیمت \$10 و فرمول $v = \frac{\Delta x}{\Delta t}$") is None
+    assert _unbalanced_dollars_warning("فرمول ناقص $v = at") is not None

@@ -6,7 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.config import get_settings
 
-engine = create_async_engine(get_settings().database_url, echo=False, pool_pre_ping=True)
+_db_url = get_settings().database_url
+_connect_args: dict[str, object] = {}
+if _db_url.startswith("postgresql+asyncpg") and (":6543" in _db_url or "pooler.supabase.com" in _db_url):
+    _connect_args["statement_cache_size"] = 0
+
+engine = create_async_engine(
+    _db_url,
+    echo=False,
+    pool_pre_ping=True,
+    connect_args=_connect_args,
+)
 
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 

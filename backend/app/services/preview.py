@@ -24,8 +24,13 @@ CDN = {
 }
 
 
-def _b64(path: str | Path) -> str:
-    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+def _b64(path: str | Path | None) -> str:
+    if not path:
+        return ""
+    file_path = Path(path)
+    if not file_path.is_file():
+        return ""
+    return base64.b64encode(file_path.read_bytes()).decode("ascii")
 
 
 def _escape(text: str | None) -> str:
@@ -69,6 +74,13 @@ def _md_container(page: dict[str, Any], model_key: str) -> str:
     )
 
 
+def _image_block(image_path: str | Path | None, page_idx: Any) -> str:
+    encoded = _b64(image_path)
+    if not encoded:
+        return '<div class="imgwrap img-missing">تصویر صفحه موجود نیست</div>'
+    return f'<div class="imgwrap"><img src="data:image/png;base64,{encoded}" alt="page {_escape(str(page_idx))}"></div>'
+
+
 def _page_card_single(page: dict[str, Any], model_key: str) -> str:
     status = page.get("status", "unknown")
     tone = "red" if status == "failed" else ("amber" if status == "needs_review" else "green")
@@ -84,7 +96,7 @@ def _page_card_single(page: dict[str, Any], model_key: str) -> str:
     return (
         f'<article class="page">'
         f'<div class="left">'
-        f'<div class="imgwrap"><img src="data:image/png;base64,{_b64(page["image_path"])}" alt="page {page.get("pdf_page_index")}"></div>'
+        f'{_image_block(page.get("image_path"), page.get("pdf_page_index"))}'
         f"</div>"
         f'<div class="right">'
         f'<div class="badges">{"".join(badges)}</div>'
@@ -117,7 +129,11 @@ def _summary_table(summary: dict[str, dict[str, Any]], names: dict[str, str]) ->
 
 
 def _compare_card(page_idx: int, image_b64: str, models: list[tuple[str, str, dict[str, Any]]]) -> str:
-    left = f'<div class="imgwrap"><img src="data:image/png;base64,{image_b64}" alt="page {page_idx}"></div>'
+    left = (
+        f'<div class="imgwrap"><img src="data:image/png;base64,{image_b64}" alt="page {page_idx}"></div>'
+        if image_b64
+        else '<div class="imgwrap img-missing">تصویر صفحه موجود نیست</div>'
+    )
     cols = [f'<div class="cmp-left">{left}</div>']
     for key, model_name, page in models:
         status = page.get("status", "unknown")
@@ -150,7 +166,9 @@ function scan(markdown, modelKey, el) {
     var opts = {
       delimiters: [
         {left:"$$", right:"$$", display:true},
-        {left:"$", right:"$", display:false}
+        {left:"\\[", right:"\\]", display:true},
+        {left:"$", right:"$", display:false},
+        {left:"\\(", right:"\\)", display:false}
       ],
       throwOnError: false,
       errorCallback: function () {
@@ -198,6 +216,7 @@ main {{ max-width:1280px; margin:0 auto; padding:20px; }}
 .page {{ display:grid; grid-template-columns:minmax(0,42fr) minmax(0,58fr); gap:18px; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:22px; }}
 .page.cmp {{ grid-template-columns:minmax(0,34fr) minmax(0,33fr) minmax(0,33fr); }}
 .imgwrap {{ background:#fff; border:1px solid var(--line); border-radius:10px; overflow:hidden; }}
+.imgwrap.img-missing {{ display:grid; place-items:center; min-height:220px; color:var(--muted); font-size:13px; background:#f9fafb; }}
 .imgwrap img {{ width:100%; height:auto; display:block; }}
 .right {{ min-width:0; }}
 .badges {{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }}

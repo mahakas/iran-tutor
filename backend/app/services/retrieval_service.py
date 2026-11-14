@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Sequence
@@ -9,7 +10,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import AsyncQdrantClient, models
-from sqlalchemy import Text, cast, func, select
+from sqlalchemy import Text, cast, func, select, text as sql_text
 
 from app.core.config import get_settings
 from app.core.llm_client import embed_texts
@@ -19,6 +20,71 @@ from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
 logger = logging.getLogger(__name__)
 
 _qdrant: AsyncQdrantClient | None = None
+
+_PERSIAN_STOPWORDS = frozenset(
+    {
+        "از",
+        "است",
+        "این",
+        "آن",
+        "با",
+        "بر",
+        "برای",
+        "به",
+        "تا",
+        "چه",
+        "چرا",
+        "چطور",
+        "چگونه",
+        "چی",
+        "چیست",
+        "دارد",
+        "دارند",
+        "در",
+        "را",
+        "رو",
+        "شود",
+        "شد",
+        "می",
+        "که",
+        "کدام",
+        "کند",
+        "کنید",
+        "لطفا",
+        "لطفاً",
+        "مفهوم",
+        "مفهومی",
+        "نیست",
+        "ها",
+        "های",
+        "هست",
+        "و",
+        "یا",
+        "یعنی",
+        "یک",
+    }
+)
+
+
+def normalize_persian_text(text: str) -> str:
+    """Normalize Arabic variants and zero-width characters for consistent lexical search."""
+    return (
+        text.replace("ي", "ی")
+        .replace("ك", "ک")
+        .replace("ة", "ه")
+        .replace("\u200c", " ")
+        .replace("\u0640", "")
+    )
+
+
+def build_lexical_query(query: str) -> str:
+    """Extract normalized Persian content terms joined with OR for websearch_to_tsquery."""
+    normalized = normalize_persian_text(query).casefold()
+    tokens = re.findall(r"[\w۰-۹]+", normalized)
+    filtered = [token for token in tokens if len(token) > 1 and token not in _PERSIAN_STOPWORDS]
+    chosen = filtered or [token for token in tokens if token]
+    deduped = list(dict.fromkeys(chosen))
+    return " OR ".join(deduped[:16]) if deduped else normalized.strip()
 
 
 def page_embedding_text(markdown: str, visual_elements: Sequence[dict[str, Any]] | None) -> str:
@@ -68,8 +134,40 @@ async def close_qdrant() -> None:
         _qdrant = None
 
 
+async def _ensure_pgvector_table() -> None:
+    async with async_session_factory() as session:
+        await session.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await session.execute(
+            sql_text(
+                """
+                CREATE TABLE IF NOT EXISTS public.book_page_embeddings (
+                    id SERIAL PRIMARY KEY,
+                    book_page_id INTEGER NOT NULL REFERENCES public.book_pages(id) ON DELETE CASCADE,
+                    book_id INTEGER NOT NULL REFERENCES public.books(id) ON DELETE CASCADE,
+                    grade_number INTEGER NOT NULL,
+                    major_code VARCHAR(64) NOT NULL,
+                    embedding_model VARCHAR(255) NOT NULL,
+                    embedding vector NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+                    CONSTRAINT uq_book_page_embedding UNIQUE (book_page_id)
+                )
+                """
+            )
+        )
+        await session.execute(
+            sql_text(
+                "CREATE INDEX IF NOT EXISTS ix_book_page_embeddings_scope "
+                "ON public.book_page_embeddings (book_id, grade_number, major_code)"
+            )
+        )
+        await session.commit()
+
+
 async def ensure_collection() -> None:
     settings = get_settings()
+    if settings.vector_backend == "pgvector":
+        await _ensure_pgvector_table()
+        return
     client = _get_qdrant()
     if not await client.collection_exists(settings.qdrant_collection):
         await client.create_collection(
@@ -129,6 +227,52 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
             "grade_number": grade.number,
             "major_code": major.code if major else "general",
         }
+        settings = get_settings()
+        if settings.vector_backend == "pgvector":
+            if not documents:
+                return {"book_id": book_id, "indexed_pages": 0, "skipped_empty_pages": len(pages)}
+            await _ensure_pgvector_table()
+            indexed = 0
+            upsert_sql = sql_text(
+                """
+                INSERT INTO public.book_page_embeddings
+                    (book_page_id, book_id, grade_number, major_code, embedding_model, embedding)
+                VALUES
+                    (:book_page_id, :book_id, :grade_number, :major_code, :embedding_model, CAST(:embedding AS vector))
+                ON CONFLICT (book_page_id) DO UPDATE SET
+                    book_id = EXCLUDED.book_id,
+                    grade_number = EXCLUDED.grade_number,
+                    major_code = EXCLUDED.major_code,
+                    embedding_model = EXCLUDED.embedding_model,
+                    embedding = EXCLUDED.embedding,
+                    created_at = now()
+                """
+            )
+            async with async_session_factory() as write_session:
+                for start in range(0, len(documents), batch_size):
+                    batch = documents[start : start + batch_size]
+                    vectors = await embed_texts([text for _, text in batch])
+                    for (page, _text), vector in zip(batch, vectors, strict=True):
+                        await write_session.execute(
+                            upsert_sql,
+                            {
+                                "book_page_id": page.id,
+                                "book_id": book.id,
+                                "grade_number": grade.number,
+                                "major_code": payload_base["major_code"],
+                                "embedding_model": settings.embedding_model,
+                                "embedding": json.dumps(vector),
+                            },
+                        )
+                        indexed += 1
+                await write_session.commit()
+            logger.info("indexed %s pages into pgvector for book %s", indexed, book_id)
+            return {
+                "book_id": book_id,
+                "indexed_pages": indexed,
+                "skipped_empty_pages": len(pages) - len(documents),
+            }
+
         points: list[models.PointStruct] = []
         for start in range(0, len(documents), batch_size):
             batch = documents[start : start + batch_size]
@@ -178,9 +322,12 @@ async def _search_postgres(
     """
     if get_settings().demo_mode:
         selected_major = major_code or "general"
+
         def _terms(value: str) -> set[str]:
-            normalized = value.casefold().replace("ي", "ی").replace("ك", "ک")
-            return set(re.findall(r"[\w۰-۹]+", normalized))
+            normalized = normalize_persian_text(value).casefold()
+            tokens = re.findall(r"[\w۰-۹]+", normalized)
+            filtered = {t for t in tokens if len(t) > 1 and t not in _PERSIAN_STOPWORDS}
+            return filtered or set(tokens)
 
         query_terms = _terms(query)
         async with async_session_factory() as session:
@@ -223,15 +370,21 @@ async def _search_postgres(
                 )
         return sorted(matches, key=lambda item: item["lexical_score"], reverse=True)[:limit]
 
-    ts_document = func.to_tsvector(
-        "simple",
-        func.concat(
-            func.coalesce(BookPage.markdown_content, ""),
-            " ",
-            cast(BookPage.visual_elements, Text),
-        ),
+    raw_doc = func.concat(
+        func.coalesce(BookPage.markdown_content, ""),
+        " ",
+        cast(BookPage.visual_elements, Text),
     )
-    ts_query = func.plainto_tsquery("simple", query)
+    normalized_doc = func.replace(
+        func.replace(func.replace(raw_doc, "ي", "ی"), "ك", "ک"),
+        "\u200c",
+        " ",
+    )
+    ts_document = func.to_tsvector("simple", normalized_doc)
+    lexical_query = build_lexical_query(query)
+    if not lexical_query:
+        return []
+    ts_query = func.websearch_to_tsquery("simple", lexical_query)
     rank = func.ts_rank_cd(ts_document, ts_query).label("lexical_score")
     selected_major = major_code or "general"
 
@@ -301,6 +454,79 @@ def merge_hybrid_results(
     return sorted(merged.values(), key=lambda item: item["score"], reverse=True)[:top_k]
 
 
+async def _search_pgvector(
+    query: str,
+    *,
+    grade_number: int,
+    major_code: str | None,
+    book_id: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    vector = (await embed_texts([query]))[0]
+    selected_major = major_code or "general"
+    statement = sql_text(
+        """
+        SELECT
+            bp.book_id,
+            b.title AS book_title,
+            e.grade_number,
+            e.major_code,
+            bp.pdf_page_index,
+            bp.printed_page_number,
+            bp.chapter_number,
+            bp.chapter_title,
+            bp.markdown_content,
+            bp.visual_elements,
+            (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) AS score
+        FROM public.book_page_embeddings e
+        JOIN public.book_pages bp ON bp.id = e.book_page_id
+        JOIN public.books b ON b.id = bp.book_id
+        WHERE e.book_id = :book_id
+          AND e.grade_number = :grade_number
+          AND e.major_code = :major_code
+          AND bp.status = 'done'
+          AND (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) >= 0.15
+        ORDER BY e.embedding <=> CAST(:query_vector AS vector) ASC, bp.pdf_page_index ASC
+        LIMIT :limit
+        """
+    )
+    async with async_session_factory() as session:
+        rows = (
+            await session.execute(
+                statement,
+                {
+                    "query_vector": json.dumps(vector),
+                    "book_id": book_id,
+                    "grade_number": grade_number,
+                    "major_code": selected_major,
+                    "limit": limit,
+                },
+            )
+        ).mappings().all()
+
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        visuals = row["visual_elements"] or []
+        markdown = row["markdown_content"] or ""
+        results.append(
+            {
+                "book_id": row["book_id"],
+                "book_title": row["book_title"],
+                "grade_number": row["grade_number"],
+                "major_code": row["major_code"],
+                "pdf_page_index": row["pdf_page_index"],
+                "printed_page_number": row["printed_page_number"],
+                "chapter_number": row["chapter_number"],
+                "chapter_title": row["chapter_title"],
+                "full_text": page_embedding_text(markdown, visuals),
+                "markdown_content": markdown,
+                "visual_elements": visuals,
+                "score": float(row["score"]),
+            }
+        )
+    return results
+
+
 async def _search_qdrant(
     query: str,
     *,
@@ -358,13 +584,22 @@ async def search_textbook(
         vector_results = []
     else:
         try:
-            vector_results = await _search_qdrant(
-                query,
-                grade_number=grade_number,
-                major_code=major_code,
-                book_id=book_id,
-                limit=candidate_limit,
-            )
+            if get_settings().vector_backend == "pgvector":
+                vector_results = await _search_pgvector(
+                    query,
+                    grade_number=grade_number,
+                    major_code=major_code,
+                    book_id=book_id,
+                    limit=candidate_limit,
+                )
+            else:
+                vector_results = await _search_qdrant(
+                    query,
+                    grade_number=grade_number,
+                    major_code=major_code,
+                    book_id=book_id,
+                    limit=candidate_limit,
+                )
         except Exception:  # noqa: BLE001 - lexical fallback is intentional
             logger.exception("vector search unavailable; using PostgreSQL lexical results")
             vector_results = []

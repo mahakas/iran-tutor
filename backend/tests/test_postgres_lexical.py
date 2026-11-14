@@ -42,8 +42,89 @@ async def test_postgres_search_query_is_scoped_and_uses_full_text_search(monkeyp
     compiled = str(fake_session.statement.compile(dialect=postgresql.dialect()))
     assert result == []
     assert "to_tsvector" in compiled
-    assert "plainto_tsquery" in compiled
+    assert "websearch_to_tsquery" in compiled
     assert "book_pages.status" in compiled
     assert "books.id" in compiled
     assert "grades.number" in compiled
     assert "majors.code" in compiled
+
+
+def test_persian_lexical_query_strips_stopwords_and_normalizes_arabic_letters():
+    expr = retrieval_service.build_lexical_query("شيب نمودار مکان‌زمان چه مفهومي دارد؟")
+    assert expr == "شیب OR نمودار OR مکان OR زمان"
+    assert "چه" not in expr
+    assert "دارد" not in expr
+
+
+@pytest.mark.asyncio
+async def test_pgvector_search_compiles_scoped_cosine_query_and_routes_when_enabled(monkeypatch):
+    from types import SimpleNamespace
+
+    observed = {}
+
+    class FakeMappingResult:
+        @staticmethod
+        def mappings():
+            class _Rows:
+                @staticmethod
+                def all():
+                    return [
+                        {
+                            "book_id": 2,
+                            "book_title": "فیزیک ۳",
+                            "grade_number": 12,
+                            "major_code": "math_physics",
+                            "pdf_page_index": 15,
+                            "printed_page_number": 4,
+                            "chapter_number": 1,
+                            "chapter_title": "حرکت بر خط راست",
+                            "markdown_content": "سرعت متوسط برابر تغییر مکان تقسیم بر زمان است.",
+                            "visual_elements": [],
+                            "score": 0.91,
+                        }
+                    ]
+
+            return _Rows()
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def execute(self, statement, params):
+            observed["sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            observed["params"] = params
+            return FakeMappingResult()
+
+    async def fake_embed_texts(texts):
+        return [[0.5, 0.5] for _ in texts]
+
+    async def no_lexical(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(retrieval_service, "async_session_factory", lambda: FakeSession())
+    monkeypatch.setattr(retrieval_service, "embed_texts", fake_embed_texts)
+    monkeypatch.setattr(retrieval_service, "_search_postgres", no_lexical)
+    monkeypatch.setattr(
+        retrieval_service,
+        "get_settings",
+        lambda: SimpleNamespace(demo_mode=False, vector_backend="pgvector"),
+    )
+
+    results = await retrieval_service.search_textbook(
+        "سرعت متوسط چیست؟",
+        grade_number=12,
+        major_code="math_physics",
+        book_id=2,
+        top_k=5,
+    )
+
+    assert "book_page_embeddings" in observed["sql"]
+    assert "<=>" in observed["sql"]
+    assert observed["params"]["book_id"] == 2
+    assert observed["params"]["grade_number"] == 12
+    assert observed["params"]["major_code"] == "math_physics"
+    assert len(results) == 1
+    assert results[0]["pdf_page_index"] == 15

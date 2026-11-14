@@ -42,6 +42,7 @@ async def system_status(session: AsyncSession = Depends(get_session)) -> dict[st
         "status": "ok",
         "mode": "demo" if settings.demo_mode else "production",
         "database": "sqlite" if settings.database_url.startswith("sqlite") else "postgresql",
+        "vector_backend": settings.vector_backend,
         "vector_search": not settings.demo_mode,
         "external_models": not settings.demo_mode,
     }

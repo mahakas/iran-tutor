@@ -149,3 +149,96 @@ def test_public_exam_always_includes_utc_offset_for_naive_datetimes():
     assert result["expires_at"].endswith("+00:00")
     assert datetime.fromisoformat(result["expires_at"]).tzinfo == timezone.utc
 
+
+def test_public_exam_includes_report_only_when_submitted():
+    active_exam = SimpleNamespace(
+        id="e-active",
+        book_id=1,
+        grade_number=12,
+        major_code="math_physics",
+        title="آزمون فعال",
+        exam_type="konkoor",
+        time_limit_seconds=600,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        status=ExamStatus.active,
+        questions=[_question("q1")],
+        report_card={"score": 100.0},
+        submitted_answers={"q1": "A"},
+    )
+    active_payload = public_exam(active_exam, include_report=True)
+    assert "report_card" not in active_payload
+
+    submitted_exam = SimpleNamespace(
+        id="e-done",
+        book_id=1,
+        grade_number=12,
+        major_code="math_physics",
+        title="آزمون ثبت‌شده",
+        exam_type="konkoor",
+        time_limit_seconds=600,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        status=ExamStatus.submitted,
+        questions=[_question("q1")],
+        report_card={"score": 100.0, "scale": "percent"},
+        submitted_answers={"q1": "A"},
+    )
+    done_payload = public_exam(submitted_exam, include_report=True)
+    assert done_payload["report_card"]["score"] == 100.0
+    assert done_payload["submitted_answers"] == {"q1": "A"}
+
+
+@pytest.mark.asyncio
+async def test_list_exams_returns_history_summaries(monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    from app.db.session import get_session
+    from app.main import app
+
+    now = datetime.now(timezone.utc)
+    exam_row = SimpleNamespace(
+        id="exam-1",
+        title="آزمون مروری",
+        book_id=2,
+        grade_number=12,
+        major_code="math_physics",
+        exam_type="konkoor",
+        status=ExamStatus.submitted,
+        questions=[_question("q1")],
+        time_limit_seconds=300,
+        expires_at=now + timedelta(minutes=5),
+        created_at=now,
+        submitted_at=now,
+        report_card={
+            "score": 100.0,
+            "scale": "percent",
+            "correct": 1,
+            "wrong": 0,
+            "unanswered": 0,
+            "total_questions": 1,
+            "by_question": [],
+        },
+    )
+
+    class FakeExec:
+        def all(self):
+            return [(exam_row, "فیزیک ۳")]
+
+    class FakeSession:
+        async def execute(self, stmt):
+            return FakeExec()
+
+    async def fake_session():
+        yield FakeSession()
+
+    app.dependency_overrides[get_session] = fake_session
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/v1/exams")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["id"] == "exam-1"
+    assert data[0]["book_title"] == "فیزیک ۳"
+    assert data[0]["report_summary"]["score"] == 100.0
