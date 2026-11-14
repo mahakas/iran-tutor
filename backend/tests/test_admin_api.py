@@ -13,11 +13,56 @@ from app.main import app
 from app.services.preview import render_single_preview
 
 
+ADMIN_HEADERS = {"X-Admin-Password": "123"}
+
+
+@pytest.mark.asyncio
+async def test_admin_endpoints_require_authentication_and_login_flow():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        unauth_session = await client.get("/api/v1/admin/auth/session")
+        assert unauth_session.status_code == 200
+        assert unauth_session.json() == {"authenticated": False}
+
+        for method, path in (
+            ("GET", "/api/v1/admin/books"),
+            ("GET", "/api/v1/admin/books/1/status"),
+            ("GET", "/api/v1/admin/books/1/pages"),
+            ("GET", "/api/v1/admin/books/1/pages/1/image"),
+            ("GET", "/api/v1/admin/books/1/preview"),
+            ("PUT", "/api/v1/admin/books/1/pages/1"),
+            ("POST", "/api/v1/admin/books/upload-and-ingest"),
+        ):
+            res = await client.request(method, path)
+            assert res.status_code == 401, f"{method} {path} returned {res.status_code}"
+
+        bad_login = await client.post("/api/v1/admin/auth/login", json={"password": "wrong"})
+        assert bad_login.status_code == 401
+
+        good_login = await client.post("/api/v1/admin/auth/login", json={"password": "123"})
+        assert good_login.status_code == 200
+        assert good_login.json() == {"authenticated": True}
+        assert "iran_tutor_admin" in client.cookies
+
+        authed_session = await client.get("/api/v1/admin/auth/session")
+        assert authed_session.json() == {"authenticated": True}
+
+        logout = await client.post("/api/v1/admin/auth/logout")
+        assert logout.status_code == 200
+        assert logout.json() == {"authenticated": False}
+
+        after_logout = await client.get("/api/v1/admin/books")
+        assert after_logout.status_code == 401
+
+
 @pytest.mark.asyncio
 async def test_preview_rejects_unknown_status():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/api/v1/admin/books/1/preview?status=bogus")
+        response = await client.get(
+            "/api/v1/admin/books/1/preview?status=bogus",
+            headers=ADMIN_HEADERS,
+        )
     assert response.status_code == 422
     assert "invalid status filter" in response.json()["detail"]
 
@@ -27,7 +72,8 @@ async def test_preview_rejects_inverted_page_range():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get(
-            "/api/v1/admin/books/1/preview?page_from=5&page_to=2"
+            "/api/v1/admin/books/1/preview?page_from=5&page_to=2",
+            headers=ADMIN_HEADERS,
         )
     assert response.status_code == 422
     assert "invalid page range" in response.json()["detail"]
@@ -37,7 +83,10 @@ async def test_preview_rejects_inverted_page_range():
 async def test_preview_rejects_negative_page_index():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/api/v1/admin/books/1/preview?page_from=0")
+        response = await client.get(
+            "/api/v1/admin/books/1/preview?page_from=0",
+            headers=ADMIN_HEADERS,
+        )
     assert response.status_code == 422
 
 
@@ -76,6 +125,7 @@ async def test_upload_rejects_invalid_pdf_and_out_of_bounds_page_range(monkeypat
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         bad_pdf = await client.post(
             "/api/v1/admin/books/upload-and-ingest",
+            headers=ADMIN_HEADERS,
             data={
                 "grade_number": "12",
                 "major_code": "math_physics",
@@ -90,6 +140,7 @@ async def test_upload_rejects_invalid_pdf_and_out_of_bounds_page_range(monkeypat
 
         too_many_pages = await client.post(
             "/api/v1/admin/books/upload-and-ingest",
+            headers=ADMIN_HEADERS,
             data={
                 "grade_number": "12",
                 "major_code": "math_physics",
@@ -224,21 +275,22 @@ async def test_fix_page_clears_warnings_supports_null_and_serves_admin_lists(mon
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        books_resp = await client.get("/api/v1/admin/books")
+        books_resp = await client.get("/api/v1/admin/books", headers=ADMIN_HEADERS)
         assert books_resp.status_code == 200
         assert books_resp.json()[0]["id"] == 2
         assert books_resp.json()[0]["pages"] == {"needs_review": 1}
 
-        pages_resp = await client.get("/api/v1/admin/books/2/pages")
+        pages_resp = await client.get("/api/v1/admin/books/2/pages", headers=ADMIN_HEADERS)
         assert pages_resp.status_code == 200
         assert pages_resp.json()[0]["image_url"] == "/api/v1/admin/books/2/pages/15/image"
 
-        img_resp = await client.get("/api/v1/admin/books/2/pages/15/image")
+        img_resp = await client.get("/api/v1/admin/books/2/pages/15/image", headers=ADMIN_HEADERS)
         assert img_resp.status_code == 200
         assert img_resp.headers["content-type"].startswith("image/png")
 
         fix_resp = await client.put(
             "/api/v1/admin/books/2/pages/15",
+            headers=ADMIN_HEADERS,
             json={
                 "printed_page_number": None,
                 "chapter_number": 1,

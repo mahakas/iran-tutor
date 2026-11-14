@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import {
   ArrowUp, AudioLines, BookOpen, Check, ChevronDown, CircleHelp, Clock3,
   FileImage, GraduationCap, LoaderCircle, Menu, MessageSquare, Mic, Paperclip,
@@ -496,7 +495,6 @@ export default function StudentApp() {
           <div className="sidebar-empty">گفت‌وگوهای تازه‌ات اینجا<br />ذخیره می‌شوند.</div>
         )}
         <div className="sidebar-spacer" />
-        <Link className="admin-link" href="/admin"><ShieldCheck size={17} /><span>پنل مدیریت</span><span className="admin-local">محلی</span></Link>
         <div className="profile-row"><div className="avatar">د</div><div><b>دانش‌آموز</b><span>پلن آزمایشی</span></div><ChevronDown size={16} /></div>
       </aside>
       {sidebarOpen && <button className="sidebar-scrim" aria-label="بستن منو" onClick={() => setSidebarOpen(false)} />}
