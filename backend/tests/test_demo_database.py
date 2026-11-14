@@ -38,5 +38,14 @@ async def test_demo_seed_is_repeatable_and_supports_scoped_retrieval(monkeypatch
         assert pages
         assert pages[0]["printed_page_number"] == 10
         assert "سرعت" in pages[0]["full_text"]
+
+        arabic_keyboard_pages = await retrieval_service.search_textbook(
+            "شيب نمودار مكان",
+            grade_number=12,
+            major_code="math_physics",
+            book_id=1,
+        )
+        assert arabic_keyboard_pages
+        assert arabic_keyboard_pages[0]["printed_page_number"] == 10
     finally:
         await engine.dispose()

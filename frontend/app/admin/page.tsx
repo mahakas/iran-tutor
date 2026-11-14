@@ -120,7 +120,8 @@ export default function AdminPage() {
                 <div className="progress-label"><span>صفحه‌های پردازش‌شده</span><b>{processedPages} / {book.total_pdf_pages}</b></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                 <div className="status-counts"><div><i className="done-dot" />موفق <b>{book.pages.done ?? 0}</b></div><div><i className="review-dot" />بازبینی <b>{book.pages.needs_review ?? 0}</b></div><div><i className="failed-dot" />خطا <b>{book.pages.failed ?? 0}</b></div></div>
                 {uploadMessage && <div className="success-note"><CheckCircle2 size={15} />{uploadMessage}</div>}
-                {book.status !== "ingesting" && <button className="outline-button preview-button" onClick={() => setPreviewOpen(true)}><ExternalLink size={16} />بازکردن پیش‌نمایش مقایسه‌ای</button>}
+                {book.status === "failed" && processedPages === 0 && <div className="inline-error" style={{ marginTop: 12 }}>پردازش کتاب ناموفق بود و صفحه‌ای ثبت نشد.</div>}
+                {book.status !== "ingesting" && processedPages > 0 && <button className="outline-button preview-button" onClick={() => setPreviewOpen(true)}><ExternalLink size={16} />بازکردن پیش‌نمایش مقایسه‌ای</button>}
               </div>
             )}
             <div className="review-tip"><Sparkles size={15} /><span>صفحه‌های نیازمند بازبینی را پیش از ایندکس و استفادهٔ آموزشی اصلاح کن.</span></div>

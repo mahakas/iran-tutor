@@ -64,6 +64,9 @@ def validate_questions(
 
 def public_exam(session: ExamSession) -> dict[str, Any]:
     """Return questions without answer keys or explanations before submission."""
+    expires_at = session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
     return {
         "id": session.id,
         "book_id": session.book_id,
@@ -72,7 +75,7 @@ def public_exam(session: ExamSession) -> dict[str, Any]:
         "title": session.title,
         "exam_type": session.exam_type,
         "time_limit_seconds": session.time_limit_seconds,
-        "expires_at": session.expires_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
         "status": session.status.value if hasattr(session.status, "value") else session.status,
         "questions": [
             {
