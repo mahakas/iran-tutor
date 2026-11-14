@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -71,7 +71,9 @@ class BookPage(Base):
     chapter_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chapter_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     markdown_content: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    visual_elements: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    visual_elements: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), default=dict, nullable=False
+    )
     page_image_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[PageStatus] = mapped_column(
         Enum(PageStatus, name="page_status"), default=PageStatus.pending, nullable=False

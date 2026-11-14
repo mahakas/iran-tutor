@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import random
@@ -172,8 +173,34 @@ async def _complete(
     return response.choices[0].message.content, _usage_dict(response.usage)
 
 
+def _demo_questions(messages: list[dict[str, str]]) -> dict[str, Any]:
+    """Deterministic exam fixtures used only by the explicitly enabled demo mode."""
+    system_text = "\n".join(message.get("content", "") for message in messages)
+    match = re.search(r"دقیقاً\s+(\d+)\s+سؤال", system_text)
+    count = min(20, max(3, int(match.group(1)))) if match else 5
+    questions = []
+    for index in range(count):
+        questions.append(
+            {
+                "prompt": f"[نمونهٔ نمایشی] کدام گزینه با محتوای صفحه‌های نمونه سازگار است؟ (سؤال {index + 1})",
+                "choices": {
+                    "A": "پاسخی که مستقیماً از منبع نمونه پشتیبانی می‌شود",
+                    "B": "گزینهٔ نادرست نمونهٔ یک",
+                    "C": "گزینهٔ نادرست نمونهٔ دو",
+                    "D": "گزینهٔ نادرست نمونهٔ سه",
+                },
+                "correct_option": "A",
+                "explanation": "در حالت نمایشی، کلید قطعی این سؤال ساختگی گزینهٔ A است؛ این داده محتوای آموزشی واقعی نیست.",
+                "source_index": 0,
+            }
+        )
+    return {"questions": questions}
+
+
 async def complete_json(model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
     """Request structured JSON through the shared LLM wrapper with retries."""
+    if get_settings().demo_mode:
+        return _demo_questions(messages)
     for attempt in range(MAX_RETRIES + 1):
         try:
             json_messages = list(messages)
@@ -224,6 +251,17 @@ async def embed_texts(texts: list[str], model: str | None = None) -> list[list[f
         return []
     settings = get_settings()
     embedding_model = model or settings.embedding_model
+    if settings.demo_mode:
+        vectors: list[list[float]] = []
+        for text in texts:
+            vector = [0.0] * settings.embedding_dimension
+            for token in re.findall(r"[\w۰-۹]+", text.casefold()):
+                digest = hashlib.sha256(token.encode("utf-8")).digest()
+                index = int.from_bytes(digest[:4], "big") % settings.embedding_dimension
+                vector[index] += 1.0 if digest[4] & 1 else -1.0
+            magnitude = sum(value * value for value in vector) ** 0.5
+            vectors.append([value / magnitude for value in vector] if magnitude else vector)
+        return vectors
     client = _get_embedding_client()
 
     for attempt in range(MAX_RETRIES + 1):
@@ -266,6 +304,28 @@ async def embed_texts(texts: list[str], model: str | None = None) -> list[list[f
 
 async def complete_text(model: str, messages: list[dict[str, str]]) -> str:
     """Create a plain-text chat completion through the shared provider client."""
+    if get_settings().demo_mode:
+        prompt = messages[-1].get("content", "") if messages else ""
+        if "شیب" in prompt and "نمودار" in prompt:
+            return (
+                "**حالت نمایشی:** شیب نمودار مکان ـ زمان، سرعت را نشان می‌دهد. "
+                "برای محاسبه، تغییر مکان را بر تغییر زمان تقسیم می‌کنیم. "
+                "این پاسخ ثابتِ نمونه است و خروجی مدل هوش مصنوعی واقعی نیست."
+            )
+        if "شتاب" in prompt:
+            return (
+                "**حالت نمایشی:** شتاب متوسط برابر تغییر سرعت تقسیم بر بازهٔ زمانی است. "
+                "این پاسخ ثابتِ نمونه است و خروجی مدل هوش مصنوعی واقعی نیست."
+            )
+        if "طراحی" in prompt or "سؤال" in prompt:
+            return (
+                "**حالت نمایشی:** درخواست به بک‌اند رسیده و پاسخ‌گویی مدل غیرفعال است. "
+                "برای پاسخ آموزشی واقعی، از تنظیمات provider استفاده کنید."
+            )
+        return (
+            "**حالت نمایشی:** درخواست به بک‌اند رسیده و صفحات نمونهٔ کتاب بازیابی شدند. "
+            "این خروجی ثابت است؛ برای استفادهٔ آموزشی واقعی باید مدل زبانی را پیکربندی کنید."
+        )
     client = _get_client()
     for attempt in range(MAX_RETRIES + 1):
         started = time.perf_counter()
@@ -329,11 +389,13 @@ async def transcribe_audio(
 ) -> str:
     """Transcribe Persian audio through a configurable OpenAI-compatible API."""
     settings = get_settings()
+    if not audio_bytes:
+        raise ValueError("audio file is empty")
+    if settings.demo_mode:
+        return "شیب نمودار مکان ـ زمان چه مفهومی دارد؟ [رونوشت نمونه؛ نه تشخیص واقعی صدا]"
     transcription_model = model or settings.speech_to_text_model
     if not transcription_model:
         raise RuntimeError("SPEECH_TO_TEXT_MODEL must be configured for voice questions")
-    if not audio_bytes:
-        raise ValueError("audio file is empty")
 
     client = _get_audio_client()
     async with _get_semaphore():
@@ -373,6 +435,26 @@ async def vision_json(
     Retries up to `MAX_RETRIES` times with exponential backoff on 429, 5xx,
     timeouts, connection errors and replies that contain no valid JSON object.
     """
+    if get_settings().demo_mode:
+        if "printed_page_number" in system_prompt and "markdown_content" in system_prompt:
+            return (
+                {
+                    "printed_page_number": None,
+                    "chapter_number": None,
+                    "chapter_title": None,
+                    "markdown_content": "حالت نمایشی: محتوای این صفحه با OCR واقعی استخراج نشده است؛ بازبینی انسانی الزامی است.",
+                    "visual_elements": [],
+                },
+                {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            )
+        return (
+            {
+                "question_text": "نمودار مکان ـ زمان چه مفهومی دارد؟ [صورت سؤال ثابت نمایشی؛ تصویر واقعاً خوانده نشده]",
+                "visual_description": "تصویر در حالت نمایشی تحلیل نمی‌شود.",
+                "uncertain_parts": ["تشخیص بینایی واقعی در حالت نمایشی غیرفعال است"],
+            },
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
     image_b64 = base64.b64encode(image_png_bytes).decode("ascii")
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},

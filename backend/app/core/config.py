@@ -18,6 +18,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    demo_mode: bool = False
     llm_base_url: str = Field(min_length=1)
     llm_api_key: str = Field(min_length=1)
 

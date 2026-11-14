@@ -15,7 +15,7 @@ from app.api.dependencies import resolve_book_scope
 from app.db.session import get_session
 from app.models.curriculum import Book, Grade
 from app.services.multimodal_service import answer_audio_question, answer_image_question
-from app.services.tutor_service import answer_from_textbook
+from app.services.tutor_service import TutorMode, answer_from_textbook
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/tutor", tags=["tutor"])
@@ -54,6 +54,7 @@ class AskRequest(BaseModel):
     major_code: str | None = Field(default=None, max_length=64)
     book_id: int = Field(gt=0)
     top_k: int = Field(default=5, ge=1, le=20)
+    mode: TutorMode = "tutor"
 
 
 async def _read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
@@ -113,6 +114,7 @@ async def ask_tutor(
             major_code=major_code,
             book_id=book.id,
             top_k=body.top_k,
+            mode=body.mode,
         )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="tutor") from error
@@ -125,6 +127,7 @@ async def ask_tutor_with_image(
     book_id: int = Form(...),
     major_code: str | None = Form(None),
     top_k: int = Form(5),
+    mode: TutorMode = Form("tutor"),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     if not 1 <= grade_number <= 12 or book_id <= 0 or not 1 <= top_k <= 20:
@@ -145,6 +148,7 @@ async def ask_tutor_with_image(
             major_code=major_code,
             book_id=book.id,
             top_k=top_k,
+            mode=mode,
         )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="image tutor") from error
@@ -157,6 +161,7 @@ async def ask_tutor_with_audio(
     book_id: int = Form(...),
     major_code: str | None = Form(None),
     top_k: int = Form(5),
+    mode: TutorMode = Form("tutor"),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     if not 1 <= grade_number <= 12 or book_id <= 0 or not 1 <= top_k <= 20:
@@ -183,6 +188,7 @@ async def ask_tutor_with_audio(
             major_code=major_code,
             book_id=book.id,
             top_k=top_k,
+            mode=mode,
         )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="voice tutor") from error

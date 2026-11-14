@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import get_settings
 from app.core.llm_client import transcribe_audio, vision_json
-from app.services.tutor_service import answer_from_textbook
+from app.services.tutor_service import TutorMode, answer_from_textbook
 
 
 class ImageQuestionExtraction(BaseModel):
@@ -42,6 +42,7 @@ async def answer_image_question(
     major_code: str | None,
     book_id: int,
     top_k: int = 5,
+    mode: TutorMode = "tutor",
 ) -> dict[str, Any]:
     """Read a photographed question and solve it using the selected textbook only."""
     settings = get_settings()
@@ -62,6 +63,7 @@ async def answer_image_question(
         major_code=major_code,
         book_id=book_id,
         top_k=top_k,
+        mode=mode,
     )
     result["recognized_question"] = extraction.question_text
     result["visual_description"] = extraction.visual_description
@@ -78,6 +80,7 @@ async def answer_audio_question(
     major_code: str | None,
     book_id: int,
     top_k: int = 5,
+    mode: TutorMode = "tutor",
 ) -> dict[str, Any]:
     """Transcribe a Persian voice question, then answer from the selected book."""
     transcript = await transcribe_audio(
@@ -91,6 +94,7 @@ async def answer_audio_question(
         major_code=major_code,
         book_id=book_id,
         top_k=top_k,
+        mode=mode,
     )
     result["transcript"] = transcript
     return result
