@@ -18,21 +18,27 @@ function sourceLabel(source: ExamReport["by_question"][number]["source"]) {
     .join(" · ");
 }
 
+function parseUtcMs(isoTimestamp: string): number {
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(isoTimestamp);
+  return Date.parse(hasTimezone ? isoTimestamp : `${isoTimestamp}Z`);
+}
+
 export default function ExamRunner({ exam, onExit }: Props) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [index, setIndex] = useState(0);
-  const [secondsLeft, setSecondsLeft] = useState(() => Math.max(0, Math.ceil((Date.parse(exam.expires_at) - Date.now()) / 1000)));
+  const [secondsLeft, setSecondsLeft] = useState(() => Math.max(0, Math.ceil((parseUtcMs(exam.expires_at) - Date.now()) / 1000)));
   const [report, setReport] = useState<ExamReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const sent = useRef(false);
+  const autoSubmitted = useRef(false);
   const question = exam.questions[index];
   const answeredCount = Object.keys(answers).length;
   const progress = useMemo(() => ((index + 1) / exam.questions.length) * 100, [index, exam.questions.length]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setSecondsLeft(Math.max(0, Math.ceil((Date.parse(exam.expires_at) - Date.now()) / 1000)));
+      setSecondsLeft(Math.max(0, Math.ceil((parseUtcMs(exam.expires_at) - Date.now()) / 1000)));
     }, 500);
     return () => window.clearInterval(timer);
   }, [exam.expires_at]);
@@ -60,7 +66,10 @@ export default function ExamRunner({ exam, onExit }: Props) {
   }, [answers, exam.id, report]);
 
   useEffect(() => {
-    if (secondsLeft === 0 && !report && !sent.current) void submit();
+    if (secondsLeft === 0 && !report && !sent.current && !autoSubmitted.current) {
+      autoSubmitted.current = true;
+      void submit();
+    }
   }, [secondsLeft, report, submit]);
 
   const selectAnswer = (choice: string) => {

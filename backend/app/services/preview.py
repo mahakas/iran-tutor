@@ -140,8 +140,7 @@ def _compare_card(page_idx: int, image_b64: str, models: list[tuple[str, str, di
 
 _JS = r"""
 const kxErrors = {};
-function scan(markdown, modelKey) {
-  var el = document.querySelector('.md-body[data-model="'+modelKey+'"]');
+function scan(markdown, modelKey, el) {
   if (!el) return;
   try {
     var parsed = marked.parse(markdown);
@@ -168,7 +167,13 @@ function scan(markdown, modelKey) {
 }
 document.addEventListener('DOMContentLoaded', function () {
   var sources = document.querySelectorAll('textarea.md-source');
-  sources.forEach(function (t) { scan(t.value, t.getAttribute('data-model')); });
+  sources.forEach(function (t) {
+    var target = t.nextElementSibling;
+    if (!target || !target.classList.contains('md-body')) {
+      target = t.parentElement ? t.parentElement.querySelector('.md-body') : null;
+    }
+    scan(t.value, t.getAttribute('data-model'), target);
+  });
 });
 """
 

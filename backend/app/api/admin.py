@@ -14,11 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import async_session_factory
 from app.models.curriculum import Book, BookPage, Grade, Major
-from app.services.ingestion_service import UPLOAD_DIR, STORAGE_DIR, ingest_book_pages, model_tag
+from app.services.ingestion_service import UPLOAD_DIR, STORAGE_DIR, ingest_book_pages, model_tag, pdf_page_count
 from app.services.preview import render_single_preview
 from app.services.validation import validate_major_code
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+MAX_PDF_BYTES = 100 * 1024 * 1024
 
 
 async def _run_ingest_background(
@@ -90,7 +91,23 @@ async def upload_and_ingest(
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         suffix = Path(pdf_file.filename or "upload.pdf").suffix or ".pdf"
         dest = UPLOAD_DIR / f"{uuid4().hex}{suffix}"
-        dest.write_bytes(await pdf_file.read())
+        pdf_bytes = await pdf_file.read(MAX_PDF_BYTES + 1)
+        if not pdf_bytes:
+            raise HTTPException(status_code=422, detail="uploaded PDF file is empty")
+        if len(pdf_bytes) > MAX_PDF_BYTES:
+            raise HTTPException(status_code=413, detail="PDF file exceeds 100 MiB limit")
+        dest.write_bytes(pdf_bytes)
+        try:
+            page_count = pdf_page_count(dest)
+        except Exception as exc:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(status_code=422, detail="uploaded file is not a valid PDF") from exc
+        if end_page > page_count:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=422,
+                detail=f"page range ends at {end_page}, but the PDF contains only {page_count} pages",
+            )
 
         book = Book(
             title=book_title,

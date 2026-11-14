@@ -53,6 +53,7 @@ export default function StudentApp() {
   const [recording, setRecording] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [examSetupOpen, setExamSetupOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [examType, setExamType] = useState<"konkoor" | "final">("konkoor");
   const [questionCount, setQuestionCount] = useState(5);
   const [timeLimit, setTimeLimit] = useState(15);
@@ -118,11 +119,36 @@ export default function StudentApp() {
     return () => controller.abort();
   }, [gradeNumber, majorCode, hasMajor]);
 
-  const clearAttachments = () => {
+  const clearAttachments = useCallback(() => {
     setImageFile(null);
     setAudioFile(null);
     if (imageInputRef.current) imageInputRef.current.value = "";
-  };
+  }, []);
+
+  const resetChat = useCallback(() => {
+    setMessages([]);
+    setDraft("");
+    setMessageError("");
+    clearAttachments();
+    setSidebarOpen(false);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+  }, [clearAttachments]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        resetChat();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [resetChat]);
+
+  useEffect(() => {
+    if (!messages.length && !busy) return;
+    document.getElementById("message-end")?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length, busy]);
 
   const sendMessage = useCallback(async () => {
     const query = draft.trim();
@@ -170,7 +196,7 @@ export default function StudentApp() {
       setBusy(false);
       window.setTimeout(() => inputRef.current?.focus(), 0);
     }
-  }, [audioFile, bookId, busy, draft, gradeNumber, hasMajor, imageFile, majorCode, tutoringMode]);
+  }, [audioFile, bookId, busy, clearAttachments, draft, gradeNumber, hasMajor, imageFile, majorCode, tutoringMode]);
 
   const startRecording = async () => {
     if (recording) {
@@ -245,7 +271,7 @@ export default function StudentApp() {
           <div><strong>هم‌درس</strong><span>معلم خصوصی هوشمند</span></div>
           <button className="icon-button mobile-close" aria-label="بستن منو" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
         </div>
-        <button className="new-chat-button" onClick={() => { setMessages([]); setDraft(""); setSidebarOpen(false); }}><Plus size={18} /> گفت‌وگوی تازه <span>⌘ K</span></button>
+        <button className="new-chat-button" onClick={resetChat}><Plus size={18} /> گفت‌وگوی تازه <span>⌘ K</span></button>
         <div className="sidebar-section-label">فضای یادگیری</div>
         <button className="sidebar-item active"><BookOpen size={17} /><span>معلم خصوصی</span><span className="side-dot" /></button>
         <button className="sidebar-item" onClick={() => setExamSetupOpen(true)}><GraduationCap size={17} /><span>آزمون‌های من</span></button>
@@ -261,15 +287,15 @@ export default function StudentApp() {
         <header className="topbar">
           <button className="icon-button mobile-menu" aria-label="بازکردن منو" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
           <div className="context-title"><span className="online-indicator" /><div><b>{selectedBook?.title ?? "کلاس درس"}</b><span>{currentGrade?.title ?? "انتخاب پایه"}{hasMajor && majorCode ? ` · ${majors.find((major) => major.code === majorCode)?.title ?? ""}` : ""}</span></div><ChevronDown size={15} /></div>
-          <div className="topbar-actions">{demoMode && <span className="private-badge demo-badge"><Sparkles size={14} /> حالت آزمایشی</span>}<span className="private-badge"><ShieldCheck size={14} /> فضای خصوصی</span><button className="icon-button help-button" aria-label="راهنما"><CircleHelp size={18} /></button></div>
+          <div className="topbar-actions">{demoMode && <span className="private-badge demo-badge"><Sparkles size={14} /> حالت آزمایشی</span>}<span className="private-badge"><ShieldCheck size={14} /> فضای خصوصی</span><button className="icon-button help-button" aria-label="راهنما" onClick={() => setHelpOpen(true)}><CircleHelp size={18} /></button></div>
         </header>
 
         <section className="curriculum-strip">
           <div className="strip-heading"><span className="strip-icon"><BookOpen size={17} /></span><div><b>کلاس امروزت</b><span>کتابت را انتخاب کن تا معلم دقیقاً با همان منبع کمکت کند.</span></div></div>
           <div className="selector-row">
-            <label className="select-wrap"><span>پایه</span><select value={gradeNumber ?? ""} onChange={(event) => { setGradeNumber(Number(event.target.value)); setMajorCode(""); setBooks([]); setBookId(""); }}><option value="" disabled>انتخاب پایه</option>{grades.map((grade) => <option key={grade.number} value={grade.number}>{grade.title}</option>)}</select><ChevronDown size={15} /></label>
-            {hasMajor && <label className="select-wrap"><span>رشته</span><select value={majorCode} onChange={(event) => { setMajorCode(event.target.value); setBooks([]); setBookId(""); }}><option value="">انتخاب رشته</option>{majors.map((major) => <option key={major.code} value={major.code}>{major.title}</option>)}</select><ChevronDown size={15} /></label>}
-            <label className="select-wrap book-select"><span>کتاب</span><select value={bookId} onChange={(event) => { setBookId(event.target.value); setMessages([]); }} disabled={!books.length}><option value="">{books.length ? "انتخاب کتاب" : "کتابی در دسترس نیست"}</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title}</option>)}</select><ChevronDown size={15} /></label>
+            <label className="select-wrap"><span>پایه</span><select value={gradeNumber ?? ""} onChange={(event) => { setGradeNumber(Number(event.target.value)); setMajorCode(""); setBooks([]); setBookId(""); setMessages([]); setMessageError(""); }}><option value="" disabled>انتخاب پایه</option>{grades.map((grade) => <option key={grade.number} value={grade.number}>{grade.title}</option>)}</select><ChevronDown size={15} /></label>
+            {hasMajor && <label className="select-wrap"><span>رشته</span><select value={majorCode} onChange={(event) => { setMajorCode(event.target.value); setBooks([]); setBookId(""); setMessages([]); setMessageError(""); }}><option value="">انتخاب رشته</option>{majors.map((major) => <option key={major.code} value={major.code}>{major.title}</option>)}</select><ChevronDown size={15} /></label>}
+            <label className="select-wrap book-select"><span>کتاب</span><select value={bookId} onChange={(event) => { setBookId(event.target.value); setMessages([]); setMessageError(""); }} disabled={!books.length}><option value="">{books.length ? "انتخاب کتاب" : "کتابی در دسترس نیست"}</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title}</option>)}</select><ChevronDown size={15} /></label>
           </div>
           {curriculumError && <div className="notice-error">{curriculumError} · مطمئن شو بک‌اند و دیتابیس اجرا هستند.</div>}
         </section>
@@ -342,6 +368,15 @@ export default function StudentApp() {
           {messageError && <div className="inline-error">{messageError}</div>}
           <button className="primary-button modal-submit" disabled={!bookId || busy} onClick={() => void createExam()}>{busy ? <LoaderCircle className="spin" size={17} /> : <GraduationCap size={17} />}شروع آزمون</button>
           {!bookId && <small className="modal-hint">برای ساخت آزمون، ابتدا کتابت را انتخاب کن.</small>}
+        </section>
+      </div>}
+
+      {helpOpen && <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
+        <section className="exam-setup-modal" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
+          <button className="modal-close icon-button" onClick={() => setHelpOpen(false)} aria-label="بستن"><X size={18} /></button>
+          <div className="modal-icon"><CircleHelp size={22} /></div><span className="eyebrow">راهنمای هم‌درس</span><h2 id="help-modal-title">نحوهٔ استفاده</h2>
+          <p>۱. پایه، رشته (برای پایه‌های ۱۰ تا ۱۲) و کتاب درسی را انتخاب کن.<br />۲. حالت یادگیری را از نوار ابزار برگزین: معلم خصوصی، حل تمرین، طراحی سؤال یا آزمون زمان‌دار.<br />۳. می‌توانی سوالت را تایپ کنی، عکس تمرین را پیوست کنی یا با صدا بپرسی. میانبر گفت‌وگوی تازه: Cmd/Ctrl + K.</p>
+          <button className="primary-button modal-submit" onClick={() => setHelpOpen(false)}>متوجه شدم</button>
         </section>
       </div>}
     </div>

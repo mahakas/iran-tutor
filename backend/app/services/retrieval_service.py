@@ -178,7 +178,11 @@ async def _search_postgres(
     """
     if get_settings().demo_mode:
         selected_major = major_code or "general"
-        query_terms = set(re.findall(r"[\w۰-۹]+", query.casefold()))
+        def _terms(value: str) -> set[str]:
+            normalized = value.casefold().replace("ي", "ی").replace("ك", "ک")
+            return set(re.findall(r"[\w۰-۹]+", normalized))
+
+        query_terms = _terms(query)
         async with async_session_factory() as session:
             rows = (
                 await session.execute(
@@ -198,7 +202,7 @@ async def _search_postgres(
         matches: list[dict[str, Any]] = []
         for page, title, grade, major in rows:
             full_text = page_embedding_text(page.markdown_content, page.visual_elements)
-            page_terms = set(re.findall(r"[\w۰-۹]+", full_text.casefold()))
+            page_terms = _terms(full_text)
             overlap = len(query_terms & page_terms)
             if overlap:
                 matches.append(

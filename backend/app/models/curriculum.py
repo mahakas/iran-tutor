@@ -82,7 +82,9 @@ class BookPage(Base):
     extraction_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    warnings: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    warnings: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), default=list, nullable=False
+    )
     edited_by_human: Mapped[bool] = mapped_column(nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

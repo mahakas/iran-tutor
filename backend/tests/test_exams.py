@@ -127,3 +127,25 @@ def test_expired_exam_is_marked_expired_and_rejected():
     with pytest.raises(TimeoutError):
         submit_exam(exam, {"q1": "A"})
     assert exam.status == ExamStatus.expired
+
+
+def test_public_exam_always_includes_utc_offset_for_naive_datetimes():
+    naive_expires = datetime(2026, 11, 14, 22, 30, 0)
+    exam = SimpleNamespace(
+        id="uuid",
+        book_id=1,
+        grade_number=12,
+        major_code="math_physics",
+        title="آزمون فصل ۱",
+        exam_type="konkoor",
+        time_limit_seconds=900,
+        expires_at=naive_expires,
+        status=ExamStatus.active,
+        questions=[_question("q1")],
+    )
+
+    result = public_exam(exam)
+
+    assert result["expires_at"].endswith("+00:00")
+    assert datetime.fromisoformat(result["expires_at"]).tzinfo == timezone.utc
+
