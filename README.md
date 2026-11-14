@@ -1,110 +1,122 @@
 # معلم خصوصی هوش مصنوعی ایران (Iran AI Tutor)
 
-سکوی معلم خصوصی فارسی مبتنی بر هوش مصنوعی که **فقط** بر پایهٔ کتاب‌های درسی رسمی ایران پاسخ می‌دهد و در پایان هر پاسخ، منبع (کتاب، فصل و شمارهٔ صفحهٔ چاپی) را ذکر می‌کند.
+سکوی معلم خصوصی فارسی مبتنی بر کتاب‌های درسی رسمی ایران. هدف محصول، پاسخ‌گویی مستند به کتاب، فصل و شمارهٔ صفحهٔ چاپی است؛ اگر منبع قابل‌اتکا در کتاب‌های بارگذاری‌شده پیدا نشود، سیستم باید از حدس‌زدن خودداری کند.
 
-پروژه به‌صورت فازبندی‌شده ساخته می‌شود. وضعیت فعلی: **فاز ۱، گام D** (پردازش کامل PDF با استخراج متن، فرمول و شکل، به‌همراه بازبینی انسانی).
+پروژه مرحله‌ای ساخته می‌شود. وضعیت فعلی مخزن: **فاز ۱ — خط پردازش PDF و بازبینی انسانی**. موتور RAG، چت دانش‌آموز، پنل وب ادمین، آزمون واقعی، ورودی عکس/صوت و احراز هویت هنوز جزو کارهای بعدی‌اند.
 
-## ساختار پوشه‌ها
+> سرویس‌های ادمین فعلی برای توسعهٔ محلی‌اند و هنوز احراز هویت ندارند. آن‌ها را روی اینترنت عمومی منتشر نکنید.
+
+## ساختار اصلی
 
 | مسیر | توضیح |
 |---|---|
-| `.kilocode/rules/architecture.md` | قوانین پایدار معماری، فازها، رفتار معلم و قواعد کدنویسی |
-| `docker-compose.yml` | سرویس‌های زیرساختی: PostgreSQL، Qdrant و Redis |
-| `.env.example` | نمونهٔ متغیرهای محیطی ریشه؛ باید در فایل `.env` کپی و مقداردهی شود |
-| `.gitignore` | فایل‌هایی که هرگز نباید کامیت شوند (`.env`، فایل‌های PDF، پوشه‌های داده و `storage`) |
-| `backend/` | سرویس FastAPI و ابزارهای پردازش کتاب |
-| `backend/storage/` | فایل‌های کتاب و خروجی پردازش؛ در گیت ثبت نمی‌شود |
-| `frontend/` | وب‌اپلیکیشن دانش‌آموز (Next.js، راست‌به‌چپ) — در فازهای بعدی |
+| `.kilocode/rules/architecture.md` | قواعد معماری، فازها و رفتار معلم |
+| `docker-compose.yml` | PostgreSQL، Qdrant و Redis |
+| `.env.example` | تنظیمات نمونهٔ Docker؛ فایل واقعی `.env` را نسازید/کامیت نکنید |
+| `backend/` | FastAPI، پردازش PDF، مدل‌های داده و آزمون‌ها |
+| `backend/storage/` | PDFهای آپلودشده، تصاویر و خروجی پردازش؛ در Git ثبت نمی‌شود |
+| `frontend/` | در فاز رابط کاربری اضافه خواهد شد |
 
-## راه‌اندازی سرویس‌ها
+## راه‌اندازی در Ubuntu / WSL2
+
+پیش‌نیازها: Docker Desktop با WSL integration، Python 3.11+ و دسترسی به یک API سازگار با OpenAI برای مدل بینایی.
+
+### ۱. زیرساخت
+
+از ریشهٔ مخزن:
 
 ```bash
-cp .env.example .env        # سپس مقادیر را ویرایش کنید
+cp .env.example .env
+# در صورت نیاز POSTGRES_PASSWORD را در .env عوض کنید.
 docker compose up -d
-docker compose ps           # همهٔ سرویس‌ها باید healthy باشند
+docker compose ps
 ```
 
-درگاه‌ها فقط روی `127.0.0.1` باز هستند:
+سرویس‌ها باید وضعیت `healthy` داشته باشند. پورت‌های دیتابیس فقط روی loopback منتشر شده‌اند:
 
-| سرویس | درگاه |
-|---|---|
+| سرویس | پورت |
+|---|---:|
 | PostgreSQL | 5432 |
-| Qdrant (HTTP / gRPC) | 6333 / 6334 |
+| Qdrant HTTP / gRPC | 6333 / 6334 |
 | Redis | 6379 |
 
-## راه‌اندازی بک‌اند
+### ۲. بک‌اند
 
 ```bash
 cd backend
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-copy .env.example .env      # سپس LLM_BASE_URL، LLM_API_KEY و نام مدل‌ها را وارد کنید
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
-مهاجرت‌های پایگاه‌داده:
+در `backend/.env` مقدارهای `LLM_BASE_URL`، `LLM_API_KEY` و نام مدل‌های `VISION_MODEL_*` را با اطلاعات سرویس خودتان پر کنید. مقدار `DATABASE_URL` نمونه با تنظیمات پیش‌فرض ریشه هماهنگ است؛ اگر رمز PostgreSQL را عوض کردید، همین‌جا هم آن را عوض کنید.
+
+سپس مهاجرت و API را اجرا کنید:
 
 ```bash
-.venv\Scripts\alembic upgrade head
+alembic upgrade head
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-اجرای API:
+مستندات API محلی: <http://127.0.0.1:8000/docs>
 
-```bash
-.venv\Scripts\uvicorn app.main:app --reload
-```
+### ۳. آزمون‌ها
 
-## پردازش کتاب (فاز ۱، گام D)
-
-کتاب با **عنوان + پایه + رشته** در پایگاه‌داده شناسایی می‌شود. برای پایه‌های ۱۰ تا ۱۲ ارائهٔ `--major` الزامی است.
+آزمون‌های واحد به `.env`، کلید API یا دیتابیس واقعی نیاز ندارند:
 
 ```bash
 cd backend
-.venv\Scripts\python scripts\ingest_book.py --pdf data\physics12.pdf --grade 12 \
-    --major math_physics --title "فیزیک ۳" --start 1 --end 9
+source .venv/bin/activate
+pytest -q
+```
+
+اسکریپت `scripts/test_ingest.py` ابزار مقایسهٔ مدل‌هاست، نه مجموعهٔ تست pytest؛ برای جلوگیری از اجرای تصادفی آن، pytest فقط مسیر `tests/` را جمع‌آوری می‌کند.
+
+## پردازش کتاب — فاز ۱
+
+برای پایه‌های ۱۰ تا ۱۲، کد رشته الزامی است. PDF را در مسیر دلخواه نگه دارید؛ فایل PDF و خروجی‌های پردازش وارد Git نمی‌شوند.
+
+```bash
+cd backend
+source .venv/bin/activate
+python scripts/ingest_book.py \
+  --pdf /path/to/physics12.pdf \
+  --grade 12 --major math_physics --title "فیزیک ۳" \
+  --start 5 --end 9
 ```
 
 گزینه‌های مهم:
 
 | گزینه | کاربرد |
 |---|---|
-| `--dry-run` | فقط برنامهٔ پردازش را نشان می‌دهد؛ هیچ رندر، فراخوانی LLM یا نوشتنی انجام نمی‌شود |
-| `--force` | همهٔ صفحات را دوباره پردازش می‌کند |
-| `--only-failed` | فقط صفحات ناموفق را دوباره پردازش می‌کند |
-| `--overwrite-human` | اجازه می‌دهد صفحاتی که انسان ویرایش کرده بازنویسی شوند (بدون این گزینه، حتی `--force` هم آن‌ها را حفظ می‌کند) |
+| `--dry-run` | فقط برنامهٔ کار را نشان می‌دهد؛ هیچ رندر، فراخوانی مدل یا نوشتنی ندارد |
+| `--force` | صفحات انتخاب‌شده را دوباره پردازش می‌کند |
+| `--only-failed` | فقط صفحات ناموفق را دوباره تلاش می‌کند |
+| `--overwrite-human` | اجازهٔ بازنویسی صفحات اصلاح‌شده توسط انسان را می‌دهد |
 
-پس از پردازش:
+خروجی‌ها در `backend/storage/books/<book_id>/` قرار می‌گیرند: JSON/Markdown، تصاویر صفحات و پیش‌نمایش. برای صفحه‌های نامطمئن، خروجی نیازمند بازبینی است و نباید بدون بررسی انسانی به‌عنوان استخراج قطعی تلقی شود.
 
-- خروجی‌ها در `backend/storage/books/<book_id>/` ذخیره می‌شوند: `book.md`، `book.json`، تصاویر صفحات و خروجی هر مدل.
-- در `book.json` مقدار `printed_page_offset` (اختلاف رایج بین شمارهٔ PDF و شمارهٔ چاپی) و فهرست `printed_page_deviations` ثبت می‌شود.
-- گزارش پایانی، شمارهٔ صفحه‌های `needs_review` و `failed`، هشدارهای هر صفحه و صفحات دارای انحراف در شمارهٔ چاپی را چاپ می‌کند.
+پیش‌نمایش API پس از پردازش:
 
-### ادامهٔ پردازش و بازبینی
+```text
+GET /api/v1/admin/books/{book_id}/preview?status=all&page_from=2&page_to=5
+```
 
-هر صفحه پس از پردازش بلافاصله در پایگاه‌داده ذخیره می‌شود؛ بنابراین با `Ctrl+C` یا خطای شبکه، کار از همان‌جا ادامه پیدا می‌کند (صفحات `done` دوباره پردازش نمی‌شوند).
+اصلاح دستی صفحه:
+
+```text
+PUT /api/v1/admin/books/{book_id}/pages/{pdf_page_index}
+{"markdown_content":"...", "printed_page_number":3}
+```
+
+### مقایسهٔ دو مدل بینایی
+
+این دستور فقط خروجی مقایسه و HTML پیش‌نمایش می‌سازد و در پایگاه‌داده چیزی ثبت نمی‌کند:
 
 ```bash
-# فقط صفحات ناموفق
-.venv\Scripts\python scripts\ingest_book.py --pdf data\physics12.pdf --grade 12 \
-    --major math_physics --title "فیزیک ۳" --start 1 --end 9 --only-failed
+python scripts/test_ingest.py \
+  --pdf /path/to/physics12.pdf --start 2 --end 5 --model both
 ```
 
-پیش‌نمایش مرورگری (HTML راست‌به‌چپ با KaTeX):
-
-```
-GET /api/v1/admin/books/{book_id}/preview?status=all|done|failed|needs_review&page_from=2&page_to=5
-```
-
-اصلاح دستی صفحه (نتیجه با `edited_by_human=true` ذخیره و از پردازش‌های بعدی محافظت می‌شود):
-
-```
-PUT /api/v1/admin/books/{book_id}/pages/{idx}
-{"markdown_content": "...", "printed_page_number": 3}
-```
-
-### مقایسهٔ دو مدل (فایل‌محور، بدون نوشتن در پایگاه‌داده)
-
-```bash
-.venv\Scripts\python scripts\test_ingest.py --pdf data\physics12.pdf --start 2 --end 5 --model both
-```
-
-خروجی مقایسه در `backend/storage/books/<id>/compare.html` ساخته می‌شود.
+خروجی در `backend/storage/books/<book_id>/compare.html` ساخته می‌شود. این کار API مصرف می‌کند و ممکن است هزینه داشته باشد.
