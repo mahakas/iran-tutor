@@ -34,6 +34,7 @@ BACKOFF_BASE_SECONDS = 1.0
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 _client: AsyncOpenAI | None = None
+_embedding_client: AsyncOpenAI | None = None
 _semaphore: asyncio.Semaphore | None = None
 # Models whose provider rejected `response_format=json_object`.
 _json_mode_unsupported: set[str] = set()
@@ -168,6 +169,112 @@ async def _complete(
         temperature=0,
     )
     return response.choices[0].message.content, _usage_dict(response.usage)
+
+
+def _get_embedding_client() -> AsyncOpenAI:
+    global _embedding_client
+    if _embedding_client is None:
+        settings = get_settings()
+        _embedding_client = AsyncOpenAI(
+            base_url=settings.embedding_base_url or settings.llm_base_url,
+            api_key=settings.embedding_api_key or settings.llm_api_key,
+            timeout=settings.llm_timeout,
+            max_retries=0,
+        )
+    return _embedding_client
+
+
+async def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
+    """Create vectors through the configured OpenAI-compatible embedding API."""
+    if not texts:
+        return []
+    settings = get_settings()
+    embedding_model = model or settings.embedding_model
+    client = _get_embedding_client()
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            async with _get_semaphore():
+                response = await client.embeddings.create(model=embedding_model, input=texts)
+            vectors = [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
+            if len(vectors) != len(texts):
+                raise ValueError("embedding response count does not match input count")
+            for vector in vectors:
+                if len(vector) != settings.embedding_dimension:
+                    raise ValueError(
+                        f"embedding dimension mismatch: expected {settings.embedding_dimension}, "
+                        f"received {len(vector)}"
+                    )
+            return vectors
+        except Exception as error:  # noqa: BLE001 - classified below
+            if not _is_retryable(error) or attempt == MAX_RETRIES:
+                _log(
+                    logging.ERROR,
+                    "llm.embed_texts.failed",
+                    model=embedding_model,
+                    error_type=type(error).__name__,
+                    error=str(error)[:300],
+                )
+                raise
+            delay = BACKOFF_BASE_SECONDS * (2**attempt) + random.uniform(0, 0.5)
+            _log(
+                logging.WARNING,
+                "llm.embed_texts.retry",
+                model=embedding_model,
+                attempt=attempt + 1,
+                delay_s=round(delay, 2),
+                error_type=type(error).__name__,
+            )
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+async def complete_text(model: str, messages: list[dict[str, str]]) -> str:
+    """Create a plain-text chat completion through the shared provider client."""
+    client = _get_client()
+    for attempt in range(MAX_RETRIES + 1):
+        started = time.perf_counter()
+        try:
+            async with _get_semaphore():
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=0.2,
+                )
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                raise InvalidJSONError("empty model response")
+            _log(
+                logging.INFO,
+                "llm.complete_text.ok",
+                model=model,
+                latency_s=round(time.perf_counter() - started, 2),
+                **_usage_dict(response.usage),
+            )
+            return content.strip()
+        except Exception as error:  # noqa: BLE001 - classified below
+            if not _is_retryable(error) or attempt == MAX_RETRIES:
+                _log(
+                    logging.ERROR,
+                    "llm.complete_text.failed",
+                    model=model,
+                    error_type=type(error).__name__,
+                    error=str(error)[:300],
+                )
+                raise
+            delay = BACKOFF_BASE_SECONDS * (2**attempt) + random.uniform(0, 0.5)
+            _log(
+                logging.WARNING,
+                "llm.complete_text.retry",
+                model=model,
+                attempt=attempt + 1,
+                delay_s=round(delay, 2),
+                error_type=type(error).__name__,
+            )
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 async def vision_json(

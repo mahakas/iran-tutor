@@ -137,9 +137,16 @@ def pdf_page_count(pdf_path: Path) -> int:
 def render_pdf_pages(
     pdf_path: Path, book_id: str | int, start_page: int, end_page: int, dpi: int = DPI
 ) -> dict[int, Path]:
+    if start_page < 1 or end_page < start_page:
+        raise ValueError("invalid page range: expected 1 <= start_page <= end_page")
+
     doc = pymupdf.open(pdf_path)
     rendered: dict[int, Path] = {}
     try:
+        if end_page > doc.page_count:
+            raise ValueError(
+                f"page range ends at {end_page}, but the PDF contains only {doc.page_count} pages"
+            )
         for idx in range(start_page, end_page + 1):
             page = doc[idx - 1]
             pix = page.get_pixmap(dpi=dpi)
@@ -381,6 +388,16 @@ async def ingest_book_pages(
     ``dry_run`` resolves the book and the page plan without rendering pages,
     calling the LLM or writing anything.
     """
+    if not pdf_path.is_file():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+    if start_page < 1 or end_page < start_page:
+        raise ValueError("invalid page range: expected 1 <= start_page <= end_page")
+    page_count = pdf_page_count(pdf_path)
+    if end_page > page_count:
+        raise ValueError(
+            f"page range ends at {end_page}, but the PDF contains only {page_count} pages"
+        )
+
     settings = get_settings()
     sem = asyncio.Semaphore(settings.max_concurrency)
 
