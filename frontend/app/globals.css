@@ -479,11 +479,21 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .admin-users-table td b { display: block; color: #243330; }
 .admin-users-table td small { display: block; color: #84918c; font-size: 10px; }
 .admin-users-table tr.selected { background: #f2faf6; }
+.admin-users-table.compact th, .admin-users-table.compact td { padding: 7px 9px; font-size: 10px; }
+.user-row-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.user-row-actions .outline-button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; font-size: 10px; }
+.report-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.report-head-actions .outline-button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; font-size: 10px; }
+.user-report-stack { display: flex; flex-direction: column; gap: 16px; }
+.user-report-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.user-report-panel { padding: 12px; background: #fbfdfb; border: 1px solid #e6eeea; border-radius: 10px; }
+.user-report-panel h3 { margin: 0 0 10px; font-size: 12px; color: #243330; }
+.user-report-scroll { max-height: 290px; overflow-y: auto; }
 
 @media (max-width: 1020px) {
   .plans-grid, .admin-plans-grid { grid-template-columns: 1fr; }
   .admin-kpi-grid { grid-template-columns: repeat(2, 1fr); }
-  .usage-lists-grid { grid-template-columns: 1fr; }
+  .usage-lists-grid, .user-report-split { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
   .token-status-pill small { display: none; }

@@ -4,10 +4,12 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
+  BarChart3,
   BookOpen,
   CheckCircle2,
   Coins,
   Crown,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
@@ -16,6 +18,7 @@ import {
   LoaderCircle,
   LockKeyhole,
   LogOut,
+  RefreshCw,
   Save,
   Search,
   ShieldCheck,
@@ -23,7 +26,7 @@ import {
   Users,
   XCircle,
 } from "lucide-react";
-import type { PlanItem, StudentUser } from "@/lib/types";
+import type { PaymentTransactionItem, PlanItem, StudentUser, TokenUsageLogItem } from "@/lib/types";
 
 type BookStatus = {
   id: number;
@@ -117,11 +120,75 @@ type AdminUsersSummary = {
   total_revenue_toman: number;
 };
 
+type AdminUsageActionSummary = {
+  action: string;
+  count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_toman: number;
+};
+
+type AdminUsageDailyItem = {
+  date: string;
+  requests: number;
+  total_tokens: number;
+  cost_toman: number;
+};
+
+type AdminUsageLogRow = TokenUsageLogItem & {
+  book_title?: string | null;
+};
+
+type AdminUserUsageReport = {
+  user: StudentUser;
+  token_price_per_1k_toman: number;
+  by_action: AdminUsageActionSummary[];
+  daily: AdminUsageDailyItem[];
+  logs: AdminUsageLogRow[];
+  transactions: PaymentTransactionItem[];
+};
+
+const actionLabels: Record<string, string> = {
+  tutor_ask: "پرسش متنی از معلم",
+  tutor_image: "آپلود و تحلیل تصویر",
+  tutor_audio: "آپلود/ضبط صدا",
+  exam_create: "ساخت آزمون زمان‌دار",
+};
+
+const providerLabels: Record<string, string> = {
+  demo: "درگاه آزمایشی",
+  zarinpal: "زرین‌پال",
+  admin_grant: "تخصیص مدیر",
+};
+
 function formatFaNumber(value: number) {
   try {
     return new Intl.NumberFormat("fa-IR").format(value);
   } catch {
     return String(value);
+  }
+}
+
+function formatFaDateTime(iso?: string | null) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("fa-IR", {
+      dateStyle: "short",
+      timeStyle: "short",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function formatFaDate(isoDate: string) {
+  try {
+    return new Date(`${isoDate}T00:00:00Z`).toLocaleDateString("fa-IR", {
+      dateStyle: "medium",
+    });
+  } catch {
+    return isoDate;
   }
 }
 
@@ -164,6 +231,10 @@ export default function AdminPage() {
   const [userSaving, setUserSaving] = useState(false);
   const [userMessage, setUserMessage] = useState("");
   const [userError, setUserError] = useState("");
+  const [usageReportUserId, setUsageReportUserId] = useState<string | null>(null);
+  const [usageReport, setUsageReport] = useState<AdminUserUsageReport | null>(null);
+  const [usageReportLoading, setUsageReportLoading] = useState(false);
+  const [usageReportError, setUsageReportError] = useState("");
 
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("فیزیک ۳");
@@ -339,6 +410,61 @@ export default function AdminPage() {
     },
     [getActiveToken, lockAdminPanel, userPlanFilter, userSearch]
   );
+
+  const fetchUserUsageReport = useCallback(
+    async (userId: string) => {
+      const token = getActiveToken();
+      setUsageReportUserId(userId);
+      setUsageReportLoading(true);
+      setUsageReportError("");
+      try {
+        const response = await fetch(`/api/v1/admin/users/${userId}/usage?limit=100`, {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: buildAuthHeaders(token),
+        });
+        if (response.status === 401) {
+          lockAdminPanel();
+          return;
+        }
+        const payload = (await response.json()) as AdminUserUsageReport & { detail?: string };
+        if (!response.ok) throw new Error(payload.detail ?? "خطا در دریافت گزارش مصرف کاربر");
+        setUsageReport(payload);
+      } catch (cause) {
+        setUsageReportError(cause instanceof Error ? cause.message : "خطا در دریافت گزارش مصرف");
+      } finally {
+        setUsageReportLoading(false);
+      }
+    },
+    [getActiveToken, lockAdminPanel]
+  );
+
+  const downloadUserUsageCsv = useCallback(() => {
+    if (!usageReport) return;
+    const rows = [
+      ["id", "created_at", "action", "book_title", "prompt_tokens", "completion_tokens", "total_tokens", "cost_toman"],
+      ...usageReport.logs.map((log) => [
+        String(log.id),
+        log.created_at ?? "",
+        actionLabels[log.action] ?? log.action,
+        (log.book_title ?? "").replace(/"/g, '""'),
+        String(log.prompt_tokens),
+        String(log.completion_tokens),
+        String(log.total_tokens),
+        String(log.cost_toman),
+      ]),
+    ];
+    const csv = "\uFEFF" + rows.map((r) => r.map((v) => `"${v}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `token-usage-${usageReport.user.phone_number}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }, [usageReport]);
 
   const refreshBooksAndSelect = useCallback(
     async (preferredBookId?: number, tokenOverride?: string | null) => {
@@ -843,6 +969,9 @@ export default function AdminPage() {
       setEditUserDurationDays("");
       setEditUserApplyPlanDefaults(false);
       await fetchUsersData();
+      if (usageReportUserId === payload.user.id) {
+        await fetchUserUsageReport(payload.user.id);
+      }
     } catch (cause) {
       setUserError(cause instanceof Error ? cause.message : "خطا در به‌روزرسانی کاربر");
     } finally {
@@ -1242,14 +1371,18 @@ export default function AdminPage() {
                         <th>پلن فعلی</th>
                         <th>توکن باقی‌مانده</th>
                         <th>مصرف امروز / کل</th>
+                        <th>ارزش مصرف (تومان)</th>
                         <th>اعتبار باقی‌مانده</th>
                         <th>وضعیت</th>
-                        <th>مدیریت</th>
+                        <th>عملیات</th>
                       </tr>
                     </thead>
                     <tbody>
                       {users.map((u) => (
-                        <tr key={u.id} className={editingUser?.id === u.id ? "selected" : ""}>
+                        <tr
+                          key={u.id}
+                          className={editingUser?.id === u.id || usageReportUserId === u.id ? "selected" : ""}
+                        >
                           <td>
                             <b dir="ltr">{u.phone_number}</b>
                             <small>{u.full_name || "بدون نام"}</small>
@@ -1257,16 +1390,27 @@ export default function AdminPage() {
                           <td><span className={`badge-pill ${u.is_expired ? "failed" : "done"}`}>{u.plan_title}</span></td>
                           <td>{formatFaNumber(u.tokens_remaining)} / {formatFaNumber(u.tokens_total)}</td>
                           <td>{formatFaNumber(u.tokens_used_today)} / {formatFaNumber(u.tokens_used_total)}</td>
+                          <td>{formatFaNumber(u.used_value_toman)}</td>
                           <td>{u.is_expired ? "منقضی" : `${formatFaNumber(u.days_remaining)} روز`}</td>
                           <td>{u.is_active ? "فعال" : "مسدود"}</td>
                           <td>
-                            <button
-                              type="button"
-                              className="outline-button"
-                              onClick={() => selectUserForEdit(u)}
-                            >
-                              ویرایش / شارژ
-                            </button>
+                            <div className="user-row-actions">
+                              <button
+                                type="button"
+                                className="outline-button"
+                                onClick={() => void fetchUserUsageReport(u.id)}
+                              >
+                                <BarChart3 size={14} />
+                                گزارش مصرف
+                              </button>
+                              <button
+                                type="button"
+                                className="outline-button"
+                                onClick={() => selectUserForEdit(u)}
+                              >
+                                ویرایش / شارژ
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1275,6 +1419,221 @@ export default function AdminPage() {
                 </div>
               )}
             </section>
+
+            {usageReportUserId && (
+              <section className="admin-card">
+                <div className="card-heading">
+                  <div>
+                    <h2>
+                      گزارش مصرف توکن کاربر{" "}
+                      <span dir="ltr">{usageReport?.user.phone_number ?? ""}</span>
+                      {usageReport?.user.full_name ? ` (${usageReport.user.full_name})` : ""}
+                    </h2>
+                    <p>ریز مصرف به تفکیک نوع فعالیت، تاریخچه روزانه، درخواست‌ها و تراکنش‌های پرداختی.</p>
+                  </div>
+                  <div className="report-head-actions">
+                    <button
+                      type="button"
+                      className="outline-button"
+                      disabled={usageReportLoading}
+                      onClick={() => void fetchUserUsageReport(usageReportUserId)}
+                    >
+                      <RefreshCw size={14} className={usageReportLoading ? "spin" : ""} />
+                      بروزرسانی
+                    </button>
+                    {usageReport && usageReport.logs.length > 0 && (
+                      <button
+                        type="button"
+                        className="outline-button"
+                        onClick={downloadUserUsageCsv}
+                      >
+                        <Download size={14} />
+                        خروجی CSV
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={() => {
+                        setUsageReportUserId(null);
+                        setUsageReport(null);
+                        setUsageReportError("");
+                      }}
+                      aria-label="بستن گزارش"
+                    >
+                      <XCircle size={18} />
+                    </button>
+                  </div>
+                </div>
+
+                {usageReportError && <div className="inline-error admin-banner">{usageReportError}</div>}
+
+                {usageReportLoading && !usageReport ? (
+                  <div className="review-loading">
+                    <LoaderCircle className="spin" size={18} />
+                    <span>در حال دریافت گزارش مصرف توکن کاربر...</span>
+                  </div>
+                ) : usageReport ? (
+                  <div className="user-report-stack">
+                    <div className="admin-kpi-grid">
+                      <div className="admin-kpi-card">
+                        <span>مصرف امروز</span>
+                        <b>{formatFaNumber(usageReport.user.tokens_used_today)} توکن</b>
+                      </div>
+                      <div className="admin-kpi-card">
+                        <span>مجموع مصرف کل</span>
+                        <b>{formatFaNumber(usageReport.user.tokens_used_total)} توکن</b>
+                      </div>
+                      <div className="admin-kpi-card">
+                        <span>ارزش کل مصرف (تومان)</span>
+                        <b>{formatFaNumber(usageReport.user.used_value_toman)} تومان</b>
+                      </div>
+                      <div className="admin-kpi-card">
+                        <span>توکن باقی‌مانده</span>
+                        <b>{formatFaNumber(usageReport.user.tokens_remaining)} توکن</b>
+                      </div>
+                    </div>
+
+                    <div className="user-report-split">
+                      <div className="user-report-panel">
+                        <h3>تفکیک بر اساس نوع فعالیت</h3>
+                        {usageReport.by_action.length === 0 ? (
+                          <div className="usage-empty">هنوز هیچ مصرفی ثبت نشده است.</div>
+                        ) : (
+                          <div className="admin-users-table-wrap">
+                            <table className="admin-users-table compact">
+                              <thead>
+                                <tr>
+                                  <th>فعالیت</th>
+                                  <th>تعداد</th>
+                                  <th>ورودی / خروجی</th>
+                                  <th>کل توکن</th>
+                                  <th>هزینه (تومان)</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {usageReport.by_action.map((item) => (
+                                  <tr key={item.action}>
+                                    <td><b>{actionLabels[item.action] ?? item.action}</b></td>
+                                    <td>{formatFaNumber(item.count)}</td>
+                                    <td>{formatFaNumber(item.prompt_tokens)} / {formatFaNumber(item.completion_tokens)}</td>
+                                    <td><b>{formatFaNumber(item.total_tokens)}</b></td>
+                                    <td>{formatFaNumber(item.cost_toman)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="user-report-panel">
+                        <h3>گزارش روزانه (۳۰ روز اخیر)</h3>
+                        {usageReport.daily.length === 0 ? (
+                          <div className="usage-empty">در ۳۰ روز گذشته مصرفی ثبت نشده است.</div>
+                        ) : (
+                          <div className="admin-users-table-wrap user-report-scroll">
+                            <table className="admin-users-table compact">
+                              <thead>
+                                <tr>
+                                  <th>تاریخ</th>
+                                  <th>درخواست</th>
+                                  <th>توکن مصرفی</th>
+                                  <th>هزینه (تومان)</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {usageReport.daily.map((day) => (
+                                  <tr key={day.date}>
+                                    <td><b>{formatFaDate(day.date)}</b></td>
+                                    <td>{formatFaNumber(day.requests)}</td>
+                                    <td><b>{formatFaNumber(day.total_tokens)}</b></td>
+                                    <td>{formatFaNumber(day.cost_toman)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="user-report-panel">
+                      <h3>ریز درخواست‌های مصرف توکن ({formatFaNumber(usageReport.logs.length)} مورد اخیر)</h3>
+                      {usageReport.logs.length === 0 ? (
+                        <div className="usage-empty">هیچ درخواستی ثبت نشده است.</div>
+                      ) : (
+                        <div className="admin-users-table-wrap user-report-scroll">
+                          <table className="admin-users-table compact">
+                            <thead>
+                              <tr>
+                                <th>تاریخ و ساعت</th>
+                                <th>نوع فعالیت</th>
+                                <th>کتاب درسی</th>
+                                <th>ورودی / خروجی</th>
+                                <th>مجموع توکن</th>
+                                <th>هزینه (تومان)</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {usageReport.logs.map((log) => (
+                                <tr key={log.id}>
+                                  <td><small>{formatFaDateTime(log.created_at)}</small></td>
+                                  <td><b>{actionLabels[log.action] ?? log.action}</b></td>
+                                  <td>{log.book_title || (log.book_id ? `کتاب #${log.book_id}` : "—")}</td>
+                                  <td>{formatFaNumber(log.prompt_tokens)} / {formatFaNumber(log.completion_tokens)}</td>
+                                  <td><b>{formatFaNumber(log.total_tokens)}</b></td>
+                                  <td>{formatFaNumber(log.cost_toman)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="user-report-panel">
+                      <h3>تاریخچهٔ پرداخت‌ها و تخصیص پلن‌ها</h3>
+                      {usageReport.transactions.length === 0 ? (
+                        <div className="usage-empty">تراکنش یا تخصیص پلنی برای این کاربر ثبت نشده است.</div>
+                      ) : (
+                        <div className="admin-users-table-wrap user-report-scroll">
+                          <table className="admin-users-table compact">
+                            <thead>
+                              <tr>
+                                <th>تاریخ</th>
+                                <th>پلن</th>
+                                <th>روش / درگاه</th>
+                                <th>مبلغ (تومان)</th>
+                                <th>توکن و مدت</th>
+                                <th>وضعیت / پیگیری</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {usageReport.transactions.map((tx) => (
+                                <tr key={tx.id}>
+                                  <td><small>{formatFaDateTime(tx.paid_at ?? tx.created_at)}</small></td>
+                                  <td><b>{tx.plan_name}</b></td>
+                                  <td>{providerLabels[tx.provider] ?? tx.provider}</td>
+                                  <td>{formatFaNumber(tx.amount_toman)}</td>
+                                  <td>{formatFaNumber(tx.tokens_granted)} توکن · {formatFaNumber(tx.duration_days)} روز</td>
+                                  <td>
+                                    <span className={`badge-pill ${tx.status === "paid" ? "done" : "failed"}`}>
+                                      {tx.status === "paid" ? "تأییدشده" : tx.status}
+                                    </span>
+                                    {tx.ref_id && <small dir="ltr">Ref: {tx.ref_id}</small>}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+            )}
 
             {editingUser && (
               <section className="admin-card">

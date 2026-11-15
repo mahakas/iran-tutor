@@ -397,6 +397,7 @@ async def test_admin_billing_and_user_management(tmp_path, monkeypatch):
             # Unauthenticated admin billing/users must fail 401
             assert (await client.get("/api/v1/admin/billing")).status_code == 401
             assert (await client.get("/api/v1/admin/users")).status_code == 401
+            assert (await client.get("/api/v1/admin/users/u-admin-test/usage")).status_code == 401
 
             login = await client.post("/api/v1/admin/auth/login", json={"username": "admin", "password": "123"})
             assert login.status_code == 200
@@ -447,5 +448,21 @@ async def test_admin_billing_and_user_management(tmp_path, monkeypatch):
             assert updated_u["plan_title"] == "هوشمندانه"
             assert updated_u["tokens_remaining"] == 4_050_000
             assert updated_u["days_remaining"] == 90
+
+            # Detailed per-user token usage report
+            usage_report = await client.get("/api/v1/admin/users/u-admin-test/usage", headers=admin_headers)
+            assert usage_report.status_code == 200
+            ur = usage_report.json()
+            assert ur["user"]["id"] == "u-admin-test"
+            assert len(ur["by_action"]) == 1
+            assert ur["by_action"][0]["action"] == "tutor_ask"
+            assert ur["by_action"][0]["total_tokens"] == 5000
+            assert len(ur["daily"]) == 1
+            assert ur["daily"][0]["total_tokens"] == 5000
+            assert len(ur["logs"]) == 1
+            assert ur["logs"][0]["book_title"] == "فیزیک ۳ — تست"
+            assert len(ur["transactions"]) == 1
+            assert ur["transactions"][0]["provider"] == "admin_grant"
+            assert (await client.get("/api/v1/admin/users/non-existent-id/usage", headers=admin_headers)).status_code == 404
     finally:
         await engine.dispose()

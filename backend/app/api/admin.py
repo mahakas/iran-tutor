@@ -29,6 +29,7 @@ from app.services.auth_billing_service import (
     get_user_today_tokens,
     serialize_plan,
     serialize_user,
+    utc_iso,
 )
 from app.services.ingestion_service import (
     STORAGE_DIR,
@@ -756,6 +757,135 @@ async def update_admin_user(user_id: str, body: AdminUserUpdateBody) -> dict[str
                 token_price_per_1k_toman=billing.token_price_per_1k_toman,
                 now=now,
             )
+        }
+
+
+@protected_router.get("/users/{user_id}/usage")
+async def get_admin_user_usage(
+    user_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    days: int = Query(default=30, ge=1, le=365),
+) -> dict[str, object]:
+    async with async_session_factory() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="کاربر یافت نشد.")
+
+        billing = await get_or_init_billing_settings(session)
+        now = datetime.now(timezone.utc)
+        today_tokens = await get_user_today_tokens(session, user.id)
+
+        action_rows = (
+            await session.execute(
+                select(
+                    TokenUsageLog.action,
+                    func.count(TokenUsageLog.id),
+                    func.coalesce(func.sum(TokenUsageLog.prompt_tokens), 0),
+                    func.coalesce(func.sum(TokenUsageLog.completion_tokens), 0),
+                    func.coalesce(func.sum(TokenUsageLog.total_tokens), 0),
+                    func.coalesce(func.sum(TokenUsageLog.cost_toman), 0),
+                )
+                .where(TokenUsageLog.user_id == user.id)
+                .group_by(TokenUsageLog.action)
+                .order_by(func.coalesce(func.sum(TokenUsageLog.total_tokens), 0).desc())
+            )
+        ).all()
+
+        cutoff = now - timedelta(days=days)
+        daily_source_rows = (
+            await session.execute(
+                select(
+                    TokenUsageLog.created_at,
+                    TokenUsageLog.total_tokens,
+                    TokenUsageLog.cost_toman,
+                )
+                .where(TokenUsageLog.user_id == user.id, TokenUsageLog.created_at >= cutoff)
+                .order_by(TokenUsageLog.created_at.desc())
+            )
+        ).all()
+        daily_buckets: dict[str, dict[str, int]] = {}
+        for created_at, total_tok, cost_tm in daily_source_rows:
+            dt = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+            date_key = dt.date().isoformat()
+            bucket = daily_buckets.setdefault(
+                date_key, {"requests": 0, "total_tokens": 0, "cost_toman": 0}
+            )
+            bucket["requests"] += 1
+            bucket["total_tokens"] += int(total_tok or 0)
+            bucket["cost_toman"] += int(cost_tm or 0)
+
+        log_rows = (
+            await session.execute(
+                select(TokenUsageLog, Book.title)
+                .outerjoin(Book, TokenUsageLog.book_id == Book.id)
+                .where(TokenUsageLog.user_id == user.id)
+                .order_by(TokenUsageLog.created_at.desc())
+                .limit(limit)
+            )
+        ).all()
+
+        payments = (
+            await session.scalars(
+                select(PaymentTransaction)
+                .where(PaymentTransaction.user_id == user.id)
+                .order_by(PaymentTransaction.created_at.desc())
+                .limit(20)
+            )
+        ).all()
+
+        return {
+            "user": serialize_user(
+                user,
+                today_tokens=today_tokens,
+                token_price_per_1k_toman=billing.token_price_per_1k_toman,
+                now=now,
+            ),
+            "token_price_per_1k_toman": billing.token_price_per_1k_toman,
+            "by_action": [
+                {
+                    "action": action,
+                    "count": int(cnt or 0),
+                    "prompt_tokens": int(p_tok or 0),
+                    "completion_tokens": int(c_tok or 0),
+                    "total_tokens": int(t_tok or 0),
+                    "cost_toman": int(cost or 0),
+                }
+                for action, cnt, p_tok, c_tok, t_tok, cost in action_rows
+            ],
+            "daily": [
+                {"date": date_key, **stats}
+                for date_key, stats in sorted(daily_buckets.items(), reverse=True)
+            ],
+            "logs": [
+                {
+                    "id": item.id,
+                    "action": item.action,
+                    "book_id": item.book_id,
+                    "book_title": book_title,
+                    "prompt_tokens": item.prompt_tokens,
+                    "completion_tokens": item.completion_tokens,
+                    "total_tokens": item.total_tokens,
+                    "cost_toman": item.cost_toman,
+                    "created_at": utc_iso(item.created_at),
+                }
+                for item, book_title in log_rows
+            ],
+            "transactions": [
+                {
+                    "id": tx.id,
+                    "plan_code": tx.plan_code,
+                    "plan_name": tx.plan_name,
+                    "amount_toman": tx.amount_toman,
+                    "tokens_granted": tx.tokens_granted,
+                    "duration_days": tx.duration_days,
+                    "provider": tx.provider,
+                    "status": tx.status,
+                    "ref_id": tx.ref_id,
+                    "created_at": utc_iso(tx.created_at),
+                    "paid_at": utc_iso(tx.paid_at),
+                }
+                for tx in payments
+            ],
         }
 
 
