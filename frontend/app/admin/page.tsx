@@ -1035,7 +1035,7 @@ export default function AdminPage() {
             <LockKeyhole size={24} />
           </div>
           <span className="eyebrow">دسترسی محدود</span>
-          <h1 id="admin-login-title">ورود به پنل مدیریت هم‌درس</h1>
+          <h1 id="admin-login-title">ورود به پنل مدیریت درسیار</h1>
           <p>این بخش از محیط دانش‌آموز جداست. برای مدیریت کتاب‌های درسی، نام کاربری و رمز عبور مدیر را وارد کنید.</p>
           <form onSubmit={handleLogin} className="admin-form">
             <label className="form-field">
@@ -1089,9 +1089,9 @@ export default function AdminPage() {
     <main className="admin-shell" dir="rtl">
       <header className="admin-topbar">
         <div className="admin-brand">
-          <div className="brand-mark">ه</div>
+          <div className="brand-mark">د</div>
           <div>
-            <b>مدیریت هم‌درس</b>
+            <b>مدیریت درسیار</b>
             <span>مرکز محتوای آموزشی</span>
           </div>
         </div>
@@ -1107,7 +1107,7 @@ export default function AdminPage() {
       <div className="admin-content">
         <div className="admin-heading">
           <div>
-            <span className="eyebrow">مدیریت هم‌درس</span>
+            <span className="eyebrow">مدیریت درسیار</span>
             <h1>
               {adminTab === "books"
                 ? "افزودن و بازبینی کتاب درسی"

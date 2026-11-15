@@ -1023,8 +1023,8 @@ export default function StudentApp() {
     <div className="app-shell" dir="rtl">
       <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
         <div className="sidebar-brand">
-          <div className="brand-mark">ه</div>
-          <div><strong>هم‌درس</strong><span>معلم خصوصی هوشمند</span></div>
+          <div className="brand-mark">د</div>
+          <div><strong>درسیار</strong><span>معلم خصوصی هوشمند</span></div>
           <button className="icon-button mobile-close" aria-label="بستن منو" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
         </div>
         <button className="new-chat-button" onClick={resetChat}><Plus size={18} /> گفت‌وگوی تازه <span>⌘ K</span></button>
@@ -1282,7 +1282,7 @@ export default function StudentApp() {
               <button className="send-button" disabled={!canAsk || (!draft.trim() && !imageFile && !audioFile)} onClick={() => void sendMessage()} aria-label="ارسال پرسش">{busy ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}</button>
             </div>
           </div>
-          <div className="composer-disclaimer"><span>هم‌درس ممکن است اشتباه کند؛ پاسخ را با کتاب درسی تطبیق بده.</span><span><Check size={13} /> مصرف بر اساس توکن محاسبه می‌شود</span></div>
+          <div className="composer-disclaimer"><span>درسیار ممکن است اشتباه کند؛ پاسخ را با کتاب درسی تطبیق بده.</span><span><Check size={13} /> مصرف بر اساس توکن محاسبه می‌شود</span></div>
         </footer>
       </main>
 
@@ -1395,7 +1395,7 @@ export default function StudentApp() {
             <div className="plans-modal-head">
               <div>
                 <span className="eyebrow">اشتراک و شارژ توکن</span>
-                <h2 id="plans-modal-title">پلن‌های هم‌درس و گزارش مصرف</h2>
+                <h2 id="plans-modal-title">پلن‌های درسیار و گزارش مصرف</h2>
                 <p>سهمیهٔ هر پلن بر اساس توکن مصرفی و مدت زمان استفاده محاسبه می‌شود.</p>
               </div>
               {currentUser && (
@@ -1658,7 +1658,7 @@ export default function StudentApp() {
       {helpOpen && <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
         <section className="exam-setup-modal" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
           <button className="modal-close icon-button" onClick={() => setHelpOpen(false)} aria-label="بستن"><X size={18} /></button>
-          <div className="modal-icon"><CircleHelp size={22} /></div><span className="eyebrow">راهنمای هم‌درس</span><h2 id="help-modal-title">نحوهٔ استفاده</h2>
+          <div className="modal-icon"><CircleHelp size={22} /></div><span className="eyebrow">راهنمای درسیار</span><h2 id="help-modal-title">نحوهٔ استفاده</h2>
           <p>۱. با شماره موبایل و کد پیامکی وارد شو تا اعتبار شروع دریافت کنی.<br />۲. پایه، رشته (برای پایه‌های ۱۰ تا ۱۲) و کتاب درسی را انتخاب کن.<br />۳. حالت یادگیری را از نوار ابزار برگزین: معلم خصوصی، حل تمرین، طراحی سؤال یا آزمون زمان‌دار.<br />۴. مصرف هر پرسش بر اساس توکن از اعتبارت کسر می‌شود و از بخش «پلن‌ها و اعتبار توکن» قابل تمدید یا ارتقاست.</p>
           <button className="primary-button modal-submit" onClick={() => setHelpOpen(false)}>متوجه شدم</button>
         </section>

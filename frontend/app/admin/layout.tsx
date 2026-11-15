@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "پنل مدیریت | هم‌درس",
+  title: "پنل مدیریت | درسیار",
   robots: { index: false, follow: false },
 };
 
