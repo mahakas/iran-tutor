@@ -190,12 +190,14 @@ def test_public_exam_includes_report_only_when_submitted():
 @pytest.mark.asyncio
 async def test_list_exams_returns_history_summaries(monkeypatch):
     from httpx import ASGITransport, AsyncClient
+    from app.api.dependencies import require_student
     from app.db.session import get_session
     from app.main import app
 
     now = datetime.now(timezone.utc)
     exam_row = SimpleNamespace(
         id="exam-1",
+        user_id="student-1",
         title="آزمون مروری",
         book_id=2,
         grade_number=12,
@@ -230,6 +232,10 @@ async def test_list_exams_returns_history_summaries(monkeypatch):
         yield FakeSession()
 
     app.dependency_overrides[get_session] = fake_session
+    app.dependency_overrides[require_student] = lambda: SimpleNamespace(
+        id="student-1",
+        is_active=True,
+    )
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/api/v1/exams")
@@ -242,3 +248,91 @@ async def test_list_exams_returns_history_summaries(monkeypatch):
     assert data[0]["id"] == "exam-1"
     assert data[0]["book_title"] == "فیزیک ۳"
     assert data[0]["report_summary"]["score"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_create_exam_falls_back_to_approved_book_pages_when_search_is_empty(monkeypatch):
+    from app.services import exam_service
+
+    async def empty_search(*args, **kwargs):
+        return []
+
+    async def fake_complete_json(*args, **kwargs):
+        return {
+            "questions": [
+                {
+                    "prompt": f"پرسش {i}",
+                    "choices": {"A": "الف", "B": "ب", "C": "پ", "D": "ت"},
+                    "correct_option": "A",
+                    "explanation": "توضیح",
+                    "source_index": 0,
+                }
+                for i in range(1, 4)
+            ]
+        }
+
+    monkeypatch.setattr(exam_service, "search_textbook", empty_search)
+    monkeypatch.setattr(exam_service, "complete_json", fake_complete_json)
+    monkeypatch.setattr(exam_service, "get_settings", lambda: SimpleNamespace(tutor_model="demo-tutor"))
+
+    page = SimpleNamespace(
+        book_id=1,
+        pdf_page_index=1,
+        printed_page_number=8,
+        chapter_number=1,
+        chapter_title="حرکت بر خط راست",
+        markdown_content="متن آزمایشی فیزیک",
+        visual_elements=[],
+    )
+
+    class FakeExec:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self, rows):
+            self._rows = rows
+            self.added = []
+
+        async def execute(self, stmt):
+            return FakeExec(self._rows)
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        async def commit(self):
+            return None
+
+        async def refresh(self, obj):
+            return None
+
+    session = FakeSession([(page, "فیزیک ۳", 12, "math_physics")])
+    exam = await exam_service.create_exam(
+        session,  # type: ignore[arg-type]
+        book_id=1,
+        grade_number=12,
+        major_code="math_physics",
+        question_count=3,
+        time_limit_minutes=10,
+        exam_type="konkoor",
+        user_id="student-1",
+    )
+    assert len(exam.questions) == 3
+    assert exam.questions[0]["source"]["book_title"] == "فیزیک ۳"
+
+    empty_session = FakeSession([])
+    with pytest.raises(LookupError, match="no approved textbook pages"):
+        await exam_service.create_exam(
+            empty_session,  # type: ignore[arg-type]
+            book_id=1,
+            grade_number=12,
+            major_code="math_physics",
+            question_count=3,
+            time_limit_minutes=10,
+            exam_type="konkoor",
+            user_id="student-1",
+        )
+

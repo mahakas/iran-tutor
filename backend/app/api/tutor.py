@@ -1,4 +1,4 @@
-"""Student tutoring APIs: text, image, and voice questions."""
+"""Student tutoring APIs: text, image, and voice questions (OTP-authenticated & token-metered)."""
 
 from __future__ import annotations
 
@@ -14,10 +14,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import resolve_book_scope
+from app.api.dependencies import require_student, resolve_book_scope
+from app.core.llm_client import track_token_usage
 from app.db.session import get_session
+from app.models.auth import User
 from app.models.chat import ChatSession
-from app.models.curriculum import Book, Grade
+from app.models.curriculum import Book
+from app.services.auth_billing_service import (
+    ensure_user_can_consume,
+    record_and_deduct_usage,
+)
 from app.services.multimodal_service import answer_audio_question, answer_image_question
 from app.services.tutor_service import TutorMode, answer_from_textbook
 
@@ -149,9 +155,43 @@ def _provider_failure(error: Exception, *, operation: str) -> HTTPException:
     return HTTPException(status_code=503, detail=f"{operation} service is temporarily unavailable")
 
 
+async def _finalize_usage(
+    session: AsyncSession,
+    *,
+    user: User,
+    action: str,
+    book_id: int,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    result: dict[str, Any],
+) -> None:
+    if total_tokens > 0:
+        usage_payload = await record_and_deduct_usage(
+            session,
+            user=user,
+            action=action,
+            book_id=book_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+        result["usage"] = usage_payload
+    else:
+        result["usage"] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_toman": 0,
+            "tokens_remaining": user.tokens_remaining,
+        }
+
+
 @router.post("/ask")
 async def ask_tutor(
-    body: AskRequest, session: AsyncSession = Depends(get_session)
+    body: AskRequest,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     book, grade, major_code = await resolve_book_scope(
         session,
@@ -159,17 +199,31 @@ async def ask_tutor(
         grade_number=body.grade_number,
         major_code=body.major_code,
     )
+    ensure_user_can_consume(current_user)
     try:
-        return await answer_from_textbook(
-            query=body.query,
-            grade_number=grade.number,
-            major_code=major_code,
-            book_id=book.id,
-            top_k=body.top_k,
-            mode=body.mode,
-        )
+        with track_token_usage() as usage:
+            result = await answer_from_textbook(
+                query=body.query,
+                grade_number=grade.number,
+                major_code=major_code,
+                book_id=book.id,
+                top_k=body.top_k,
+                mode=body.mode,
+            )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="tutor") from error
+
+    await _finalize_usage(
+        session,
+        user=current_user,
+        action="tutor_ask",
+        book_id=book.id,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        total_tokens=usage.total_tokens,
+        result=result,
+    )
+    return result
 
 
 @router.post("/ask-image")
@@ -180,6 +234,7 @@ async def ask_tutor_with_image(
     major_code: str | None = Form(None),
     top_k: int = Form(5),
     mode: TutorMode = Form("tutor"),
+    current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     if not 1 <= grade_number <= 12 or book_id <= 0 or not 1 <= top_k <= 20:
@@ -190,20 +245,34 @@ async def ask_tutor_with_image(
         grade_number=grade_number,
         major_code=major_code,
     )
+    ensure_user_can_consume(current_user)
     image_bytes = await _read_upload_limited(image, MAX_IMAGE_BYTES)
     image_bytes = _normalize_image(image_bytes, image.content_type or "")
     try:
-        return await answer_image_question(
-            image_bytes=image_bytes,
-            image_mime_type="image/png",
-            grade_number=grade.number,
-            major_code=major_code,
-            book_id=book.id,
-            top_k=top_k,
-            mode=mode,
-        )
+        with track_token_usage() as usage:
+            result = await answer_image_question(
+                image_bytes=image_bytes,
+                image_mime_type="image/png",
+                grade_number=grade.number,
+                major_code=major_code,
+                book_id=book.id,
+                top_k=top_k,
+                mode=mode,
+            )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="image tutor") from error
+
+    await _finalize_usage(
+        session,
+        user=current_user,
+        action="tutor_image",
+        book_id=book.id,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        total_tokens=usage.total_tokens,
+        result=result,
+    )
+    return result
 
 
 @router.post("/ask-audio")
@@ -214,6 +283,7 @@ async def ask_tutor_with_audio(
     major_code: str | None = Form(None),
     top_k: int = Form(5),
     mode: TutorMode = Form("tutor"),
+    current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     if not 1 <= grade_number <= 12 or book_id <= 0 or not 1 <= top_k <= 20:
@@ -224,6 +294,7 @@ async def ask_tutor_with_audio(
         grade_number=grade_number,
         major_code=major_code,
     )
+    ensure_user_can_consume(current_user)
     filename = Path(audio.filename or "question.webm").name
     content_type = (audio.content_type or "").lower()
     if content_type in {"", "application/octet-stream"}:
@@ -232,29 +303,44 @@ async def ask_tutor_with_audio(
         raise HTTPException(status_code=415, detail="unsupported audio format")
     audio_bytes = await _read_upload_limited(audio, MAX_AUDIO_BYTES)
     try:
-        return await answer_audio_question(
-            audio_bytes=audio_bytes,
-            filename=filename,
-            content_type=content_type,
-            grade_number=grade.number,
-            major_code=major_code,
-            book_id=book.id,
-            top_k=top_k,
-            mode=mode,
-        )
+        with track_token_usage() as usage:
+            result = await answer_audio_question(
+                audio_bytes=audio_bytes,
+                filename=filename,
+                content_type=content_type,
+                grade_number=grade.number,
+                major_code=major_code,
+                book_id=book.id,
+                top_k=top_k,
+                mode=mode,
+            )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="voice tutor") from error
+
+    await _finalize_usage(
+        session,
+        user=current_user,
+        action="tutor_audio",
+        book_id=book.id,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        total_tokens=usage.total_tokens,
+        result=result,
+    )
+    return result
 
 
 @router.get("/sessions")
 async def list_chat_sessions(
     limit: int = Query(default=30, ge=1, le=100),
+    current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, object]]:
     rows = (
         await session.execute(
             select(ChatSession, Book.title)
             .outerjoin(Book, ChatSession.book_id == Book.id)
+            .where(ChatSession.user_id == current_user.id)
             .order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
             .limit(limit)
         )
@@ -264,7 +350,9 @@ async def list_chat_sessions(
 
 @router.post("/sessions")
 async def create_chat_session(
-    body: CreateChatSessionRequest, session: AsyncSession = Depends(get_session)
+    body: CreateChatSessionRequest,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     book, grade, major_code = await resolve_book_scope(
         session,
@@ -275,8 +363,9 @@ async def create_chat_session(
     now = datetime.now(timezone.utc)
     chat = ChatSession(
         book_id=book.id,
+        user_id=current_user.id,
         grade_number=grade.number,
-        major_code=major_code,
+        major_code=major_code or "general",
         mode=body.mode,
         title=body.title.strip()[:255] or "گفت‌وگو با معلم",
         messages=[item.model_dump() for item in body.messages],
@@ -291,13 +380,15 @@ async def create_chat_session(
 
 @router.get("/sessions/{session_id}")
 async def get_chat_session(
-    session_id: str, session: AsyncSession = Depends(get_session)
+    session_id: str,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     row = (
         await session.execute(
             select(ChatSession, Book.title)
             .outerjoin(Book, ChatSession.book_id == Book.id)
-            .where(ChatSession.id == session_id)
+            .where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
         )
     ).first()
     if row is None:
@@ -310,9 +401,12 @@ async def get_chat_session(
 async def update_chat_session(
     session_id: str,
     body: UpdateChatSessionRequest,
+    current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    chat = await session.get(ChatSession, session_id)
+    chat = await session.scalar(
+        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
+    )
     if chat is None:
         raise HTTPException(status_code=404, detail="chat session not found")
     if body.title is not None:
@@ -332,9 +426,13 @@ async def update_chat_session(
 
 @router.delete("/sessions/{session_id}")
 async def delete_chat_session(
-    session_id: str, session: AsyncSession = Depends(get_session)
+    session_id: str,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    chat = await session.get(ChatSession, session_id)
+    chat = await session.scalar(
+        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
+    )
     if chat is None:
         raise HTTPException(status_code=404, detail="chat session not found")
     await session.delete(chat)

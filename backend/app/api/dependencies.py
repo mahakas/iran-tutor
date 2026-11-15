@@ -1,12 +1,60 @@
-"""Shared API-level validation for curriculum-scoped requests."""
+"""Shared API-level validation and student authentication dependencies."""
 
 from __future__ import annotations
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import get_session
+from app.models.auth import User
 from app.models.curriculum import Book, Grade, Major
+from app.services.auth_billing_service import USER_COOKIE_NAME, verify_user_session_token
 from app.services.validation import validate_major_code
+
+
+def extract_user_token(request: Request) -> str | None:
+    token_header = request.headers.get("x-user-token", "").strip()
+    if token_header:
+        return token_header
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        bearer = auth_header[7:].strip()
+        if bearer:
+            return bearer
+    cookie_token = request.cookies.get(USER_COOKIE_NAME)
+    if cookie_token:
+        return cookie_token
+    return None
+
+
+async def get_optional_student(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> User | None:
+    token = extract_user_token(request)
+    user_id = verify_user_session_token(token)
+    if not user_id:
+        return None
+    user = await session.get(User, user_id)
+    if user is None:
+        return None
+    return user
+
+
+async def require_student(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> User:
+    token = extract_user_token(request)
+    user_id = verify_user_session_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="برای ادامه لطفاً با شماره موبایل وارد شوید.")
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="نشست کاربری معتبر نیست. لطفاً دوباره وارد شوید.")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال شده است.")
+    return user
 
 
 async def resolve_book_scope(

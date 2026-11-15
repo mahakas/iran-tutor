@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import logging
@@ -12,13 +13,23 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel
-from sqlalchemy import func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.session import async_session_factory
+from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User
 from app.models.curriculum import Book, BookPage, Grade, Major
+from app.services.auth_billing_service import (
+    apply_plan_to_user,
+    calculate_token_cost_toman,
+    get_or_init_billing_settings,
+    get_or_init_plans,
+    get_user_today_tokens,
+    serialize_plan,
+    serialize_user,
+)
 from app.services.ingestion_service import (
     STORAGE_DIR,
     UPLOAD_DIR,
@@ -497,6 +508,255 @@ async def book_preview(
         out_path = STORAGE_DIR / "books" / str(book_id) / f"preview_{tag}.html"
     rendered = render_single_preview(book_id, tag, pages, out_path)
     return rendered.read_text(encoding="utf-8")
+
+
+class BillingSettingsUpdateBody(BaseModel):
+    token_price_per_1k_toman: int = Field(ge=1, le=100_000_000)
+    starter_tokens: int = Field(ge=0, le=100_000_000)
+    starter_duration_days: int = Field(ge=1, le=3650)
+
+
+class PlanUpdateBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+    price_toman: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    token_quota: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    duration_days: int | None = Field(default=None, ge=1, le=3650)
+    is_active: bool | None = None
+
+
+class AdminUserUpdateBody(BaseModel):
+    full_name: str | None = Field(default=None, max_length=120)
+    plan_code: str | None = Field(default=None, min_length=1, max_length=32)
+    apply_plan_defaults: bool = True
+    tokens_remaining: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    add_tokens: int | None = Field(default=None, ge=-1_000_000_000, le=1_000_000_000)
+    duration_days: int | None = Field(default=None, ge=1, le=3650)
+    is_active: bool | None = None
+
+
+@protected_router.get("/billing")
+async def get_admin_billing() -> dict[str, object]:
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        plans = await get_or_init_plans(session)
+        await session.commit()
+        return {
+            "settings": {
+                "token_price_per_1k_toman": billing.token_price_per_1k_toman,
+                "starter_tokens": billing.starter_tokens,
+                "starter_duration_days": billing.starter_duration_days,
+            },
+            "plans": [serialize_plan(plan) for plan in plans],
+        }
+
+
+@protected_router.put("/billing/settings")
+async def update_admin_billing_settings(body: BillingSettingsUpdateBody) -> dict[str, object]:
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        billing.token_price_per_1k_toman = body.token_price_per_1k_toman
+        billing.starter_tokens = body.starter_tokens
+        billing.starter_duration_days = body.starter_duration_days
+        await session.commit()
+        await session.refresh(billing)
+        return {
+            "settings": {
+                "token_price_per_1k_toman": billing.token_price_per_1k_toman,
+                "starter_tokens": billing.starter_tokens,
+                "starter_duration_days": billing.starter_duration_days,
+            }
+        }
+
+
+@protected_router.put("/billing/plans/{plan_code}")
+async def update_admin_plan(plan_code: str, body: PlanUpdateBody) -> dict[str, object]:
+    async with async_session_factory() as session:
+        await get_or_init_plans(session)
+        plan = await session.scalar(select(Plan).where(Plan.code == plan_code.strip()))
+        if plan is None:
+            raise HTTPException(status_code=404, detail="پلن مورد نظر یافت نشد.")
+        fields = body.model_fields_set
+        if "name" in fields and body.name is not None:
+            plan.name = body.name.strip()
+        if "description" in fields and body.description is not None:
+            plan.description = body.description.strip()
+        if "price_toman" in fields and body.price_toman is not None:
+            plan.price_toman = body.price_toman
+        if "token_quota" in fields and body.token_quota is not None:
+            plan.token_quota = body.token_quota
+        if "duration_days" in fields and body.duration_days is not None:
+            plan.duration_days = body.duration_days
+        if "is_active" in fields and body.is_active is not None:
+            plan.is_active = body.is_active
+        await session.commit()
+        await session.refresh(plan)
+        return {"plan": serialize_plan(plan)}
+
+
+@protected_router.get("/users")
+async def list_admin_users(
+    q: str | None = Query(None, max_length=64),
+    plan: str | None = Query(None, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, object]:
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        query = select(User).order_by(User.created_at.desc()).limit(limit)
+        if q and q.strip():
+            term = f"%{q.strip()}%"
+            query = query.where(or_(User.phone_number.ilike(term), User.full_name.ilike(term)))
+        if plan and plan.strip() and plan != "all":
+            query = query.where(User.plan_code == plan.strip())
+
+        users = list((await session.scalars(query)).all())
+        start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_rows = (
+            await session.execute(
+                select(TokenUsageLog.user_id, func.coalesce(func.sum(TokenUsageLog.total_tokens), 0))
+                .where(TokenUsageLog.created_at >= start_of_day)
+                .group_by(TokenUsageLog.user_id)
+            )
+        ).all()
+        today_by_user = {uid: int(total) for uid, total in today_rows}
+
+        total_users = int(await session.scalar(select(func.count()).select_from(User)) or 0)
+        active_users = int(
+            await session.scalar(select(func.count()).select_from(User).where(User.is_active.is_(True))) or 0
+        )
+        paid_users = int(
+            await session.scalar(
+                select(func.count()).select_from(User).where(User.plan_code.in_(["normal", "pro", "vip"]))
+            )
+            or 0
+        )
+        total_tokens_used = int(
+            await session.scalar(select(func.coalesce(func.sum(User.tokens_used_total), 0))) or 0
+        )
+        total_revenue_toman = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(PaymentTransaction.amount_toman), 0)).where(
+                    PaymentTransaction.status == "paid",
+                    PaymentTransaction.provider != "admin_grant",
+                )
+            )
+            or 0
+        )
+        await session.commit()
+
+        return {
+            "summary": {
+                "total_users": total_users,
+                "active_users": active_users,
+                "paid_users": paid_users,
+                "total_tokens_used": total_tokens_used,
+                "total_used_value_toman": calculate_token_cost_toman(
+                    total_tokens_used, token_price_per_1k_toman=billing.token_price_per_1k_toman
+                ),
+                "total_revenue_toman": total_revenue_toman,
+            },
+            "users": [
+                serialize_user(
+                    u,
+                    today_tokens=today_by_user.get(u.id, 0),
+                    token_price_per_1k_toman=billing.token_price_per_1k_toman,
+                )
+                for u in users
+            ],
+        }
+
+
+@protected_router.put("/users/{user_id}")
+async def update_admin_user(user_id: str, body: AdminUserUpdateBody) -> dict[str, object]:
+    async with async_session_factory() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="کاربر یافت نشد.")
+
+        billing = await get_or_init_billing_settings(session)
+        await get_or_init_plans(session)
+        now = datetime.now(timezone.utc)
+        fields = body.model_fields_set
+
+        if "full_name" in fields:
+            user.full_name = body.full_name.strip() if body.full_name and body.full_name.strip() else None
+        if "is_active" in fields and body.is_active is not None:
+            user.is_active = body.is_active
+
+        if body.plan_code is not None:
+            code = body.plan_code.strip()
+            if code == "trial":
+                if body.apply_plan_defaults:
+                    apply_plan_to_user(
+                        user,
+                        plan_code="trial",
+                        plan_name="هدیه ثبت‌نام",
+                        tokens_granted=billing.starter_tokens,
+                        duration_days=body.duration_days or billing.starter_duration_days,
+                        carry_over_valid=False,
+                        now=now,
+                    )
+                else:
+                    user.plan_code = "trial"
+                    user.plan_title = "هدیه ثبت‌نام"
+            else:
+                plan = await session.scalar(select(Plan).where(Plan.code == code))
+                if plan is None:
+                    raise HTTPException(status_code=404, detail="پلن انتخاب‌شده یافت نشد.")
+                if body.apply_plan_defaults:
+                    days = body.duration_days or plan.duration_days
+                    apply_plan_to_user(
+                        user,
+                        plan_code=plan.code,
+                        plan_name=plan.name,
+                        tokens_granted=plan.token_quota,
+                        duration_days=days,
+                        carry_over_valid=True,
+                        now=now,
+                    )
+                    session.add(
+                        PaymentTransaction(
+                            user_id=user.id,
+                            plan_code=plan.code,
+                            plan_name=plan.name,
+                            amount_toman=0,
+                            tokens_granted=plan.token_quota,
+                            duration_days=days,
+                            provider="admin_grant",
+                            authority=f"ADMIN-{uuid4().hex[:10].upper()}",
+                            ref_id="ADMIN",
+                            status="paid",
+                            paid_at=now,
+                        )
+                    )
+                else:
+                    user.plan_code = plan.code
+                    user.plan_title = plan.name
+
+        if body.tokens_remaining is not None:
+            user.tokens_remaining = body.tokens_remaining
+            if user.tokens_total < body.tokens_remaining:
+                user.tokens_total = body.tokens_remaining
+
+        if body.add_tokens is not None and body.add_tokens != 0:
+            user.tokens_remaining = max(0, user.tokens_remaining + body.add_tokens)
+            if body.add_tokens > 0:
+                user.tokens_total = max(user.tokens_total, user.tokens_remaining)
+
+        if body.duration_days is not None and body.plan_code is None:
+            user.plan_expires_at = now + timedelta(days=body.duration_days)
+
+        await session.commit()
+        await session.refresh(user)
+        today_tokens = await get_user_today_tokens(session, user.id)
+        return {
+            "user": serialize_user(
+                user,
+                today_tokens=today_tokens,
+                token_price_per_1k_toman=billing.token_price_per_1k_toman,
+                now=now,
+            )
+        }
 
 
 router.include_router(protected_router)

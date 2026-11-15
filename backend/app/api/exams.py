@@ -1,4 +1,4 @@
-"""Timed, persistent multiple-choice exam API."""
+"""Timed, persistent multiple-choice exam API (OTP-authenticated & token-metered)."""
 
 from __future__ import annotations
 
@@ -10,10 +10,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import resolve_book_scope
+from app.api.dependencies import require_student, resolve_book_scope
+from app.core.llm_client import track_token_usage
 from app.db.session import get_session
+from app.models.auth import User
 from app.models.curriculum import Book
 from app.models.exam import ExamSession
+from app.services.auth_billing_service import ensure_user_can_consume, record_and_deduct_usage
 from app.services.exam_service import create_exam, exam_summary, public_exam, submit_exam
 
 logger = logging.getLogger(__name__)
@@ -36,7 +39,9 @@ class SubmitExamRequest(BaseModel):
 
 @router.post("")
 async def start_exam(
-    body: CreateExamRequest, session: AsyncSession = Depends(get_session)
+    body: CreateExamRequest,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     book, grade, major_code = await resolve_book_scope(
         session,
@@ -44,18 +49,20 @@ async def start_exam(
         grade_number=body.grade_number,
         major_code=body.major_code,
     )
+    ensure_user_can_consume(current_user)
     try:
-        exam = await create_exam(
-            session,
-            book_id=book.id,
-            grade_number=grade.number,
-            major_code=major_code,
-            question_count=body.question_count,
-            time_limit_minutes=body.time_limit_minutes,
-            exam_type=body.exam_type,
-            chapter_title=body.chapter_title,
-        )
-        return public_exam(exam)
+        with track_token_usage() as usage:
+            exam = await create_exam(
+                session,
+                book_id=book.id,
+                grade_number=grade.number,
+                major_code=major_code,
+                question_count=body.question_count,
+                time_limit_minutes=body.time_limit_minutes,
+                exam_type=body.exam_type,
+                chapter_title=body.chapter_title,
+                user_id=current_user.id,
+            )
     except LookupError as error:
         raise HTTPException(status_code=409, detail="no approved pages found for this exam scope") from error
     except ValueError as error:
@@ -69,16 +76,32 @@ async def start_exam(
         logger.exception("exam creation failed")
         raise HTTPException(status_code=503, detail="exam service is temporarily unavailable") from error
 
+    payload = public_exam(exam)
+    if usage.total_tokens > 0:
+        usage_info = await record_and_deduct_usage(
+            session,
+            user=current_user,
+            action="exam_create",
+            book_id=book.id,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+        )
+        payload["usage"] = usage_info
+    return payload
+
 
 @router.get("")
 async def list_exams(
     book_id: int | None = Query(default=None, gt=0),
     limit: int = Query(default=30, ge=1, le=100),
+    current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, object]]:
     query = (
         select(ExamSession, Book.title)
         .outerjoin(Book, ExamSession.book_id == Book.id)
+        .where(ExamSession.user_id == current_user.id)
         .order_by(ExamSession.created_at.desc())
         .limit(limit)
     )
@@ -89,8 +112,14 @@ async def list_exams(
 
 
 @router.get("/{exam_id}")
-async def get_exam(exam_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    exam = await session.get(ExamSession, exam_id)
+async def get_exam(
+    exam_id: str,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    exam = await session.scalar(
+        select(ExamSession).where(ExamSession.id == exam_id, ExamSession.user_id == current_user.id)
+    )
     if exam is None:
         raise HTTPException(status_code=404, detail="exam not found")
     return public_exam(exam, include_report=True)
@@ -100,9 +129,12 @@ async def get_exam(exam_id: str, session: AsyncSession = Depends(get_session)) -
 async def finish_exam(
     exam_id: str,
     body: SubmitExamRequest,
+    current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    exam = await session.get(ExamSession, exam_id)
+    exam = await session.scalar(
+        select(ExamSession).where(ExamSession.id == exam_id, ExamSession.user_id == current_user.id)
+    )
     if exam is None:
         raise HTTPException(status_code=404, detail="exam not found")
     try:

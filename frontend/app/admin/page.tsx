@@ -6,6 +6,8 @@ import {
   ArrowRight,
   BookOpen,
   CheckCircle2,
+  Coins,
+  Crown,
   ExternalLink,
   Eye,
   EyeOff,
@@ -15,10 +17,13 @@ import {
   LockKeyhole,
   LogOut,
   Save,
+  Search,
   ShieldCheck,
   Sparkles,
+  Users,
   XCircle,
 } from "lucide-react";
+import type { PlanItem, StudentUser } from "@/lib/types";
 
 type BookStatus = {
   id: number;
@@ -97,8 +102,32 @@ const statusLabel: Record<string, string> = {
   pending: "در انتظار",
 };
 
+type BillingSettingsData = {
+  token_price_per_1k_toman: number;
+  starter_tokens: number;
+  starter_duration_days: number;
+};
+
+type AdminUsersSummary = {
+  total_users: number;
+  active_users: number;
+  paid_users: number;
+  total_tokens_used: number;
+  total_used_value_toman: number;
+  total_revenue_toman: number;
+};
+
+function formatFaNumber(value: number) {
+  try {
+    return new Intl.NumberFormat("fa-IR").format(value);
+  } catch {
+    return String(value);
+  }
+}
+
 export default function AdminPage() {
   const [authState, setAuthState] = useState<"checking" | "locked" | "authenticated">("checking");
+  const [adminTab, setAdminTab] = useState<"books" | "plans" | "users">("books");
   const tokenRef = useRef<string | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -107,6 +136,34 @@ export default function AdminPage() {
   const [authError, setAuthError] = useState("");
   const [pageImageSrc, setPageImageSrc] = useState<string | null>(null);
   const [previewHtml, setPreviewHtml] = useState<string>("");
+
+  // Phase 6: Plans, token pricing & user management state
+  const [billingSettings, setBillingSettings] = useState<BillingSettingsData>({
+    token_price_per_1k_toman: 1000,
+    starter_tokens: 15000,
+    starter_duration_days: 7,
+  });
+  const [plans, setPlans] = useState<PlanItem[]>([]);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingSaving, setBillingSaving] = useState(false);
+  const [savingPlanCode, setSavingPlanCode] = useState<string | null>(null);
+  const [billingMessage, setBillingMessage] = useState("");
+  const [billingError, setBillingError] = useState("");
+
+  const [users, setUsers] = useState<StudentUser[]>([]);
+  const [usersSummary, setUsersSummary] = useState<AdminUsersSummary | null>(null);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [userSearch, setUserSearch] = useState("");
+  const [userPlanFilter, setUserPlanFilter] = useState("all");
+  const [editingUser, setEditingUser] = useState<StudentUser | null>(null);
+  const [editUserPlan, setEditUserPlan] = useState("trial");
+  const [editUserApplyPlanDefaults, setEditUserApplyPlanDefaults] = useState(true);
+  const [editUserAddTokens, setEditUserAddTokens] = useState("");
+  const [editUserDurationDays, setEditUserDurationDays] = useState("");
+  const [editUserActive, setEditUserActive] = useState(true);
+  const [userSaving, setUserSaving] = useState(false);
+  const [userMessage, setUserMessage] = useState("");
+  const [userError, setUserError] = useState("");
 
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("فیزیک ۳");
@@ -212,6 +269,75 @@ export default function AdminPage() {
       }
     },
     [getActiveToken]
+  );
+
+  const fetchBillingData = useCallback(
+    async (tokenOverride?: string | null) => {
+      const token = tokenOverride !== undefined ? tokenOverride : getActiveToken();
+      setBillingLoading(true);
+      setBillingError("");
+      try {
+        const response = await fetch("/api/v1/admin/billing", {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: buildAuthHeaders(token),
+        });
+        if (response.status === 401) {
+          lockAdminPanel();
+          return;
+        }
+        const payload = (await response.json()) as {
+          settings?: BillingSettingsData;
+          plans?: PlanItem[];
+          detail?: string;
+        };
+        if (!response.ok) throw new Error(payload.detail ?? "خطا در دریافت تنظیمات پلن‌ها");
+        if (payload.settings) setBillingSettings(payload.settings);
+        if (payload.plans) setPlans(payload.plans);
+      } catch (cause) {
+        setBillingError(cause instanceof Error ? cause.message : "خطا در دریافت تنظیمات");
+      } finally {
+        setBillingLoading(false);
+      }
+    },
+    [getActiveToken, lockAdminPanel]
+  );
+
+  const fetchUsersData = useCallback(
+    async (searchTerm?: string, planFilter?: string) => {
+      const token = getActiveToken();
+      setUsersLoading(true);
+      setUserError("");
+      try {
+        const params = new URLSearchParams();
+        const qVal = searchTerm !== undefined ? searchTerm : userSearch;
+        const pVal = planFilter !== undefined ? planFilter : userPlanFilter;
+        if (qVal.trim()) params.set("q", qVal.trim());
+        if (pVal && pVal !== "all") params.set("plan", pVal);
+        const response = await fetch(`/api/v1/admin/users?${params.toString()}`, {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: buildAuthHeaders(token),
+        });
+        if (response.status === 401) {
+          lockAdminPanel();
+          return;
+        }
+        const payload = (await response.json()) as {
+          summary?: AdminUsersSummary;
+          users?: StudentUser[];
+          detail?: string;
+        };
+        if (!response.ok) throw new Error(payload.detail ?? "خطا در دریافت لیست کاربران");
+        if (payload.summary) setUsersSummary(payload.summary);
+        if (payload.users) setUsers(payload.users);
+      } catch (cause) {
+        setUserError(cause instanceof Error ? cause.message : "خطا در دریافت کاربران");
+      } finally {
+        setUsersLoading(false);
+      }
+    },
+    [getActiveToken, lockAdminPanel, userPlanFilter, userSearch]
   );
 
   const refreshBooksAndSelect = useCallback(
@@ -605,6 +731,125 @@ export default function AdminPage() {
     }
   };
 
+  const handleSaveBillingSettings = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const token = getActiveToken();
+    setBillingSaving(true);
+    setBillingError("");
+    setBillingMessage("");
+    try {
+      const response = await fetch("/api/v1/admin/billing/settings", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...buildAuthHeaders(token) },
+        body: JSON.stringify(billingSettings),
+      });
+      if (response.status === 401) {
+        lockAdminPanel();
+        return;
+      }
+      const payload = (await response.json()) as { settings?: BillingSettingsData; detail?: string };
+      if (!response.ok) throw new Error(payload.detail ?? "ذخیره تنظیمات توکن انجام نشد");
+      if (payload.settings) setBillingSettings(payload.settings);
+      setBillingMessage("قیمت توکن و تنظیمات هدیه ثبت‌نام با موفقیت ذخیره شد.");
+    } catch (cause) {
+      setBillingError(cause instanceof Error ? cause.message : "خطا در ذخیره تنظیمات");
+    } finally {
+      setBillingSaving(false);
+    }
+  };
+
+  const handleSavePlan = async (plan: PlanItem) => {
+    const token = getActiveToken();
+    setSavingPlanCode(plan.code);
+    setBillingError("");
+    setBillingMessage("");
+    try {
+      const response = await fetch(`/api/v1/admin/billing/plans/${plan.code}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...buildAuthHeaders(token) },
+        body: JSON.stringify({
+          name: plan.name,
+          description: plan.description,
+          price_toman: Number(plan.price_toman),
+          token_quota: Number(plan.token_quota),
+          duration_days: Number(plan.duration_days),
+          is_active: plan.is_active,
+        }),
+      });
+      if (response.status === 401) {
+        lockAdminPanel();
+        return;
+      }
+      const payload = (await response.json()) as { plan?: PlanItem; detail?: string };
+      if (!response.ok) throw new Error(payload.detail ?? "ذخیره پلن انجام نشد");
+      if (payload.plan) {
+        setPlans((prev) => prev.map((item) => (item.code === plan.code ? payload.plan! : item)));
+      }
+      setBillingMessage(`تغییرات پلن «${plan.name}» با موفقیت ذخیره شد.`);
+    } catch (cause) {
+      setBillingError(cause instanceof Error ? cause.message : "خطا در ذخیره پلن");
+    } finally {
+      setSavingPlanCode(null);
+    }
+  };
+
+  const selectUserForEdit = (u: StudentUser) => {
+    setEditingUser(u);
+    setEditUserPlan(u.plan_code);
+    setEditUserApplyPlanDefaults(false);
+    setEditUserAddTokens("");
+    setEditUserDurationDays("");
+    setEditUserActive(u.is_active);
+    setUserMessage("");
+    setUserError("");
+  };
+
+  const handleSaveUser = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingUser) return;
+    const token = getActiveToken();
+    setUserSaving(true);
+    setUserError("");
+    setUserMessage("");
+    try {
+      const body: Record<string, unknown> = {
+        plan_code: editUserPlan,
+        apply_plan_defaults: editUserApplyPlanDefaults,
+        is_active: editUserActive,
+      };
+      if (editUserAddTokens.trim() !== "") {
+        body.add_tokens = Number(editUserAddTokens);
+      }
+      if (editUserDurationDays.trim() !== "") {
+        body.duration_days = Number(editUserDurationDays);
+      }
+      const response = await fetch(`/api/v1/admin/users/${editingUser.id}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...buildAuthHeaders(token) },
+        body: JSON.stringify(body),
+      });
+      if (response.status === 401) {
+        lockAdminPanel();
+        return;
+      }
+      const payload = (await response.json()) as { user?: StudentUser; detail?: string };
+      if (!response.ok || !payload.user) throw new Error(payload.detail ?? "به‌روزرسانی کاربر انجام نشد");
+      setUserMessage(`اطلاعات کاربر ${payload.user.phone_number} با موفقیت به‌روزرسانی شد.`);
+      setEditingUser(payload.user);
+      setEditUserAddTokens("");
+      setEditUserDurationDays("");
+      setEditUserApplyPlanDefaults(false);
+      await fetchUsersData();
+    } catch (cause) {
+      setUserError(cause instanceof Error ? cause.message : "خطا در به‌روزرسانی کاربر");
+    } finally {
+      setUserSaving(false);
+    }
+  };
+
   if (authState === "checking") {
     return (
       <main className="admin-login-shell" dir="rtl">
@@ -698,14 +943,58 @@ export default function AdminPage() {
       <div className="admin-content">
         <div className="admin-heading">
           <div>
-            <span className="eyebrow">مدیریت کتابخانه</span>
-            <h1>افزودن و بازبینی کتاب درسی</h1>
-            <p>کتاب را وارد کن، چند صفحه را آزمایشی پردازش کن، خروجی را با PDF بسنج و صفحه‌ها را تأیید کن.</p>
+            <span className="eyebrow">مدیریت هم‌درس</span>
+            <h1>
+              {adminTab === "books"
+                ? "افزودن و بازبینی کتاب درسی"
+                : adminTab === "plans"
+                ? "مدیریت قیمت توکن و پلن‌ها"
+                : "مدیریت کاربران و سهمیه‌ها"}
+            </h1>
+            <p>
+              {adminTab === "books"
+                ? "کتاب را وارد کن، چند صفحه را آزمایشی پردازش کن، خروجی را با PDF بسنج و صفحه‌ها را تأیید کن."
+                : adminTab === "plans"
+                ? "قیمت پایهٔ توکن، سهمیهٔ هر پلن، مدت اعتبار (روز) و مبلغ پلن‌های اقتصادی، حرفه‌ای و هوشمندانه را تنظیم کنید."
+                : "وضعیت کاربران ثبت‌نامی، میزان مصرف توکن، پلن فعال و شارژ حساب‌ها را مدیریت کنید."}
+            </p>
           </div>
           <div className="admin-heading-mark">
-            <BookOpen size={25} />
+            {adminTab === "books" ? <BookOpen size={25} /> : adminTab === "plans" ? <Crown size={25} /> : <Users size={25} />}
           </div>
         </div>
+
+        <nav className="admin-tabs" aria-label="بخش‌های پنل مدیریت">
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "books" ? "active" : ""}`}
+            onClick={() => setAdminTab("books")}
+          >
+            <BookOpen size={16} /> کتاب‌ها و پردازش PDF
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "plans" ? "active" : ""}`}
+            onClick={() => {
+              setAdminTab("plans");
+              void fetchBillingData();
+            }}
+          >
+            <Crown size={16} /> پلن‌ها و قیمت توکن
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "users" ? "active" : ""}`}
+            onClick={() => {
+              setAdminTab("users");
+              void fetchUsersData();
+              void fetchBillingData();
+            }}
+          >
+            <Users size={16} /> کاربران و سهمیه‌ها
+          </button>
+        </nav>
+
         <div className="admin-warning admin-protected-note">
           <ShieldCheck size={18} />
           <span>
@@ -713,6 +1002,356 @@ export default function AdminPage() {
           </span>
         </div>
 
+        {adminTab === "plans" && (
+          <div className="admin-billing-stack">
+            {billingMessage && <div className="success-note admin-banner"><CheckCircle2 size={15} />{billingMessage}</div>}
+            {billingError && <div className="inline-error admin-banner">{billingError}</div>}
+
+            <section className="admin-card">
+              <div className="card-heading">
+                <div>
+                  <h2>قیمت پایهٔ توکن و اعتبار هدیهٔ ثبت‌نام</h2>
+                  <p>ارزش معادل هر ۱٬۰۰۰ توکن مصرفی به تومان و سهمیهٔ اولیه کاربران تازه‌وارد.</p>
+                </div>
+                <span className="step-badge"><Coins size={14} /></span>
+              </div>
+              <form className="admin-form" onSubmit={handleSaveBillingSettings}>
+                <div className="form-row">
+                  <label className="form-field">
+                    <span>قیمت هر ۱٬۰۰۰ توکن (تومان)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={billingSettings.token_price_per_1k_toman}
+                      onChange={(e) =>
+                        setBillingSettings((prev) => ({
+                          ...prev,
+                          token_price_per_1k_toman: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="form-field">
+                    <span>توکن هدیه ثبت‌نام جدید</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={billingSettings.starter_tokens}
+                      onChange={(e) =>
+                        setBillingSettings((prev) => ({
+                          ...prev,
+                          starter_tokens: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="form-field">
+                    <span>مدت اعتبار هدیه (روز)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={billingSettings.starter_duration_days}
+                      onChange={(e) =>
+                        setBillingSettings((prev) => ({
+                          ...prev,
+                          starter_duration_days: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="admin-inline-actions">
+                  <button className="primary-button" type="submit" disabled={billingSaving || billingLoading}>
+                    {billingSaving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+                    ذخیره تنظیمات توکن
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section className="admin-plans-grid">
+              {plans.map((plan) => (
+                <article key={plan.code} className="admin-card">
+                  <div className="card-heading">
+                    <div>
+                      <h2>پلن {plan.name} ({plan.code})</h2>
+                      <p>تعرفه مؤثر: {formatFaNumber(plan.token_quota > 0 ? Math.round((plan.price_toman * 1000) / plan.token_quota) : 0)} تومان / ۱٬۰۰۰ توکن</p>
+                    </div>
+                    <label className="plan-active-toggle">
+                      <input
+                        type="checkbox"
+                        checked={plan.is_active}
+                        onChange={(e) =>
+                          setPlans((prev) =>
+                            prev.map((item) =>
+                              item.code === plan.code ? { ...item, is_active: e.target.checked } : item
+                            )
+                          )
+                        }
+                      />
+                      <span>فعال</span>
+                    </label>
+                  </div>
+                  <div className="admin-form">
+                    <label className="form-field">
+                      <span>عنوان پلن</span>
+                      <input
+                        value={plan.name}
+                        onChange={(e) =>
+                          setPlans((prev) =>
+                            prev.map((item) => (item.code === plan.code ? { ...item, name: e.target.value } : item))
+                          )
+                        }
+                      />
+                    </label>
+                    <label className="form-field">
+                      <span>قیمت پلن (تومان)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={plan.price_toman}
+                        onChange={(e) =>
+                          setPlans((prev) =>
+                            prev.map((item) =>
+                              item.code === plan.code ? { ...item, price_toman: Number(e.target.value) } : item
+                            )
+                          )
+                        }
+                      />
+                    </label>
+                    <div className="form-row">
+                      <label className="form-field">
+                        <span>میزان توکن (سهمیه)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          value={plan.token_quota}
+                          onChange={(e) =>
+                            setPlans((prev) =>
+                              prev.map((item) =>
+                                item.code === plan.code ? { ...item, token_quota: Number(e.target.value) } : item
+                              )
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="form-field">
+                        <span>زمان استفاده (روز)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          value={plan.duration_days}
+                          onChange={(e) =>
+                            setPlans((prev) =>
+                              prev.map((item) =>
+                                item.code === plan.code ? { ...item, duration_days: Number(e.target.value) } : item
+                              )
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+                    <label className="form-field">
+                      <span>توضیحات نمایشی</span>
+                      <input
+                        value={plan.description}
+                        onChange={(e) =>
+                          setPlans((prev) =>
+                            prev.map((item) =>
+                              item.code === plan.code ? { ...item, description: e.target.value } : item
+                            )
+                          )
+                        }
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="primary-button admin-submit"
+                      disabled={savingPlanCode === plan.code}
+                      onClick={() => void handleSavePlan(plan)}
+                    >
+                      {savingPlanCode === plan.code ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+                      ذخیره تغییرات پلن {plan.name}
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </section>
+          </div>
+        )}
+
+        {adminTab === "users" && (
+          <div className="admin-billing-stack">
+            {usersSummary && (
+              <div className="admin-kpi-grid">
+                <div className="admin-kpi-card"><span>کل کاربران</span><b>{formatFaNumber(usersSummary.total_users)}</b></div>
+                <div className="admin-kpi-card"><span>کاربران با پلن خریداری‌شده</span><b>{formatFaNumber(usersSummary.paid_users)}</b></div>
+                <div className="admin-kpi-card"><span>مجموع توکن مصرفی</span><b>{formatFaNumber(usersSummary.total_tokens_used)}</b></div>
+                <div className="admin-kpi-card"><span>درآمد پرداخت‌ها (تومان)</span><b>{formatFaNumber(usersSummary.total_revenue_toman)}</b></div>
+              </div>
+            )}
+
+            <section className="admin-card">
+              <div className="users-toolbar">
+                <div className="users-search">
+                  <Search size={15} />
+                  <input
+                    placeholder="جستجو با شماره موبایل یا نام..."
+                    value={userSearch}
+                    onChange={(e) => setUserSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void fetchUsersData(userSearch, userPlanFilter);
+                    }}
+                  />
+                </div>
+                <select
+                  value={userPlanFilter}
+                  onChange={(e) => {
+                    setUserPlanFilter(e.target.value);
+                    void fetchUsersData(userSearch, e.target.value);
+                  }}
+                >
+                  <option value="all">همه پلن‌ها</option>
+                  <option value="trial">هدیه ثبت‌نام</option>
+                  <option value="normal">اقتصادی</option>
+                  <option value="pro">حرفه‌ای</option>
+                  <option value="vip">هوشمندانه</option>
+                </select>
+                <button
+                  type="button"
+                  className="outline-button"
+                  onClick={() => void fetchUsersData(userSearch, userPlanFilter)}
+                >
+                  بروزرسانی لیست
+                </button>
+              </div>
+
+              {userMessage && <div className="success-note admin-banner"><CheckCircle2 size={15} />{userMessage}</div>}
+              {userError && <div className="inline-error admin-banner">{userError}</div>}
+
+              {usersLoading ? (
+                <div className="review-loading"><LoaderCircle className="spin" size={18} /><span>در حال دریافت کاربران...</span></div>
+              ) : users.length === 0 ? (
+                <div className="review-empty">هنوز کاربری ثبت‌نام نکرده است.</div>
+              ) : (
+                <div className="admin-users-table-wrap">
+                  <table className="admin-users-table">
+                    <thead>
+                      <tr>
+                        <th>موبایل / نام</th>
+                        <th>پلن فعلی</th>
+                        <th>توکن باقی‌مانده</th>
+                        <th>مصرف امروز / کل</th>
+                        <th>اعتبار باقی‌مانده</th>
+                        <th>وضعیت</th>
+                        <th>مدیریت</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {users.map((u) => (
+                        <tr key={u.id} className={editingUser?.id === u.id ? "selected" : ""}>
+                          <td>
+                            <b dir="ltr">{u.phone_number}</b>
+                            <small>{u.full_name || "بدون نام"}</small>
+                          </td>
+                          <td><span className={`badge-pill ${u.is_expired ? "failed" : "done"}`}>{u.plan_title}</span></td>
+                          <td>{formatFaNumber(u.tokens_remaining)} / {formatFaNumber(u.tokens_total)}</td>
+                          <td>{formatFaNumber(u.tokens_used_today)} / {formatFaNumber(u.tokens_used_total)}</td>
+                          <td>{u.is_expired ? "منقضی" : `${formatFaNumber(u.days_remaining)} روز`}</td>
+                          <td>{u.is_active ? "فعال" : "مسدود"}</td>
+                          <td>
+                            <button
+                              type="button"
+                              className="outline-button"
+                              onClick={() => selectUserForEdit(u)}
+                            >
+                              ویرایش / شارژ
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            {editingUser && (
+              <section className="admin-card">
+                <div className="card-heading">
+                  <div>
+                    <h2>مدیریت حساب کاربر <span dir="ltr">{editingUser.phone_number}</span></h2>
+                    <p>تخصیص پلن، افزایش توکن، تغییر مدت اعتبار یا فعال/غیرفعال‌سازی دسترسی.</p>
+                  </div>
+                  <button type="button" className="icon-button" onClick={() => setEditingUser(null)} aria-label="بستن">
+                    <XCircle size={18} />
+                  </button>
+                </div>
+                <form className="admin-form" onSubmit={handleSaveUser}>
+                  <div className="form-row">
+                    <label className="form-field">
+                      <span>تغییر پلن</span>
+                      <select value={editUserPlan} onChange={(e) => setEditUserPlan(e.target.value)}>
+                        <option value="trial">هدیه ثبت‌نام (trial)</option>
+                        {plans.map((p) => (
+                          <option key={p.code} value={p.code}>
+                            {p.name} ({formatFaNumber(p.token_quota)} توکن / {p.duration_days} روز)
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="form-field">
+                      <span>افزایش / کاهش توکن (اختیاری)</span>
+                      <input
+                        type="number"
+                        placeholder="مثلاً 100000"
+                        value={editUserAddTokens}
+                        onChange={(e) => setEditUserAddTokens(e.target.value)}
+                      />
+                    </label>
+                    <label className="form-field">
+                      <span>تمدید اعتبار از امروز (روز، اختیاری)</span>
+                      <input
+                        type="number"
+                        min={1}
+                        placeholder="مثلاً 30"
+                        value={editUserDurationDays}
+                        onChange={(e) => setEditUserDurationDays(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="admin-inline-checks">
+                    <label className="plan-active-toggle">
+                      <input
+                        type="checkbox"
+                        checked={editUserApplyPlanDefaults}
+                        onChange={(e) => setEditUserApplyPlanDefaults(e.target.checked)}
+                      />
+                      <span>سهمیه توکن و مدت روز پلن انتخابی را روی حساب اعمال کن</span>
+                    </label>
+                    <label className="plan-active-toggle">
+                      <input
+                        type="checkbox"
+                        checked={editUserActive}
+                        onChange={(e) => setEditUserActive(e.target.checked)}
+                      />
+                      <span>حساب کاربری فعال باشد</span>
+                    </label>
+                  </div>
+                  <div className="admin-inline-actions">
+                    <button type="submit" className="primary-button" disabled={userSaving}>
+                      {userSaving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+                      اعمال تغییرات کاربر
+                    </button>
+                  </div>
+                </form>
+              </section>
+            )}
+          </div>
+        )}
+
+        {adminTab === "books" && (
+        <>
         <div className="admin-grid">
           <section className="admin-card">
             <div className="card-heading">
@@ -1133,6 +1772,8 @@ export default function AdminPage() {
               srcDoc={previewHtml || "<html><body dir='rtl' style='font-family:sans-serif;padding:24px;color:#667'>در حال بارگذاری پیش‌نمایش...</body></html>"}
             />
           </section>
+        )}
+        </>
         )}
       </div>
     </main>
