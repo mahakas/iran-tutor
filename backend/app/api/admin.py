@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import async_session_factory
 from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User
-from app.models.curriculum import Book, BookPage, Grade, Major
+from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
+from app.services.document_parser import detect_document_format, parse_structured_document
 from app.services.auth_billing_service import (
     apply_plan_to_user,
     calculate_token_cost_toman,
@@ -224,16 +225,28 @@ async def _run_ingest_background(
 @protected_router.post("/books/upload-and-ingest")
 async def upload_and_ingest(
     background_tasks: BackgroundTasks,
-    pdf_file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    pdf_file: UploadFile | None = File(None),
     grade_number: int = Form(...),
     major_code: str | None = Form(None),
     book_title: str = Form(...),
-    start_page: int = Form(...),
-    end_page: int = Form(...),
+    start_page: int = Form(1),
+    end_page: int | None = Form(None),
 ) -> dict[str, object]:
     settings = get_settings()
+    upload = file or pdf_file
+    if upload is None:
+        raise HTTPException(status_code=422, detail="لطفاً یک فایل کتاب انتخاب کنید.")
 
-    if start_page < 1 or end_page < start_page:
+    try:
+        doc_format = detect_document_format(upload.filename, upload.content_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if doc_format == "pdf":
+        if end_page is None or start_page < 1 or end_page < start_page:
+            raise HTTPException(status_code=422, detail="invalid page range")
+    elif start_page < 1 or (end_page is not None and end_page < start_page):
         raise HTTPException(status_code=422, detail="invalid page range")
 
     async with async_session_factory() as session:
@@ -252,54 +265,138 @@ async def upload_and_ingest(
                 raise HTTPException(status_code=404, detail=f"major '{major_code}' not found")
             major_id = major.id
 
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        suffix = Path(pdf_file.filename or "upload.pdf").suffix or ".pdf"
-        dest = UPLOAD_DIR / f"{uuid4().hex}{suffix}"
-        pdf_bytes = await pdf_file.read(MAX_PDF_BYTES + 1)
-        if not pdf_bytes:
-            raise HTTPException(status_code=422, detail="uploaded PDF file is empty")
-        if len(pdf_bytes) > MAX_PDF_BYTES:
-            raise HTTPException(status_code=413, detail="PDF file exceeds 100 MiB limit")
-        dest.write_bytes(pdf_bytes)
-        try:
-            page_count = pdf_page_count(dest)
-        except Exception as exc:
-            dest.unlink(missing_ok=True)
-            raise HTTPException(status_code=422, detail="uploaded file is not a valid PDF") from exc
-        if end_page > page_count:
-            dest.unlink(missing_ok=True)
-            raise HTTPException(
-                status_code=422,
-                detail=f"page range ends at {end_page}, but the PDF contains only {page_count} pages",
-            )
+        raw_bytes = await upload.read(MAX_PDF_BYTES + 1)
+        if not raw_bytes:
+            raise HTTPException(status_code=422, detail="uploaded file is empty")
+        if len(raw_bytes) > MAX_PDF_BYTES:
+            raise HTTPException(status_code=413, detail="file exceeds 100 MiB limit")
 
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        default_ext = ".pdf" if doc_format == "pdf" else f".{doc_format if doc_format != 'markdown' else 'md'}"
+        suffix = Path(upload.filename or f"upload{default_ext}").suffix or default_ext
+        dest = UPLOAD_DIR / f"{uuid4().hex}{suffix}"
+
+        if doc_format == "pdf":
+            assert end_page is not None
+            dest.write_bytes(raw_bytes)
+            try:
+                page_count = pdf_page_count(dest)
+            except Exception as exc:
+                dest.unlink(missing_ok=True)
+                raise HTTPException(status_code=422, detail="uploaded file is not a valid PDF") from exc
+            if end_page > page_count:
+                dest.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"page range ends at {end_page}, but the PDF contains only {page_count} pages",
+                )
+
+            book = Book(
+                title=book_title,
+                grade_id=grade.id,
+                major_id=major_id,
+                pdf_file_path=str(dest),
+                total_pdf_pages=end_page - start_page + 1,
+                status="ingesting",
+            )
+            session.add(book)
+            await session.commit()
+            await session.refresh(book)
+            book_id = book.id
+
+            background_tasks.add_task(
+                _run_ingest_background,
+                book_id=book_id,
+                pdf_path=dest,
+                grade_number=grade_number,
+                major_code=major_code,
+                book_title=book_title,
+                start_page=start_page,
+                end_page=end_page,
+                model_primary=settings.vision_model_primary,
+                model_escalation=settings.vision_model_escalation,
+                escalate_figures=settings.escalate_figures,
+            )
+            return {
+                "book_id": book_id,
+                "status": "ingesting",
+                "format": "pdf",
+                "total_pages": end_page - start_page + 1,
+            }
+
+        # Structured text/document upload (.md, .json, .html)
+        try:
+            parsed_pages = parse_structured_document(raw_bytes, fmt=doc_format)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        if end_page is not None:
+            if end_page > len(parsed_pages):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"page range ends at {end_page}, but the file contains only {len(parsed_pages)} sections/pages",
+                )
+            selected_pages = parsed_pages[start_page - 1 : end_page]
+        else:
+            if start_page > len(parsed_pages):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"start page {start_page} exceeds {len(parsed_pages)} sections/pages",
+                )
+            selected_pages = parsed_pages[start_page - 1 :]
+
+        dest.write_bytes(raw_bytes)
+        model_label = f"structured-{doc_format}"
         book = Book(
             title=book_title,
             grade_id=grade.id,
             major_id=major_id,
             pdf_file_path=str(dest),
-            total_pdf_pages=end_page - start_page + 1,
-            status="ingesting",
+            total_pdf_pages=len(selected_pages),
+            status="ready",
         )
         session.add(book)
-        await session.commit()
-        await session.refresh(book)
+        await session.flush()
         book_id = book.id
 
-    background_tasks.add_task(
-        _run_ingest_background,
-        book_id=book_id,
-        pdf_path=dest,
-        grade_number=grade_number,
-        major_code=major_code,
-        book_title=book_title,
-        start_page=start_page,
-        end_page=end_page,
-        model_primary=settings.vision_model_primary,
-        model_escalation=settings.vision_model_escalation,
-        escalate_figures=settings.escalate_figures,
-    )
-    return {"book_id": book_id, "status": "ingesting"}
+        page_rows: list[BookPage] = []
+        status_counts: dict[str, int] = {}
+        for seq_idx, parsed in enumerate(selected_pages, start=1):
+            page_idx = parsed.page_index if end_page is None and start_page == 1 else seq_idx
+            page_status = PageStatus.needs_review if parsed.warnings else PageStatus.done
+            status_key = page_status.value
+            status_counts[status_key] = status_counts.get(status_key, 0) + 1
+            row = BookPage(
+                book_id=book_id,
+                pdf_page_index=page_idx,
+                printed_page_number=parsed.printed_page_number,
+                chapter_number=parsed.chapter_number,
+                chapter_title=parsed.chapter_title,
+                markdown_content=parsed.markdown_content,
+                visual_elements=parsed.visual_elements,
+                page_image_path="",
+                status=page_status,
+                warnings=parsed.warnings,
+                extraction_model=model_label,
+                edited_by_human=False,
+            )
+            session.add(row)
+            page_rows.append(row)
+
+        await session.commit()
+
+        try:
+            _export_assets(book_id, build_export_pages(page_rows))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("structured book asset export failed for %s: %s", book_id, exc)
+
+        return {
+            "book_id": book_id,
+            "status": "ready",
+            "format": doc_format,
+            "total_pages": len(selected_pages),
+            "pages": status_counts,
+        }
 
 
 @protected_router.get("/books")
@@ -391,7 +488,11 @@ async def list_book_pages(book_id: int) -> list[dict[str, object]]:
                 "extraction_model": row.extraction_model,
                 "edited_by_human": bool(row.edited_by_human),
                 "error_message": row.error_message,
-                "image_url": f"/api/v1/admin/books/{book_id}/pages/{row.pdf_page_index}/image",
+                "image_url": (
+                    f"/api/v1/admin/books/{book_id}/pages/{row.pdf_page_index}/image"
+                    if row.page_image_path
+                    else None
+                ),
             }
             for row in rows
         ]
