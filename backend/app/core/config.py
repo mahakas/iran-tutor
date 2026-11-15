@@ -41,6 +41,11 @@ class Settings(BaseSettings):
 
     database_url: str = Field(min_length=1)
 
+    # Admin authentication (change ADMIN_USERNAME / ADMIN_PASSWORD before deploying publicly)
+    admin_username: str = Field(default="admin", min_length=1)
+    admin_password: str = Field(default="123", min_length=1)
+    admin_session_ttl_seconds: int = Field(default=43200, gt=0)
+
     # Phase 2: textbook vector search. Use "pgvector" for Supabase PostgreSQL,
     # or "qdrant" for a Qdrant server.
     vector_backend: Literal["qdrant", "pgvector"] = "qdrant"

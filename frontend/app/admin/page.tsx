@@ -1,17 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   BookOpen,
   CheckCircle2,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileText,
   FileUp,
   LoaderCircle,
+  LockKeyhole,
+  LogOut,
   Save,
-  ShieldAlert,
+  ShieldCheck,
   Sparkles,
   XCircle,
 } from "lucide-react";
@@ -48,6 +52,37 @@ type AdminPageItem = {
 };
 
 const MAX_PDF_BYTES = 100 * 1024 * 1024;
+const ADMIN_TOKEN_KEY = "iran_tutor_admin_token";
+
+function readStoredAdminToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage.getItem(ADMIN_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storeAdminToken(token: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) {
+      window.sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+    } else {
+      window.sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+    }
+  } catch {
+    // ignore storage restriction
+  }
+}
+
+function buildAuthHeaders(token: string | null): Record<string, string> {
+  if (!token) return {};
+  return {
+    Authorization: `Bearer ${token}`,
+    "X-Admin-Token": token,
+  };
+}
 
 const majors = [
   { code: "math_physics", label: "ریاضی‌فیزیک" },
@@ -63,6 +98,16 @@ const statusLabel: Record<string, string> = {
 };
 
 export default function AdminPage() {
+  const [authState, setAuthState] = useState<"checking" | "locked" | "authenticated">("checking");
+  const tokenRef = useRef<string | null>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [pageImageSrc, setPageImageSrc] = useState<string | null>(null);
+  const [previewHtml, setPreviewHtml] = useState<string>("");
+
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("فیزیک ۳");
   const [grade, setGrade] = useState(12);
@@ -110,29 +155,72 @@ export default function AdminPage() {
     setImageError(false);
   }, []);
 
-  const fetchBooks = useCallback(async (): Promise<BookStatus[]> => {
-    try {
-      const response = await fetch("/api/v1/admin/books", { cache: "no-store" });
-      if (!response.ok) return [];
-      return (await response.json()) as BookStatus[];
-    } catch {
-      return [];
-    }
+  const getActiveToken = useCallback((): string | null => {
+    return tokenRef.current ?? readStoredAdminToken();
   }, []);
 
-  const fetchBookPages = useCallback(async (bookId: number): Promise<AdminPageItem[]> => {
-    try {
-      const response = await fetch(`/api/v1/admin/books/${bookId}/pages`, { cache: "no-store" });
-      if (!response.ok) return [];
-      return (await response.json()) as AdminPageItem[];
-    } catch {
-      return [];
-    }
+  const setActiveToken = useCallback((token: string | null) => {
+    tokenRef.current = token;
+    storeAdminToken(token);
   }, []);
+
+  const lockAdminPanel = useCallback(() => {
+    setActiveToken(null);
+    setAuthState("locked");
+    setBooks([]);
+    setBook(null);
+    setPages([]);
+    setPageImageSrc(null);
+    setPreviewHtml("");
+    setPreviewOpen(false);
+    selectPageForEdit(null);
+  }, [selectPageForEdit, setActiveToken]);
+
+  const fetchBooks = useCallback(
+    async (tokenOverride?: string | null): Promise<{ items: BookStatus[]; unauthorized: boolean }> => {
+      const token = tokenOverride !== undefined ? tokenOverride : getActiveToken();
+      try {
+        const response = await fetch("/api/v1/admin/books", {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: buildAuthHeaders(token),
+        });
+        if (response.status === 401) return { items: [], unauthorized: true };
+        if (!response.ok) return { items: [], unauthorized: false };
+        return { items: (await response.json()) as BookStatus[], unauthorized: false };
+      } catch {
+        return { items: [], unauthorized: false };
+      }
+    },
+    [getActiveToken]
+  );
+
+  const fetchBookPages = useCallback(
+    async (bookId: number, tokenOverride?: string | null): Promise<{ items: AdminPageItem[]; unauthorized: boolean }> => {
+      const token = tokenOverride !== undefined ? tokenOverride : getActiveToken();
+      try {
+        const response = await fetch(`/api/v1/admin/books/${bookId}/pages`, {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: buildAuthHeaders(token),
+        });
+        if (response.status === 401) return { items: [], unauthorized: true };
+        if (!response.ok) return { items: [], unauthorized: false };
+        return { items: (await response.json()) as AdminPageItem[], unauthorized: false };
+      } catch {
+        return { items: [], unauthorized: false };
+      }
+    },
+    [getActiveToken]
+  );
 
   const refreshBooksAndSelect = useCallback(
-    async (preferredBookId?: number) => {
-      const items = await fetchBooks();
+    async (preferredBookId?: number, tokenOverride?: string | null) => {
+      const { items, unauthorized } = await fetchBooks(tokenOverride);
+      if (unauthorized) {
+        lockAdminPanel();
+        return;
+      }
       setBooks(items);
       if (preferredBookId !== undefined) {
         const match = items.find((item) => item.id === preferredBookId);
@@ -141,15 +229,19 @@ export default function AdminPage() {
         setBook((current) => (current ? items.find((item) => item.id === current.id) ?? items[0] : items[0]));
       }
     },
-    [fetchBooks]
+    [fetchBooks, lockAdminPanel]
   );
 
   const refreshBookPages = useCallback(
     async (bookId: number, keepPageIdx?: number | null) => {
       setPagesLoading(true);
-      const items = await fetchBookPages(bookId);
-      setPages(items);
+      const { items, unauthorized } = await fetchBookPages(bookId);
       setPagesLoading(false);
+      if (unauthorized) {
+        lockAdminPanel();
+        return;
+      }
+      setPages(items);
       if (items.length === 0) {
         selectPageForEdit(null);
         return;
@@ -161,23 +253,99 @@ export default function AdminPage() {
       const firstNeedsReview = items.find((item) => item.status === "needs_review" || item.status === "failed");
       selectPageForEdit(kept ?? firstNeedsReview ?? items[0]);
     },
-    [fetchBookPages, selectPageForEdit]
+    [fetchBookPages, lockAdminPanel, selectPageForEdit]
   );
 
   useEffect(() => {
     let active = true;
-    fetchBooks().then((items) => {
-      if (!active || items.length === 0) return;
-      setBooks(items);
-      setBook((current) => current ?? items[0]);
-    });
+    const storedToken = getActiveToken();
+    fetch("/api/v1/admin/auth/session", {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: buildAuthHeaders(storedToken),
+    })
+      .then(async (response) => {
+        if (!response.ok) return false;
+        const data = (await response.json()) as { authenticated?: boolean };
+        return Boolean(data.authenticated);
+      })
+      .catch(() => false)
+      .then(async (authenticated) => {
+        if (!active) return;
+        if (!authenticated) {
+          setActiveToken(null);
+          setAuthState("locked");
+          return;
+        }
+        const { items, unauthorized } = await fetchBooks(storedToken);
+        if (!active) return;
+        if (unauthorized) {
+          lockAdminPanel();
+          return;
+        }
+        setAuthState("authenticated");
+        if (items.length > 0) {
+          setBooks(items);
+          setBook((current) => current ?? items[0]);
+        }
+      });
     return () => {
       active = false;
     };
-  }, [fetchBooks]);
+  }, [fetchBooks, getActiveToken, lockAdminPanel, setActiveToken]);
 
-  const activeBookId = book?.id ?? null;
-  const activeBookStatus = book?.status ?? null;
+  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!username.trim() || !password) {
+      setAuthError("لطفاً نام کاربری و رمز عبور مدیر را وارد کنید.");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const response = await fetch("/api/v1/admin/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        detail?: string;
+        authenticated?: boolean;
+        token?: string;
+      };
+      if (!response.ok || !payload.authenticated || !payload.token) {
+        throw new Error(payload.detail ?? "نام کاربری یا رمز عبور مدیر نادرست است.");
+      }
+      setActiveToken(payload.token);
+      const { items, unauthorized } = await fetchBooks(payload.token);
+      if (unauthorized) {
+        setActiveToken(null);
+        throw new Error("نشست احراز هویت در مرورگر حفظ نشد؛ لطفاً صفحه را رفرش یا در تب جدید باز کنید.");
+      }
+      setPassword("");
+      setBooks(items);
+      setBook(items[0] ?? null);
+      setAuthState("authenticated");
+    } catch (cause) {
+      setAuthError(cause instanceof Error ? cause.message : "خطا در ورود به پنل مدیریت");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    const token = getActiveToken();
+    await fetch("/api/v1/admin/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: buildAuthHeaders(token),
+    }).catch(() => undefined);
+    lockAdminPanel();
+  };
+
+  const activeBookId = authState === "authenticated" ? book?.id ?? null : null;
+  const activeBookStatus = authState === "authenticated" ? book?.status ?? null : null;
 
   useEffect(() => {
     if (!activeBookId || !activeBookStatus) return;
@@ -185,14 +353,29 @@ export default function AdminPage() {
 
     if (activeBookStatus === "ingesting") {
       const timer = window.setInterval(async () => {
+        const token = getActiveToken();
         try {
-          const response = await fetch(`/api/v1/admin/books/${activeBookId}/status`, { cache: "no-store" });
+          const response = await fetch(`/api/v1/admin/books/${activeBookId}/status`, {
+            cache: "no-store",
+            credentials: "same-origin",
+            headers: buildAuthHeaders(token),
+          });
+          if (!active) return;
+          if (response.status === 401) {
+            lockAdminPanel();
+            return;
+          }
           const payload = (await response.json()) as BookStatus;
-          if (!active || !response.ok) return;
+          if (!response.ok) return;
           setBook(payload);
           if (payload.status !== "ingesting") {
-            const list = await fetchBooks();
-            if (active && list.length > 0) setBooks(list);
+            const { items, unauthorized } = await fetchBooks();
+            if (!active) return;
+            if (unauthorized) {
+              lockAdminPanel();
+              return;
+            }
+            if (items.length > 0) setBooks(items);
           }
         } catch {
           if (active) setError("وضعیت پردازش دریافت نشد؛ ارتباط بک‌اند را بررسی کن.");
@@ -204,10 +387,14 @@ export default function AdminPage() {
       };
     }
 
-    fetchBookPages(activeBookId).then((items) => {
+    fetchBookPages(activeBookId).then(({ items, unauthorized }) => {
       if (!active) return;
-      setPages(items);
       setPagesLoading(false);
+      if (unauthorized) {
+        lockAdminPanel();
+        return;
+      }
+      setPages(items);
       if (items.length === 0) {
         selectPageForEdit(null);
         return;
@@ -219,12 +406,83 @@ export default function AdminPage() {
     return () => {
       active = false;
     };
-  }, [activeBookId, activeBookStatus, fetchBookPages, fetchBooks, selectPageForEdit]);
+  }, [activeBookId, activeBookStatus, fetchBookPages, fetchBooks, getActiveToken, lockAdminPanel, selectPageForEdit]);
 
   const selectedPage = useMemo(
     () => pages.find((item) => item.pdf_page_index === selectedIdx) ?? null,
     [pages, selectedIdx]
   );
+
+  const selectedImageUrl = selectedPage?.image_url ?? null;
+
+  useEffect(() => {
+    if (authState !== "authenticated" || !selectedImageUrl) return;
+    let active = true;
+    let objectUrl: string | null = null;
+    const token = getActiveToken();
+    fetch(`${selectedImageUrl}?v=${previewVersion}`, {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: buildAuthHeaders(token),
+    })
+      .then(async (response) => {
+        if (response.status === 401) {
+          if (active) lockAdminPanel();
+          return null;
+        }
+        if (!response.ok) return null;
+        return response.blob();
+      })
+      .then((blob) => {
+        if (!active) return;
+        if (!blob) {
+          setImageError(true);
+          setPageImageSrc(null);
+          return;
+        }
+        objectUrl = URL.createObjectURL(blob);
+        setImageError(false);
+        setPageImageSrc(objectUrl);
+      })
+      .catch(() => {
+        if (active) {
+          setImageError(true);
+          setPageImageSrc(null);
+        }
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [authState, getActiveToken, lockAdminPanel, previewVersion, selectedImageUrl]);
+
+  useEffect(() => {
+    if (authState !== "authenticated" || !previewOpen || !activeBookId) return;
+    let active = true;
+    const token = getActiveToken();
+    fetch(`/api/v1/admin/books/${activeBookId}/preview?status=${previewStatus}&v=${previewVersion}`, {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: buildAuthHeaders(token),
+    })
+      .then(async (response) => {
+        if (response.status === 401) {
+          if (active) lockAdminPanel();
+          return "";
+        }
+        if (!response.ok) return "";
+        return response.text();
+      })
+      .then((htmlText) => {
+        if (active && htmlText) setPreviewHtml(htmlText);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      active = false;
+    };
+  }, [activeBookId, authState, getActiveToken, lockAdminPanel, previewOpen, previewStatus, previewVersion]);
 
   const processedPages = useMemo(
     () => (book ? Object.values(book.pages).reduce((total, count) => total + count, 0) : 0),
@@ -262,7 +520,17 @@ export default function AdminPage() {
     form.set("end_page", String(endPage));
     if (grade >= 10) form.set("major_code", major);
     try {
-      const response = await fetch("/api/v1/admin/books/upload-and-ingest", { method: "POST", body: form });
+      const token = getActiveToken();
+      const response = await fetch("/api/v1/admin/books/upload-and-ingest", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: buildAuthHeaders(token),
+        body: form,
+      });
+      if (response.status === 401) {
+        lockAdminPanel();
+        throw new Error("نشست مدیریت منقضی شده است؛ لطفاً دوباره وارد شوید.");
+      }
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail ?? "آپلود و پردازش شروع نشد.");
       setUploadMessage(`پردازش کتاب با شناسهٔ ${payload.book_id} شروع شد.`);
@@ -303,9 +571,14 @@ export default function AdminPage() {
     }
 
     try {
+      const token = getActiveToken();
       const response = await fetch(`/api/v1/admin/books/${book.id}/pages/${selectedPage.pdf_page_index}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...buildAuthHeaders(token),
+        },
+        credentials: "same-origin",
         body: JSON.stringify({
           printed_page_number: parsedPrinted,
           chapter_number: parsedChapter,
@@ -313,6 +586,10 @@ export default function AdminPage() {
           markdown_content: editMarkdown,
         }),
       });
+      if (response.status === 401) {
+        lockAdminPanel();
+        throw new Error("نشست مدیریت منقضی شده است؛ لطفاً دوباره وارد شوید.");
+      }
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail ?? "ذخیرهٔ صفحه انجام نشد.");
       setSaveMessage(`صفحهٔ PDF ${selectedPage.pdf_page_index} ذخیره و به‌عنوان «تأییدشده» ثبت شد.`);
@@ -328,6 +605,77 @@ export default function AdminPage() {
     }
   };
 
+  if (authState === "checking") {
+    return (
+      <main className="admin-login-shell" dir="rtl">
+        <div className="admin-login-card">
+          <div className="admin-login-icon">
+            <LoaderCircle size={24} className="spin" />
+          </div>
+          <h1>بررسی دسترسی مدیریت...</h1>
+        </div>
+      </main>
+    );
+  }
+
+  if (authState === "locked") {
+    return (
+      <main className="admin-login-shell" dir="rtl">
+        <section className="admin-login-card" aria-labelledby="admin-login-title">
+          <div className="admin-login-icon">
+            <LockKeyhole size={24} />
+          </div>
+          <span className="eyebrow">دسترسی محدود</span>
+          <h1 id="admin-login-title">ورود به پنل مدیریت هم‌درس</h1>
+          <p>این بخش از محیط دانش‌آموز جداست. برای مدیریت کتاب‌های درسی، نام کاربری و رمز عبور مدیر را وارد کنید.</p>
+          <form onSubmit={handleLogin} className="admin-form">
+            <label className="form-field">
+              <span>نام کاربری</span>
+              <input
+                type="text"
+                dir="ltr"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="admin"
+                autoComplete="username"
+                autoFocus
+              />
+            </label>
+            <label className="form-field">
+              <span>رمز عبور</span>
+              <div className="password-input-wrap">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  dir="ltr"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="رمز عبور را وارد کنید"
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  className="password-toggle"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  aria-label={showPassword ? "مخفی کردن رمز" : "نمایش رمز"}
+                >
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </label>
+            {authError && <div className="inline-error">{authError}</div>}
+            <button className="primary-button admin-submit" type="submit" disabled={authBusy}>
+              {authBusy ? <LoaderCircle size={17} className="spin" /> : <LockKeyhole size={17} />}
+              ورود به پنل مدیریت
+            </button>
+          </form>
+          <Link className="back-link admin-login-back" href="/">
+            <ArrowRight size={16} /> بازگشت به سایت
+          </Link>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="admin-shell" dir="rtl">
       <header className="admin-topbar">
@@ -338,9 +686,14 @@ export default function AdminPage() {
             <span>مرکز محتوای آموزشی</span>
           </div>
         </div>
-        <Link className="back-link" href="/">
-          <ArrowRight size={17} /> بازگشت به کلاس
-        </Link>
+        <div className="admin-topbar-actions">
+          <Link className="back-link" href="/">
+            <ArrowRight size={17} /> مشاهدهٔ سایت
+          </Link>
+          <button type="button" className="admin-logout-btn" onClick={() => void handleLogout()}>
+            <LogOut size={15} /> خروج
+          </button>
+        </div>
       </header>
       <div className="admin-content">
         <div className="admin-heading">
@@ -353,10 +706,10 @@ export default function AdminPage() {
             <BookOpen size={25} />
           </div>
         </div>
-        <div className="admin-warning">
-          <ShieldAlert size={18} />
+        <div className="admin-warning admin-protected-note">
+          <ShieldCheck size={18} />
           <span>
-            <b>محیط توسعهٔ محلی</b> · API مدیریت هنوز ورود ادمین ندارد؛ این پنل را عمومی منتشر نکن.
+            <b>دسترسی محافظت‌شده با رمز عبور</b> · مسیر /admin از محیط دانش‌آموز جدا شده است. پیش از انتشار نهایی، مقدار ADMIN_PASSWORD را به رمز قوی تغییر دهید.
           </span>
         </div>
 
@@ -630,13 +983,18 @@ export default function AdminPage() {
                             <FileText size={20} />
                             <span>تصویر صفحه در دسترس نیست</span>
                           </div>
-                        ) : (
+                        ) : pageImageSrc ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
-                            src={`${selectedPage.image_url}?v=${previewVersion}`}
+                            src={pageImageSrc}
                             alt={`صفحه PDF ${selectedPage.pdf_page_index}`}
                             onError={() => setImageError(true)}
                           />
+                        ) : (
+                          <div className="review-image-missing">
+                            <LoaderCircle className="spin" size={18} />
+                            <span>در حال بارگذاری تصویر...</span>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -772,7 +1130,7 @@ export default function AdminPage() {
             <iframe
               key={`${book.id}-${previewStatus}-${previewVersion}`}
               title="پیش‌نمایش صفحات کتاب"
-              src={`/api/v1/admin/books/${book.id}/preview?status=${previewStatus}&v=${previewVersion}`}
+              srcDoc={previewHtml || "<html><body dir='rtl' style='font-family:sans-serif;padding:24px;color:#667'>در حال بارگذاری پیش‌نمایش...</body></html>"}
             />
           </section>
         )}

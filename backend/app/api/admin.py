@@ -1,11 +1,16 @@
-"""Admin API: book upload + background ingestion, status, preview, manual fix."""
+"""Admin API: password-protected book upload + ingestion, status, preview, manual fix."""
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import logging
+import secrets
+import time
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -26,8 +31,147 @@ from app.services.ingestion_service import (
 from app.services.preview import render_single_preview
 from app.services.validation import validate_major_code
 
-router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+ADMIN_COOKIE_NAME = "iran_tutor_admin"
 MAX_PDF_BYTES = 100 * 1024 * 1024
+logger = logging.getLogger(__name__)
+
+
+def _admin_signing_key() -> bytes:
+    settings = get_settings()
+    material = (
+        f"iran-tutor-admin-v2:{settings.admin_username}:{settings.admin_password}:{settings.llm_api_key}"
+    ).encode("utf-8")
+    return hashlib.sha256(material).digest()
+
+
+def create_admin_session_token(*, ttl_seconds: int | None = None) -> str:
+    settings = get_settings()
+    ttl = ttl_seconds if ttl_seconds is not None else settings.admin_session_ttl_seconds
+    expires_at = int(time.time()) + ttl
+    nonce = secrets.token_hex(16)
+    payload = f"{expires_at}.{nonce}"
+    signature = hmac.new(_admin_signing_key(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def verify_admin_session_token(token: str | None) -> bool:
+    if not token or token.count(".") != 2:
+        return False
+    expires_raw, nonce, signature = token.split(".", 2)
+    if not expires_raw.isdigit() or not nonce or not signature:
+        return False
+    if int(expires_raw) <= int(time.time()):
+        return False
+    expected = hmac.new(
+        _admin_signing_key(),
+        f"{expires_raw}.{nonce}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def _is_admin_authenticated(request: Request) -> bool:
+    settings = get_settings()
+    if not settings.admin_username or not settings.admin_password:
+        return False
+
+    token_header = request.headers.get("x-admin-token", "").strip()
+    if token_header and verify_admin_session_token(token_header):
+        return True
+
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        bearer_token = auth_header[7:].strip()
+        if verify_admin_session_token(bearer_token):
+            return True
+
+    header_user = request.headers.get("x-admin-username")
+    header_pw = request.headers.get("x-admin-password")
+    if (
+        header_user
+        and header_pw
+        and hmac.compare_digest(header_user, settings.admin_username)
+        and hmac.compare_digest(header_pw, settings.admin_password)
+    ):
+        return True
+
+    return verify_admin_session_token(request.cookies.get(ADMIN_COOKIE_NAME))
+
+
+def require_admin(request: Request) -> None:
+    if not _is_admin_authenticated(request):
+        logger.warning(
+            "Admin auth failed for %s; header_keys=%s has_cookie=%s",
+            request.url.path,
+            sorted(k for k in request.headers.keys() if k in {"authorization", "x-admin-token", "cookie"}),
+            ADMIN_COOKIE_NAME in request.cookies,
+        )
+        raise HTTPException(status_code=401, detail="احراز هویت مدیر لازم است.")
+
+
+router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+protected_router = APIRouter(dependencies=[Depends(require_admin)])
+
+
+class AdminLoginBody(BaseModel):
+    username: str
+    password: str
+
+
+@router.get("/auth/session")
+async def get_admin_session(request: Request) -> dict[str, object]:
+    authed = _is_admin_authenticated(request)
+    return {
+        "authenticated": authed,
+        "username": get_settings().admin_username if authed else None,
+    }
+
+
+@router.post("/auth/login")
+async def admin_login(body: AdminLoginBody, request: Request, response: Response) -> dict[str, object]:
+    settings = get_settings()
+    valid_user = bool(settings.admin_username) and hmac.compare_digest(
+        body.username.strip(), settings.admin_username
+    )
+    valid_pass = bool(settings.admin_password) and hmac.compare_digest(
+        body.password, settings.admin_password
+    )
+    if not (valid_user and valid_pass):
+        raise HTTPException(status_code=401, detail="نام کاربری یا رمز عبور مدیر نادرست است.")
+    token = create_admin_session_token()
+    is_https = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
+    )
+    response.set_cookie(
+        key=ADMIN_COOKIE_NAME,
+        value=token,
+        max_age=settings.admin_session_ttl_seconds,
+        httponly=True,
+        samesite="none" if is_https else "lax",
+        secure=is_https,
+        path="/",
+    )
+    return {
+        "authenticated": True,
+        "token": token,
+        "username": settings.admin_username,
+    }
+
+
+@router.post("/auth/logout")
+async def admin_logout(request: Request, response: Response) -> dict[str, bool]:
+    is_https = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
+    )
+    response.delete_cookie(
+        key=ADMIN_COOKIE_NAME,
+        path="/",
+        samesite="none" if is_https else "lax",
+        secure=is_https,
+    )
+    return {"authenticated": False}
 
 
 async def _run_ingest_background(
@@ -65,7 +209,7 @@ async def _run_ingest_background(
                 await session.commit()
 
 
-@router.post("/books/upload-and-ingest")
+@protected_router.post("/books/upload-and-ingest")
 async def upload_and_ingest(
     background_tasks: BackgroundTasks,
     pdf_file: UploadFile = File(...),
@@ -146,7 +290,7 @@ async def upload_and_ingest(
     return {"book_id": book_id, "status": "ingesting"}
 
 
-@router.get("/books")
+@protected_router.get("/books")
 async def list_admin_books() -> list[dict[str, object]]:
     async with async_session_factory() as session:
         rows = (
@@ -184,7 +328,7 @@ async def list_admin_books() -> list[dict[str, object]]:
         ]
 
 
-@router.get("/books/{book_id}/status")
+@protected_router.get("/books/{book_id}/status")
 async def book_status(book_id: int) -> dict[str, object]:
     async with async_session_factory() as session:
         book = await session.get(Book, book_id)
@@ -209,7 +353,7 @@ async def book_status(book_id: int) -> dict[str, object]:
         }
 
 
-@router.get("/books/{book_id}/pages")
+@protected_router.get("/books/{book_id}/pages")
 async def list_book_pages(book_id: int) -> list[dict[str, object]]:
     async with async_session_factory() as session:
         book = await session.get(Book, book_id)
@@ -241,7 +385,7 @@ async def list_book_pages(book_id: int) -> list[dict[str, object]]:
         ]
 
 
-@router.get("/books/{book_id}/pages/{idx}/image")
+@protected_router.get("/books/{book_id}/pages/{idx}/image")
 async def get_page_image(book_id: int, idx: int) -> FileResponse:
     async with async_session_factory() as session:
         page = await session.scalar(
@@ -262,7 +406,7 @@ class PageFixBody(BaseModel):
     chapter_title: str | None = None
 
 
-@router.put("/books/{book_id}/pages/{idx}")
+@protected_router.put("/books/{book_id}/pages/{idx}")
 async def fix_page(book_id: int, idx: int, body: PageFixBody) -> dict[str, object]:
     async with async_session_factory() as session:
         page = await session.scalar(
@@ -304,7 +448,7 @@ async def fix_page(book_id: int, idx: int, body: PageFixBody) -> dict[str, objec
 PREVIEW_STATUSES = ("all", "done", "failed", "needs_review", "pending")
 
 
-@router.get("/books/{book_id}/preview", response_class=HTMLResponse)
+@protected_router.get("/books/{book_id}/preview", response_class=HTMLResponse)
 async def book_preview(
     book_id: int,
     status: str | None = Query(None),
@@ -353,3 +497,6 @@ async def book_preview(
         out_path = STORAGE_DIR / "books" / str(book_id) / f"preview_{tag}.html"
     rendered = render_single_preview(book_id, tag, pages, out_path)
     return rendered.read_text(encoding="utf-8")
+
+
+router.include_router(protected_router)
