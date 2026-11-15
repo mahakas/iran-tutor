@@ -75,6 +75,8 @@ def _md_container(page: dict[str, Any], model_key: str) -> str:
 
 
 def _image_block(image_path: str | Path | None, page_idx: Any) -> str:
+    if not image_path:
+        return '<div class="imgwrap img-missing">منبع متنی/ساختاریافته (بدون تصویر PDF)</div>'
     encoded = _b64(image_path)
     if not encoded:
         return '<div class="imgwrap img-missing">تصویر صفحه موجود نیست</div>'

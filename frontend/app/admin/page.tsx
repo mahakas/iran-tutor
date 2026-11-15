@@ -56,11 +56,26 @@ type AdminPageItem = {
   extraction_model: string | null;
   edited_by_human: boolean;
   error_message: string | null;
-  image_url: string;
+  image_url: string | null;
 };
 
-const MAX_PDF_BYTES = 100 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const ADMIN_TOKEN_KEY = "iran_tutor_admin_token";
+
+function detectClientFileFormat(file: File | null): "pdf" | "markdown" | "json" | "html" | "unknown" {
+  if (!file) return "pdf";
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".pdf")) return "pdf";
+  if (name.endsWith(".md") || name.endsWith(".markdown")) return "markdown";
+  if (name.endsWith(".json")) return "json";
+  if (name.endsWith(".html") || name.endsWith(".htm")) return "html";
+  const mime = (file.type || "").toLowerCase();
+  if (mime.includes("pdf")) return "pdf";
+  if (mime.includes("markdown")) return "markdown";
+  if (mime.includes("json")) return "json";
+  if (mime.includes("html")) return "html";
+  return "unknown";
+}
 
 function readStoredAdminToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -736,6 +751,9 @@ export default function AdminPage() {
     };
   }, [activeBookId, authState, getActiveToken, lockAdminPanel, previewOpen, previewStatus, previewVersion]);
 
+  const selectedFileFormat = useMemo(() => detectClientFileFormat(file), [file]);
+  const isPdfUpload = selectedFileFormat === "pdf";
+
   const processedPages = useMemo(
     () => (book ? Object.values(book.pages).reduce((total, count) => total + count, 0) : 0),
     [book]
@@ -745,14 +763,18 @@ export default function AdminPage() {
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!file) {
-      setError("ابتدا فایل PDF را انتخاب کن.");
+      setError("ابتدا فایل کتاب را انتخاب کن.");
       return;
     }
-    if (file.size > MAX_PDF_BYTES) {
-      setError("حجم فایل PDF نباید بیشتر از ۱۰۰ مگابایت باشد.");
+    if (selectedFileFormat === "unknown") {
+      setError("فرمت فایل پشتیبانی نمی‌شود. فقط PDF، Markdown (.md)، JSON (.json) و HTML (.html) مجاز هستند.");
       return;
     }
-    if (startPage < 1 || endPage < startPage) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError("حجم فایل نباید بیشتر از ۱۰۰ مگابایت باشد.");
+      return;
+    }
+    if (isPdfUpload && (startPage < 1 || endPage < startPage)) {
       setError("بازهٔ صفحه‌ها معتبر نیست.");
       return;
     }
@@ -765,11 +787,13 @@ export default function AdminPage() {
     setPages([]);
     selectPageForEdit(null);
     const form = new FormData();
-    form.set("pdf_file", file);
+    form.set("file", file);
     form.set("grade_number", String(grade));
     form.set("book_title", title);
-    form.set("start_page", String(startPage));
-    form.set("end_page", String(endPage));
+    if (isPdfUpload) {
+      form.set("start_page", String(startPage));
+      form.set("end_page", String(endPage));
+    }
     if (grade >= 10) form.set("major_code", major);
     try {
       const token = getActiveToken();
@@ -785,16 +809,27 @@ export default function AdminPage() {
       }
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail ?? "آپلود و پردازش شروع نشد.");
-      setUploadMessage(`پردازش کتاب با شناسهٔ ${payload.book_id} شروع شد.`);
+      const nextStatus = typeof payload.status === "string" ? payload.status : "ingesting";
+      const totalPages = typeof payload.total_pages === "number" ? payload.total_pages : endPage - startPage + 1;
+      setUploadMessage(
+        nextStatus === "ready"
+          ? `کتاب با شناسهٔ ${payload.book_id} در ${formatFaNumber(totalPages)} بخش/صفحه ثبت و آمادهٔ بازبینی شد.`
+          : `پردازش کتاب با شناسهٔ ${payload.book_id} شروع شد.`
+      );
+      if (nextStatus !== "ingesting") {
+        setPagesLoading(true);
+      }
       setBook({
         id: payload.book_id,
         title,
         grade_number: grade,
         major_code: grade >= 10 ? major : null,
-        total_pdf_pages: endPage - startPage + 1,
-        status: "ingesting",
-        pages: {},
+        total_pdf_pages: totalPages,
+        status: nextStatus,
+        pages: payload.pages ?? {},
       });
+      const { items } = await fetchBooks();
+      if (items.length > 0) setBooks(items);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "خطا در ارتباط با سرور");
     } finally {
@@ -1713,10 +1748,10 @@ export default function AdminPage() {
         <>
         <div className="admin-grid">
           <section className="admin-card">
-            <div className="card-heading">
+              <div className="card-heading">
               <div>
                 <h2>اطلاعات کتاب</h2>
-                <p>برای تست اول، بازه‌ای کوچک از فصل را وارد کن.</p>
+                <p>فایل PDF، Markdown (.md)، JSON یا HTML کتاب درسی را بارگذاری کن.</p>
               </div>
               <span className="step-badge">۱</span>
             </div>
@@ -1749,38 +1784,59 @@ export default function AdminPage() {
                   </label>
                 )}
               </div>
-              <div className="form-row">
-                <label className="form-field">
-                  <span>از صفحهٔ PDF</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={startPage}
-                    onChange={(event) => setStartPage(Number(event.target.value))}
-                  />
-                </label>
-                <label className="form-field">
-                  <span>تا صفحهٔ PDF</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={endPage}
-                    onChange={(event) => setEndPage(Number(event.target.value))}
-                  />
-                </label>
-              </div>
+              {isPdfUpload ? (
+                <div className="form-row">
+                  <label className="form-field">
+                    <span>از صفحهٔ PDF</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={startPage}
+                      onChange={(event) => setStartPage(Number(event.target.value))}
+                    />
+                  </label>
+                  <label className="form-field">
+                    <span>تا صفحهٔ PDF</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={endPage}
+                      onChange={(event) => setEndPage(Number(event.target.value))}
+                    />
+                  </label>
+                </div>
+              ) : (
+                <div className="review-tip" style={{ marginTop: 0 }}>
+                  <Sparkles size={15} />
+                  <span>
+                    فایل{" "}
+                    <b>
+                      {selectedFileFormat === "markdown"
+                        ? "Markdown"
+                        : selectedFileFormat === "json"
+                        ? "JSON"
+                        : "HTML"}
+                    </b>{" "}
+                    به‌صورت خودکار به صفحه‌ها/بخش‌های ساخت‌یافته تبدیل و بلافاصله برای بازبینی آماده می‌شود.
+                  </span>
+                </div>
+              )}
               <label className={`pdf-dropzone ${file ? "has-file" : ""}`}>
                 <input
                   type="file"
-                  accept="application/pdf,.pdf"
+                  accept=".pdf,.md,.markdown,.json,.html,.htm,application/pdf,text/markdown,application/json,text/html"
                   onChange={(event) => setFile(event.target.files?.[0] ?? null)}
                 />
                 <span className="drop-icon">{file ? <CheckCircle2 size={21} /> : <FileUp size={21} />}</span>
-                <b>{file ? file.name : "فایل PDF کتاب را انتخاب کن"}</b>
+                <b>{file ? file.name : "فایل کتاب (PDF، MD، JSON یا HTML) را انتخاب کن"}</b>
                 <small>
                   {file
-                    ? `${(file.size / (1024 * 1024)).toFixed(1)} مگابایت`
-                    : "حداکثر ۱۰۰ مگابایت · فقط PDF"}
+                    ? `${selectedFileFormat.toUpperCase()} · ${
+                        file.size >= 1024 * 1024
+                          ? `${(file.size / (1024 * 1024)).toFixed(1)} مگابایت`
+                          : `${Math.max(1, Math.round(file.size / 1024))} کیلوبایت`
+                      }`
+                    : "حداکثر ۱۰۰ مگابایت · PDF، Markdown (.md)، JSON (.json) یا HTML (.html)"}
                 </small>
               </label>
               {error && (
@@ -1933,7 +1989,7 @@ export default function AdminPage() {
             <div className="card-heading">
               <div>
                 <h2>بازبینی و ویرایش دستی صفحه‌ها</h2>
-                <p>تصویر صفحهٔ واقعی PDF را با متن و مشخصات فصل مقایسه کن و پس از اصلاح، صفحه را تأیید کن.</p>
+                <p>تصویر صفحهٔ واقعی PDF یا محتوای منبع ساختاریافته را با متن و مشخصات فصل مقایسه کن و پس از اصلاح، صفحه را تأیید کن.</p>
               </div>
               <span className="step-badge">۳</span>
             </div>
@@ -1959,7 +2015,7 @@ export default function AdminPage() {
                       }}
                     >
                       <i />
-                      <span>PDF {item.pdf_page_index}</span>
+                      <span>{item.image_url ? "PDF" : "صفحه"} {item.pdf_page_index}</span>
                       {item.printed_page_number !== null && <small>(چاپی {item.printed_page_number})</small>}
                     </button>
                   ))}
@@ -1969,14 +2025,23 @@ export default function AdminPage() {
                   <div className="review-grid">
                     <div className="review-image-box">
                       <div className="review-image-head">
-                        <span>تصویر رندرشده (صفحهٔ PDF {selectedPage.pdf_page_index})</span>
+                        <span>
+                          {selectedPage.image_url
+                            ? `تصویر رندرشده (صفحهٔ PDF ${selectedPage.pdf_page_index})`
+                            : `منبع متنی/ساختاریافته (بخش ${selectedPage.pdf_page_index})`}
+                        </span>
                         <span className={`badge-pill ${selectedPage.status}`}>
                           {statusLabel[selectedPage.status] ?? selectedPage.status}
                           {selectedPage.edited_by_human ? " · ویرایش انسانی" : ""}
                         </span>
                       </div>
                       <div className="review-image-frame">
-                        {imageError ? (
+                        {!selectedPage.image_url ? (
+                          <div className="review-image-missing">
+                            <FileText size={20} />
+                            <span>منبع بدون تصویر PDF ({selectedPage.extraction_model ?? "structured"})</span>
+                          </div>
+                        ) : imageError ? (
                           <div className="review-image-missing">
                             <FileText size={20} />
                             <span>تصویر صفحه در دسترس نیست</span>
