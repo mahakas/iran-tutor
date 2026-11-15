@@ -46,6 +46,9 @@ class BillingSettings(Base):
     admin_preferences: Mapped[dict] = mapped_column(
         _json_type, default=dict, server_default="{}", nullable=False
     )
+    system_config: Mapped[dict] = mapped_column(
+        _json_type, default=dict, server_default="{}", nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

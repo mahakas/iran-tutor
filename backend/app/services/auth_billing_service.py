@@ -12,7 +12,8 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.config import get_base_settings, get_settings
+from app.core.runtime_config import get_runtime_overrides
 from app.db.seed import seed_billing_settings, seed_plans
 from app.models.auth import BillingSettings, Plan, TokenUsageLog, User, UserSession
 from app.services.account_service import compose_full_name, normalize_preferences
@@ -48,7 +49,12 @@ def mask_phone_number(phone: str) -> str:
 
 def _user_signing_key() -> bytes:
     settings = get_settings()
-    secret = settings.auth_secret or f"{settings.llm_api_key}:{settings.admin_password}"
+    base = get_base_settings()
+    overrides = get_runtime_overrides()
+    stable_llm_key = (
+        base.llm_api_key if "llm_api_key" in overrides else getattr(settings, "llm_api_key", "")
+    )
+    secret = getattr(settings, "auth_secret", None) or f"{stable_llm_key}:{settings.admin_password}"
     return hashlib.sha256(f"iran-tutor-user-v1:{secret}".encode("utf-8")).digest()
 
 

@@ -7,6 +7,8 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.runtime_config import get_runtime_overrides
+
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -74,6 +76,24 @@ class Settings(BaseSettings):
 
 
 @lru_cache
-def get_settings() -> Settings:
-    """Return the cached settings instance."""
+def _get_base_settings() -> Settings:
+    """Return cached settings loaded purely from environment / .env."""
     return Settings()  # type: ignore[call-arg]
+
+
+def get_base_settings() -> Settings:
+    """Return un-overridden base settings from environment / .env."""
+    return _get_base_settings()
+
+
+def get_settings() -> Settings:
+    """Return effective settings (base .env settings overlaid with admin runtime overrides)."""
+    base = _get_base_settings()
+    overrides = get_runtime_overrides()
+    if not overrides:
+        return base
+    valid_updates = {k: v for k, v in overrides.items() if k in Settings.model_fields}
+    return base.model_copy(update=valid_updates) if valid_updates else base
+
+
+get_settings.cache_clear = _get_base_settings.cache_clear  # type: ignore[attr-defined]
