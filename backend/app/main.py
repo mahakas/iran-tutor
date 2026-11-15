@@ -48,6 +48,7 @@ async def system_status(session: AsyncSession = Depends(get_session)) -> dict[st
     }
 
 
+from app.api.account import router as account_router  # noqa: E402
 from app.api.admin import router as admin_router  # noqa: E402
 from app.api.auth import router as auth_router  # noqa: E402
 from app.api.curriculum import router as curriculum_router  # noqa: E402
@@ -55,6 +56,7 @@ from app.api.exams import router as exams_router  # noqa: E402
 from app.api.plans import router as plans_router  # noqa: E402
 from app.api.tutor import router as tutor_router  # noqa: E402
 
+app.include_router(account_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(curriculum_router)

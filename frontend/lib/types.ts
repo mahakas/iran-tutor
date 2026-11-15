@@ -1,5 +1,59 @@
 export type TutorMode = "tutor" | "problem_solver" | "question_designer";
 
+export type AppLanguage = "fa" | "en";
+export type VisualStyle = "standard" | "modern" | "compact";
+export type ColorMode = "light" | "dark" | "system";
+export type ReduceMotionMode = "off" | "on" | "system";
+export type FontFamilyChoice = "vazir" | "system" | "sahel" | "mono";
+export type ThemePresetId =
+  | "darsyar"
+  | "emerald"
+  | "slate"
+  | "ocean"
+  | "warm"
+  | "violet"
+  | "graphite"
+  | "midnight";
+
+export type AppearanceModePalette = {
+  theme: ThemePresetId;
+  accent: string;
+  background: string;
+  foreground: string;
+  font_family: FontFamilyChoice;
+};
+
+export type UserPreferences = {
+  general: {
+    language: AppLanguage;
+    timezone: string;
+    default_tutor_mode: TutorMode;
+  };
+  appearance: {
+    visual_style: VisualStyle;
+    color_mode: ColorMode;
+    separate_mode_themes: boolean;
+    light: AppearanceModePalette;
+    dark: AppearanceModePalette;
+    ui_font_size: number;
+    code_font_size: number;
+    reduce_motion: ReduceMotionMode;
+    contrast: number;
+  };
+  notifications: {
+    email_updates: boolean;
+    usage_alerts: boolean;
+    plan_expiry_reminders: boolean;
+    exam_reminders: boolean;
+    security_alerts: boolean;
+  };
+  privacy: {
+    save_chat_history: boolean;
+    store_uploaded_attachments: boolean;
+    show_phone_masked: boolean;
+  };
+};
+
 export type GradeOption = {
   number: number;
   title: string;
@@ -38,7 +92,12 @@ export type StudentUser = {
   id: string;
   phone_number: string;
   masked_phone: string;
+  first_name: string | null;
+  last_name: string | null;
   full_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
+  role: string;
   plan_code: "trial" | "normal" | "pro" | "vip" | string;
   plan_title: string;
   tokens_total: number;
@@ -46,11 +105,13 @@ export type StudentUser = {
   tokens_used_total: number;
   tokens_used_today: number;
   used_value_toman: number;
+  storage_quota_bytes: number;
   plan_started_at: string | null;
   plan_expires_at: string | null;
   days_remaining: number;
   is_expired: boolean;
   is_active: boolean;
+  preferences: UserPreferences;
   last_login_at: string | null;
   created_at: string | null;
 };
@@ -63,6 +124,7 @@ export type PlanItem = {
   price_toman: number;
   token_quota: number;
   duration_days: number;
+  storage_quota_bytes: number;
   effective_toman_per_1k: number;
   is_active: boolean;
   sort_order: number;
@@ -101,6 +163,70 @@ export type PaymentTransactionItem = {
   paid_at: string | null;
 };
 
+export type StorageCategoryBreakdown = {
+  bytes: number;
+  count: number;
+};
+
+export type StorageSummary = {
+  quota_bytes: number;
+  used_bytes: number;
+  remaining_bytes: number;
+  over_quota: boolean;
+  usage_percent: number;
+  status: "normal" | "warning" | "full";
+  total_files: number;
+  categories: {
+    images: StorageCategoryBreakdown;
+    audio: StorageCategoryBreakdown;
+    files: StorageCategoryBreakdown;
+  };
+  plan_code: string;
+  plan_title: string;
+};
+
+export type UserFileDependency = {
+  type: "profile_avatar" | "chat_session";
+  id?: string;
+  title?: string;
+  label?: string;
+};
+
+export type UserFileItem = {
+  id: string;
+  filename: string;
+  mime_type: string;
+  category: "image" | "audio" | "file";
+  size_bytes: number;
+  source_context: string;
+  chat_session_id: string | null;
+  book_id: number | null;
+  status: string;
+  created_at: string | null;
+  dependencies: UserFileDependency[];
+};
+
+export type UserFilesListResponse = {
+  items: UserFileItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  storage: StorageSummary;
+};
+
+export type UserSessionItem = {
+  id: string;
+  user_agent: string | null;
+  ip_address: string | null;
+  is_current: boolean;
+  is_active: boolean;
+  last_seen_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string | null;
+};
+
 export type TutorResponse = {
   answer: string;
   sources: Source[];
@@ -108,6 +234,7 @@ export type TutorResponse = {
   transcript?: string;
   uncertain_parts?: string[];
   usage?: UsageInfo;
+  saved_file?: UserFileItem;
 };
 
 export type ExamQuestion = {

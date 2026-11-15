@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -20,6 +21,9 @@ class Plan(Base):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     price_toman: Mapped[int] = mapped_column(Integer, nullable=False)
     token_quota: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_quota_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=104_857_600, server_default="104857600", nullable=False
+    )
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -35,6 +39,9 @@ class BillingSettings(Base):
     token_price_per_1k_toman: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
     starter_tokens: Mapped[int] = mapped_column(Integer, default=15000, nullable=False)
     starter_duration_days: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    starter_storage_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=26_214_400, server_default="26214400", nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
@@ -46,6 +53,13 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     phone_number: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
     full_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    role: Mapped[str] = mapped_column(String(32), default="student", server_default="student", nullable=False)
+    _json_type = JSON().with_variant(JSONB, "postgresql")
+    preferences: Mapped[dict] = mapped_column(_json_type, default=dict, server_default="{}", nullable=False)
     plan_code: Mapped[str] = mapped_column(String(32), default="trial", nullable=False, index=True)
     plan_title: Mapped[str] = mapped_column(String(120), default="هدیه ثبت‌نام", nullable=False)
     tokens_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -109,6 +123,44 @@ class TokenUsageLog(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     cost_toman: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    token_nonce: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UserFile(Base):
+    __tablename__ = "user_files"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    # Mutually exclusive category ("image" | "audio" | "file") so storage bytes are never double-counted.
+    category: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_context: Mapped[str] = mapped_column(String(48), default="personal_upload", nullable=False)
+    chat_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    book_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )

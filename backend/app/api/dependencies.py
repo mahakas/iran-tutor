@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
-from app.models.auth import User
+from app.models.auth import User, UserSession
 from app.models.curriculum import Book, Grade, Major
-from app.services.auth_billing_service import USER_COOKIE_NAME, verify_user_session_token
+from app.services.auth_billing_service import USER_COOKIE_NAME, parse_user_session_token
 from app.services.validation import validate_major_code
 
 
@@ -27,31 +30,56 @@ def extract_user_token(request: Request) -> str | None:
     return None
 
 
+async def _resolve_user_from_request(
+    request: Request,
+    session: AsyncSession,
+) -> User | None:
+    token = extract_user_token(request)
+    parsed = parse_user_session_token(token)
+    if parsed is None:
+        return None
+    user_id, nonce, _ = parsed
+
+    # Verify session has not been revoked on the server
+    session_row = await session.scalar(
+        select(UserSession).where(
+            UserSession.user_id == user_id,
+            UserSession.token_nonce == nonce,
+        )
+    )
+    if session_row is not None and session_row.revoked_at is not None:
+        return None
+
+    user = await session.get(User, user_id)
+    if user is None:
+        return None
+
+    request.state.user_session_nonce = nonce
+    if session_row is not None:
+        now = datetime.now(timezone.utc)
+        last_seen = session_row.last_seen_at
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        if (now - last_seen).total_seconds() >= 60:
+            session_row.last_seen_at = now
+            await session.commit()
+    return user
+
+
 async def get_optional_student(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> User | None:
-    token = extract_user_token(request)
-    user_id = verify_user_session_token(token)
-    if not user_id:
-        return None
-    user = await session.get(User, user_id)
-    if user is None:
-        return None
-    return user
+    return await _resolve_user_from_request(request, session)
 
 
 async def require_student(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    token = extract_user_token(request)
-    user_id = verify_user_session_token(token)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="برای ادامه لطفاً با شماره موبایل وارد شوید.")
-    user = await session.get(User, user_id)
+    user = await _resolve_user_from_request(request, session)
     if user is None:
-        raise HTTPException(status_code=401, detail="نشست کاربری معتبر نیست. لطفاً دوباره وارد شوید.")
+        raise HTTPException(status_code=401, detail="برای ادامه لطفاً با شماره موبایل وارد شوید.")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال شده است.")
     return user

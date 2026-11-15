@@ -17,11 +17,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import require_student, resolve_book_scope
 from app.core.llm_client import track_token_usage
 from app.db.session import get_session
-from app.models.auth import User
+from app.models.auth import User, UserFile
 from app.models.chat import ChatSession
 from app.models.curriculum import Book
+from app.services.account_service import (
+    ensure_user_file_path,
+    normalize_preferences,
+    save_user_file,
+    serialize_user_file,
+)
 from app.services.auth_billing_service import (
     ensure_user_can_consume,
+    get_or_init_billing_settings,
     record_and_deduct_usage,
 )
 from app.services.multimodal_service import answer_audio_question, answer_image_question
@@ -155,6 +162,35 @@ def _provider_failure(error: Exception, *, operation: str) -> HTTPException:
     return HTTPException(status_code=503, detail=f"{operation} service is temporarily unavailable")
 
 
+async def _maybe_store_tutor_attachment(
+    session: AsyncSession,
+    *,
+    user: User,
+    filename: str,
+    content_bytes: bytes,
+    mime_type: str,
+    source_context: str,
+    chat_session_id: str | None = None,
+) -> UserFile | None:
+    if not isinstance(user, User) or not isinstance(session, AsyncSession):
+        return None
+    prefs = normalize_preferences(getattr(user, "preferences", None))
+    if not prefs["privacy"].get("store_uploaded_attachments", True):
+        return None
+    billing = await get_or_init_billing_settings(session)
+    return await save_user_file(
+        session,
+        user=user,
+        billing=billing,
+        filename=filename,
+        content_bytes=content_bytes,
+        mime_type=mime_type,
+        source_context=source_context,
+        chat_session_id=chat_session_id,
+        enforce_quota=True,
+    )
+
+
 async def _finalize_usage(
     session: AsyncSession,
     *,
@@ -178,6 +214,8 @@ async def _finalize_usage(
         )
         result["usage"] = usage_payload
     else:
+        if isinstance(session, AsyncSession):
+            await session.commit()
         result["usage"] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -234,6 +272,7 @@ async def ask_tutor_with_image(
     major_code: str | None = Form(None),
     top_k: int = Form(5),
     mode: TutorMode = Form("tutor"),
+    chat_session_id: str | None = Form(None),
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
@@ -248,6 +287,15 @@ async def ask_tutor_with_image(
     ensure_user_can_consume(current_user)
     image_bytes = await _read_upload_limited(image, MAX_IMAGE_BYTES)
     image_bytes = _normalize_image(image_bytes, image.content_type or "")
+    saved_file = await _maybe_store_tutor_attachment(
+        session,
+        user=current_user,
+        filename=Path(image.filename or "question.png").stem + ".png",
+        content_bytes=image_bytes,
+        mime_type="image/png",
+        source_context="tutor_image",
+        chat_session_id=chat_session_id,
+    )
     try:
         with track_token_usage() as usage:
             result = await answer_image_question(
@@ -260,6 +308,12 @@ async def ask_tutor_with_image(
                 mode=mode,
             )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
+        if saved_file is not None:
+            try:
+                ensure_user_file_path(current_user.id, saved_file.storage_path).unlink(missing_ok=True)
+            except HTTPException:
+                pass
+            await session.rollback()
         raise _provider_failure(error, operation="image tutor") from error
 
     await _finalize_usage(
@@ -272,6 +326,8 @@ async def ask_tutor_with_image(
         total_tokens=usage.total_tokens,
         result=result,
     )
+    if saved_file is not None:
+        result["saved_file"] = serialize_user_file(saved_file)
     return result
 
 
@@ -283,6 +339,7 @@ async def ask_tutor_with_audio(
     major_code: str | None = Form(None),
     top_k: int = Form(5),
     mode: TutorMode = Form("tutor"),
+    chat_session_id: str | None = Form(None),
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
@@ -302,6 +359,15 @@ async def ask_tutor_with_audio(
     if content_type not in AUDIO_MIME_TYPES:
         raise HTTPException(status_code=415, detail="unsupported audio format")
     audio_bytes = await _read_upload_limited(audio, MAX_AUDIO_BYTES)
+    saved_file = await _maybe_store_tutor_attachment(
+        session,
+        user=current_user,
+        filename=filename,
+        content_bytes=audio_bytes,
+        mime_type=content_type,
+        source_context="tutor_audio",
+        chat_session_id=chat_session_id,
+    )
     try:
         with track_token_usage() as usage:
             result = await answer_audio_question(
@@ -315,6 +381,12 @@ async def ask_tutor_with_audio(
                 mode=mode,
             )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
+        if saved_file is not None:
+            try:
+                ensure_user_file_path(current_user.id, saved_file.storage_path).unlink(missing_ok=True)
+            except HTTPException:
+                pass
+            await session.rollback()
         raise _provider_failure(error, operation="voice tutor") from error
 
     await _finalize_usage(
@@ -327,6 +399,8 @@ async def ask_tutor_with_audio(
         total_tokens=usage.total_tokens,
         result=result,
     )
+    if saved_file is not None:
+        result["saved_file"] = serialize_user_file(saved_file)
     return result
 
 
