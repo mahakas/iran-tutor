@@ -68,7 +68,7 @@ class KavenegarSmsProvider(SmsProvider):
                 url = f"https://api.kavenegar.com/v1/{self._api_key}/sms/send.json"
                 data = {
                     "receptor": phone_number,
-                    "message": f"کد ورود شما به هم‌درس: {code}",
+                    "message": f"کد ورود شما به درسیار: {code}",
                 }
                 if self._sender:
                     data["sender"] = self._sender
@@ -132,7 +132,7 @@ class WebhookSmsProvider(SmsProvider):
         payload = {
             "phone_number": phone_number,
             "code": code,
-            "message": f"کد تایید هم‌درس: {code}",
+            "message": f"کد تایید درسیار: {code}",
         }
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(self._webhook_url, headers=headers, json=payload)

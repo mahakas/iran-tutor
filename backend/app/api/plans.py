@@ -89,7 +89,7 @@ async def checkout_plan(
         init_res = await provider.create_payment(
             transaction_id=tx.id,
             amount_toman=plan.price_toman,
-            description=f"خرید اشتراک {plan.name} هم‌درس ({plan.token_quota:,} توکن)",
+            description=f"خرید اشتراک {plan.name} درسیار ({plan.token_quota:,} توکن)",
             callback_url=callback_url,
             mobile=user.phone_number,
         )

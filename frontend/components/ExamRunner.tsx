@@ -99,7 +99,7 @@ export default function ExamRunner({ exam, authHeaders, onExit }: Props) {
     return (
       <main className="exam-page" dir="rtl">
         <header className="exam-topbar">
-          <div className="brand-mark small-mark">ه</div>
+          <div className="brand-mark small-mark">د</div>
           <div><b>کارنامهٔ آزمون</b><span>{exam.title}</span></div>
           <button className="quiet-button" onClick={onExit}>بازگشت به کلاس</button>
         </header>
@@ -133,7 +133,7 @@ export default function ExamRunner({ exam, authHeaders, onExit }: Props) {
   return (
     <main className="exam-page" dir="rtl">
       <header className="exam-topbar">
-        <div className="brand-mark small-mark">ه</div>
+        <div className="brand-mark small-mark">د</div>
         <div><b>{exam.title}</b><span>آزمون چهارگزینه‌ای · پاسخ‌ها تا پایان آزمون پنهان‌اند</span></div>
         <div className={`timer-pill ${secondsLeft < 60 ? "timer-warning" : ""}`}><Clock3 size={17} /><span>{formatTime(secondsLeft)}</span></div>
       </header>
