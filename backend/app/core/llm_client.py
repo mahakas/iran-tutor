@@ -490,12 +490,14 @@ async def transcribe_audio(
 
 
 async def close_llm_clients() -> None:
-    """Dispose provider HTTP clients during application shutdown."""
-    global _client, _embedding_client, _audio_client
+    """Dispose provider HTTP clients and reset semaphore/capability caches."""
+    global _client, _embedding_client, _audio_client, _semaphore
     clients = (_client, _embedding_client, _audio_client)
     _client = None
     _embedding_client = None
     _audio_client = None
+    _semaphore = None
+    _json_mode_unsupported.clear()
     for client in clients:
         if client is not None:
             await client.close()

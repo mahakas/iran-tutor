@@ -230,6 +230,10 @@ async def _ensure_sqlite_demo_columns(connection) -> None:
         await connection.execute(
             text("ALTER TABLE billing_settings ADD COLUMN admin_preferences JSON NOT NULL DEFAULT '{}'")
         )
+    if billing_cols and "system_config" not in billing_cols:
+        await connection.execute(
+            text("ALTER TABLE billing_settings ADD COLUMN system_config JSON NOT NULL DEFAULT '{}'")
+        )
     page_cols = {
         row[1]
         for row in (await connection.execute(text("PRAGMA table_info(book_pages)"))).fetchall()

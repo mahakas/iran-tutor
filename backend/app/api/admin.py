@@ -7,21 +7,36 @@ import hashlib
 import hmac
 import logging
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+import httpx
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import delete, func, or_, select, text as sql_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.config import get_base_settings, get_settings
+from app.core.runtime_config import (
+    ALL_RUNTIME_FIELDS,
+    RESET_SECTION_FIELDS,
+    apply_runtime_patch,
+    get_runtime_overrides,
+    normalize_persisted_overrides,
+    refresh_runtime_clients,
+    serialize_admin_settings,
+    set_runtime_overrides,
+)
 from app.db.session import async_session_factory
-from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User
-from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
+from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User, UserFile, UserSession
+from app.models.chat import ChatSession
+from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.exam import ExamSession
 from app.services.document_parser import detect_document_format, parse_structured_document
 from app.services.account_service import (
     default_preferences,
@@ -35,6 +50,7 @@ from app.services.auth_billing_service import (
     get_or_init_billing_settings,
     get_or_init_plans,
     get_user_today_tokens,
+    normalize_iranian_phone,
     serialize_plan,
     serialize_user,
     utc_iso,
@@ -49,6 +65,8 @@ from app.services.ingestion_service import (
     pdf_page_count,
 )
 from app.services.preview import render_single_preview
+from app.services.retrieval_service import index_book
+from app.services.sms_provider import get_sms_provider
 from app.services.validation import validate_major_code
 
 ADMIN_COOKIE_NAME = "iran_tutor_admin"
@@ -58,8 +76,13 @@ logger = logging.getLogger(__name__)
 
 def _admin_signing_key() -> bytes:
     settings = get_settings()
+    base = get_base_settings()
+    overrides = get_runtime_overrides()
+    stable_llm_key = (
+        base.llm_api_key if "llm_api_key" in overrides else getattr(settings, "llm_api_key", "")
+    )
     material = (
-        f"iran-tutor-admin-v2:{settings.admin_username}:{settings.admin_password}:{settings.llm_api_key}"
+        f"iran-tutor-admin-v2:{settings.admin_username}:{settings.admin_password}:{stable_llm_key}"
     ).encode("utf-8")
     return hashlib.sha256(material).digest()
 
@@ -1231,6 +1254,886 @@ async def search_admin(
         "pages": pages_out,
         "users": users_out,
         "plans": plans_out,
+    }
+
+
+# ---------------------------------------------------------------------------
+# All-in-one Admin Control Center: Overview, Book Lifecycle, Sessions & AI/Gateways
+# ---------------------------------------------------------------------------
+
+
+@protected_router.get("/overview")
+async def get_admin_overview(response: Response) -> dict[str, object]:
+    """Return full live system health, operational counts, review queue & recent telemetry."""
+    response.headers["Cache-Control"] = "no-store"
+    settings = get_settings()
+    overrides = get_runtime_overrides()
+    now = datetime.now(timezone.utc)
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    async with async_session_factory() as session:
+        await session.execute(sql_text("SELECT 1"))
+
+        books_total = int(await session.scalar(select(func.count()).select_from(Book)) or 0)
+        book_status_rows = (
+            await session.execute(select(Book.status, func.count()).group_by(Book.status))
+        ).all()
+        book_by_status = {
+            (st.value if hasattr(st, "value") else str(st)): int(cnt)
+            for st, cnt in book_status_rows
+        }
+
+        page_status_rows = (
+            await session.execute(select(BookPage.status, func.count()).group_by(BookPage.status))
+        ).all()
+        page_by_status = {
+            (st.value if hasattr(st, "value") else str(st)): int(cnt)
+            for st, cnt in page_status_rows
+        }
+        pages_total = sum(page_by_status.values())
+
+        users_total = int(await session.scalar(select(func.count()).select_from(User)) or 0)
+        users_active = int(
+            await session.scalar(select(func.count()).select_from(User).where(User.is_active.is_(True)))
+            or 0
+        )
+        users_paid = int(
+            await session.scalar(
+                select(func.count()).select_from(User).where(User.plan_code.in_(["normal", "pro", "vip"]))
+            )
+            or 0
+        )
+        active_sessions = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(UserSession)
+                .where(UserSession.revoked_at.is_(None), UserSession.expires_at > now)
+            )
+            or 0
+        )
+        chats_total = int(await session.scalar(select(func.count()).select_from(ChatSession)) or 0)
+        exams_total = int(await session.scalar(select(func.count()).select_from(ExamSession)) or 0)
+
+        files_agg = (
+            await session.execute(
+                select(
+                    func.count(UserFile.id),
+                    func.coalesce(func.sum(UserFile.size_bytes), 0),
+                ).where(UserFile.status == "active")
+            )
+        ).first()
+        user_files_count = int((files_agg[0] if files_agg else 0) or 0)
+        user_files_bytes = int((files_agg[1] if files_agg else 0) or 0)
+
+        tokens_used_total = int(
+            await session.scalar(select(func.coalesce(func.sum(User.tokens_used_total), 0))) or 0
+        )
+        tokens_used_today = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(TokenUsageLog.total_tokens), 0)).where(
+                    TokenUsageLog.created_at >= start_of_day
+                )
+            )
+            or 0
+        )
+        revenue_toman = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(PaymentTransaction.amount_toman), 0)).where(
+                    PaymentTransaction.status == "paid",
+                    PaymentTransaction.provider != "admin_grant",
+                )
+            )
+            or 0
+        )
+
+        review_rows = (
+            await session.execute(
+                select(BookPage, Book.title)
+                .join(Book, BookPage.book_id == Book.id)
+                .where(BookPage.status.in_([PageStatus.needs_review, PageStatus.failed]))
+                .order_by(BookPage.book_id.desc(), BookPage.pdf_page_index.asc())
+                .limit(15)
+            )
+        ).all()
+        needs_review_pages = [
+            {
+                "book_id": p.book_id,
+                "book_title": b_title,
+                "pdf_page_index": p.pdf_page_index,
+                "printed_page_number": p.printed_page_number,
+                "chapter_title": p.chapter_title,
+                "status": p.status.value if hasattr(p.status, "value") else str(p.status),
+                "warnings": p.warnings or [],
+                "error_message": p.error_message,
+            }
+            for p, b_title in review_rows
+        ]
+
+        tx_rows = (
+            await session.execute(
+                select(PaymentTransaction, User.phone_number, User.full_name)
+                .join(User, PaymentTransaction.user_id == User.id)
+                .order_by(PaymentTransaction.created_at.desc())
+                .limit(15)
+            )
+        ).all()
+        recent_transactions = [
+            {
+                "id": tx.id,
+                "user_id": tx.user_id,
+                "phone_number": phone,
+                "full_name": full_name,
+                "plan_code": tx.plan_code,
+                "plan_name": tx.plan_name,
+                "amount_toman": tx.amount_toman,
+                "tokens_granted": tx.tokens_granted,
+                "duration_days": tx.duration_days,
+                "provider": tx.provider,
+                "status": tx.status,
+                "ref_id": tx.ref_id,
+                "created_at": utc_iso(tx.created_at),
+                "paid_at": utc_iso(tx.paid_at),
+            }
+            for tx, phone, full_name in tx_rows
+        ]
+
+        usage_rows = (
+            await session.execute(
+                select(TokenUsageLog, User.phone_number, User.full_name, Book.title)
+                .join(User, TokenUsageLog.user_id == User.id)
+                .outerjoin(Book, TokenUsageLog.book_id == Book.id)
+                .order_by(TokenUsageLog.created_at.desc())
+                .limit(20)
+            )
+        ).all()
+        recent_usage_logs = [
+            {
+                "id": log.id,
+                "user_id": log.user_id,
+                "phone_number": phone,
+                "full_name": full_name,
+                "action": log.action,
+                "book_id": log.book_id,
+                "book_title": b_title,
+                "prompt_tokens": log.prompt_tokens,
+                "completion_tokens": log.completion_tokens,
+                "total_tokens": log.total_tokens,
+                "cost_toman": log.cost_toman,
+                "created_at": utc_iso(log.created_at),
+            }
+            for log, phone, full_name, b_title in usage_rows
+        ]
+
+    return {
+        "system": {
+            "status": "ok",
+            "mode": "demo" if settings.demo_mode else "production",
+            "database": "sqlite" if str(getattr(settings, "database_url", "")).startswith("sqlite") else "postgresql",
+            "vector_backend": getattr(settings, "vector_backend", "qdrant"),
+            "sms_provider": getattr(settings, "sms_provider", "demo"),
+            "payment_provider": getattr(settings, "payment_provider", "demo"),
+            "llm_base_url": getattr(settings, "llm_base_url", None),
+            "tutor_model": getattr(settings, "tutor_model", None),
+            "vision_model_primary": getattr(settings, "vision_model_primary", None),
+            "vision_model_escalation": getattr(settings, "vision_model_escalation", None),
+            "speech_to_text_model": getattr(settings, "speech_to_text_model", None),
+            "embedding_model": getattr(settings, "embedding_model", None),
+            "has_llm_api_key": bool(getattr(settings, "llm_api_key", "")),
+            "override_count": len(overrides),
+        },
+        "counts": {
+            "books_total": books_total,
+            "books_ready": book_by_status.get("ready", 0),
+            "books_ingesting": book_by_status.get("ingesting", 0),
+            "books_failed": book_by_status.get("failed", 0),
+            "pages_total": pages_total,
+            "pages_done": page_by_status.get("done", 0),
+            "pages_needs_review": page_by_status.get("needs_review", 0),
+            "pages_failed": page_by_status.get("failed", 0),
+            "pages_pending": page_by_status.get("pending", 0),
+            "users_total": users_total,
+            "users_active": users_active,
+            "users_paid": users_paid,
+            "active_sessions": active_sessions,
+            "chats_total": chats_total,
+            "exams_total": exams_total,
+            "user_files_count": user_files_count,
+            "user_files_bytes": user_files_bytes,
+            "tokens_used_total": tokens_used_total,
+            "tokens_used_today": tokens_used_today,
+            "revenue_toman": revenue_toman,
+        },
+        "needs_review_pages": needs_review_pages,
+        "recent_transactions": recent_transactions,
+        "recent_usage_logs": recent_usage_logs,
+    }
+
+
+class AdminBookPatchBody(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    grade_number: int | None = Field(default=None, ge=1, le=12)
+    major_code: str | None = Field(default=None, max_length=64)
+    status: Literal["created", "ingesting", "ready", "failed"] | None = None
+
+
+@protected_router.patch("/books/{book_id}")
+async def update_admin_book(book_id: int, body: AdminBookPatchBody) -> dict[str, object]:
+    async with async_session_factory() as session:
+        book = await session.get(Book, book_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail="کتاب مورد نظر یافت نشد.")
+
+        fields = body.model_fields_set
+        if "title" in fields and body.title is not None:
+            cleaned_title = body.title.strip()
+            if not cleaned_title:
+                raise HTTPException(status_code=422, detail="عنوان کتاب نمی‌تواند خالی باشد.")
+            book.title = cleaned_title
+
+        current_grade = await session.get(Grade, book.grade_id)
+        if current_grade is None:
+            raise HTTPException(status_code=404, detail="پایهٔ کتاب یافت نشد.")
+
+        target_grade = current_grade
+        if "grade_number" in fields and body.grade_number is not None:
+            found_grade = await session.scalar(select(Grade).where(Grade.number == body.grade_number))
+            if found_grade is None:
+                raise HTTPException(status_code=404, detail=f"پایهٔ {body.grade_number} یافت نشد.")
+            target_grade = found_grade
+            book.grade_id = target_grade.id
+
+        if "major_code" in fields or target_grade.id != current_grade.id:
+            if "major_code" in fields:
+                candidate_major = body.major_code.strip() if body.major_code and body.major_code.strip() else None
+            else:
+                existing_major = await session.get(Major, book.major_id) if book.major_id else None
+                candidate_major = existing_major.code if existing_major else None
+
+            if not target_grade.has_major:
+                candidate_major = None
+            major_err = validate_major_code(target_grade.has_major, candidate_major)
+            if major_err:
+                raise HTTPException(status_code=422, detail=major_err)
+            if target_grade.has_major and candidate_major:
+                major_obj = await session.scalar(select(Major).where(Major.code == candidate_major))
+                if major_obj is None:
+                    raise HTTPException(status_code=404, detail=f"رشتهٔ «{candidate_major}» یافت نشد.")
+                book.major_id = major_obj.id
+            else:
+                book.major_id = None
+
+        if "status" in fields and body.status is not None:
+            book.status = BookStatus(body.status)
+
+        await session.commit()
+        await session.refresh(book)
+
+        grade_obj = await session.get(Grade, book.grade_id)
+        major_obj = await session.get(Major, book.major_id) if book.major_id else None
+        page_rows = (
+            await session.execute(
+                select(BookPage.status, func.count())
+                .where(BookPage.book_id == book.id)
+                .group_by(BookPage.status)
+            )
+        ).all()
+        counts = {
+            (st.value if hasattr(st, "value") else str(st)): int(cnt) for st, cnt in page_rows
+        }
+        return {
+            "book": {
+                "id": book.id,
+                "title": book.title,
+                "grade_id": book.grade_id,
+                "grade_number": grade_obj.number if grade_obj else None,
+                "major_id": book.major_id,
+                "major_code": major_obj.code if major_obj else None,
+                "total_pdf_pages": book.total_pdf_pages,
+                "status": book.status.value if hasattr(book.status, "value") else str(book.status),
+                "pages": counts,
+            }
+        }
+
+
+@protected_router.post("/books/{book_id}/reindex")
+async def reindex_admin_book(book_id: int) -> dict[str, object]:
+    settings = get_settings()
+    if settings.demo_mode:
+        raise HTTPException(
+            status_code=400,
+            detail="در حالت نمایشی (Demo Mode) ایندکس برداری غیرفعال است. برای ایندکس‌سازی برداری، در بخش تنظیمات API حالت اجرا را به تولید واقعی تغییر دهید.",
+        )
+    try:
+        result = await index_book(book_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Vector reindex failed for book %s", book_id)
+        raise HTTPException(
+            status_code=503,
+            detail=f"ایندکس برداری کتاب با خطا مواجه شد: {str(exc)[:220]}",
+        ) from exc
+    return {
+        "ok": True,
+        "vector_backend": settings.vector_backend,
+        "embedding_model": settings.embedding_model,
+        **result,
+    }
+
+
+@protected_router.post("/books/{book_id}/reprocess")
+async def reprocess_admin_book(
+    book_id: int,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    settings = get_settings()
+    async with async_session_factory() as session:
+        book = await session.get(Book, book_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail="کتاب مورد نظر یافت نشد.")
+        pdf_path = Path(book.pdf_file_path)
+        if pdf_path.suffix.lower() != ".pdf" or not pdf_path.is_file():
+            raise HTTPException(
+                status_code=422,
+                detail="فایل PDF اصلی این کتاب برای پردازش مجدد در دسترس نیست (یا کتاب از نوع متنی ساختاریافته است).",
+            )
+        grade = await session.get(Grade, book.grade_id)
+        if grade is None:
+            raise HTTPException(status_code=404, detail="پایهٔ کتاب یافت نشد.")
+        major = await session.get(Major, book.major_id) if book.major_id else None
+        existing_indices = list(
+            (
+                await session.scalars(
+                    select(BookPage.pdf_page_index)
+                    .where(BookPage.book_id == book_id)
+                    .order_by(BookPage.pdf_page_index.asc())
+                )
+            ).all()
+        )
+        try:
+            page_count = pdf_page_count(pdf_path)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail="فایل PDF کتاب معتبر نیست.") from exc
+
+        start_page = min(existing_indices) if existing_indices else 1
+        end_page = max(existing_indices) if existing_indices else min(page_count, max(1, book.total_pdf_pages))
+        end_page = min(end_page, page_count)
+        start_page = min(start_page, end_page)
+
+        book.status = BookStatus.ingesting
+        await session.commit()
+
+        background_tasks.add_task(
+            _run_ingest_background,
+            book_id=book.id,
+            pdf_path=pdf_path,
+            grade_number=grade.number,
+            major_code=major.code if major else None,
+            book_title=book.title,
+            start_page=start_page,
+            end_page=end_page,
+            model_primary=settings.vision_model_primary,
+            model_escalation=settings.vision_model_escalation,
+            escalate_figures=settings.escalate_figures,
+        )
+        return {
+            "book_id": book.id,
+            "status": "ingesting",
+            "start_page": start_page,
+            "end_page": end_page,
+            "total_pages": end_page - start_page + 1,
+        }
+
+
+@protected_router.delete("/books/{book_id}")
+async def delete_admin_book(
+    book_id: int,
+    force: bool = Query(default=False),
+) -> dict[str, object]:
+    async with async_session_factory() as session:
+        book = await session.get(Book, book_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail="کتاب مورد نظر یافت نشد.")
+
+        chat_count = int(
+            await session.scalar(
+                select(func.count()).select_from(ChatSession).where(ChatSession.book_id == book_id)
+            )
+            or 0
+        )
+        exam_count = int(
+            await session.scalar(
+                select(func.count()).select_from(ExamSession).where(ExamSession.book_id == book_id)
+            )
+            or 0
+        )
+        if (chat_count > 0 or exam_count > 0) and not force:
+            raise HTTPException(
+                status_code=409,
+                detail=f"این کتاب دارای {chat_count} گفت‌وگو و {exam_count} آزمون ثبت‌شده است. برای حذف کامل همراه با سوابق وابسته، تأیید حذف اجباری را بزنید.",
+            )
+
+        pdf_file_path = book.pdf_file_path
+        if chat_count > 0:
+            await session.execute(delete(ChatSession).where(ChatSession.book_id == book_id))
+        if exam_count > 0:
+            await session.execute(delete(ExamSession).where(ExamSession.book_id == book_id))
+        await session.execute(delete(BookPage).where(BookPage.book_id == book_id))
+        await session.delete(book)
+        await session.commit()
+
+    # Clean up storage & vector records best-effort
+    try:
+        storage_book_dir = STORAGE_DIR / "books" / str(book_id)
+        if storage_book_dir.exists():
+            shutil.rmtree(storage_book_dir, ignore_errors=True)
+        if pdf_file_path:
+            pdf_candidate = Path(pdf_file_path)
+            if pdf_candidate.is_file() and pdf_candidate.parent != STORAGE_DIR / "demo":
+                pdf_candidate.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("Cleanup of deleted book %s files partially failed", book_id)
+
+    return {
+        "deleted": True,
+        "book_id": book_id,
+        "deleted_chats": chat_count,
+        "deleted_exams": exam_count,
+    }
+
+
+@protected_router.get("/users/{user_id}/sessions")
+async def get_admin_user_sessions(user_id: str) -> dict[str, object]:
+    now = datetime.now(timezone.utc)
+    async with async_session_factory() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="کاربر یافت نشد.")
+        rows = (
+            await session.scalars(
+                select(UserSession)
+                .where(UserSession.user_id == user_id)
+                .order_by(UserSession.created_at.desc())
+                .limit(30)
+            )
+        ).all()
+        items = []
+        for s in rows:
+            exp = s.expires_at if s.expires_at.tzinfo is not None else s.expires_at.replace(tzinfo=timezone.utc)
+            items.append(
+                {
+                    "id": s.id,
+                    "user_agent": s.user_agent,
+                    "ip_address": s.ip_address,
+                    "is_active": s.revoked_at is None and exp > now,
+                    "last_seen_at": utc_iso(s.last_seen_at),
+                    "expires_at": utc_iso(s.expires_at),
+                    "revoked_at": utc_iso(s.revoked_at),
+                    "created_at": utc_iso(s.created_at),
+                }
+            )
+        return {"user_id": user_id, "sessions": items}
+
+
+@protected_router.post("/users/{user_id}/revoke-sessions")
+async def revoke_admin_user_sessions(user_id: str) -> dict[str, object]:
+    now = datetime.now(timezone.utc)
+    async with async_session_factory() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="کاربر یافت نشد.")
+        result = await session.execute(
+            update(UserSession)
+            .where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
+            .values(revoked_at=now)
+        )
+        await session.commit()
+        return {"user_id": user_id, "revoked_count": int(result.rowcount or 0)}
+
+
+class AdminSettingsUpdateBody(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    config: dict[str, Any] | None = None
+    clear_secrets: list[str] = Field(default_factory=list)
+    clear_overrides: list[str] = Field(default_factory=list)
+
+
+class AdminSettingsResetBody(BaseModel):
+    section: Literal["all", "ai", "vector", "sms", "payment"] = "all"
+
+
+class TestAiConnectionBody(BaseModel):
+    llm_base_url: str | None = Field(default=None, max_length=512)
+    llm_api_key: str | None = Field(default=None, max_length=512)
+    test_model: str | None = Field(default=None, max_length=255)
+    run_prompt: bool = False
+
+
+class TestVectorBody(BaseModel):
+    vector_backend: Literal["qdrant", "pgvector"] | None = None
+    qdrant_url: str | None = Field(default=None, max_length=512)
+    qdrant_collection: str | None = Field(default=None, max_length=128)
+
+
+class TestSmsBody(BaseModel):
+    sms_provider: Literal["demo", "kavenegar", "sms_ir", "webhook"] | None = None
+    sms_api_key: str | None = Field(default=None, max_length=512)
+    sms_sender: str | None = Field(default=None, max_length=128)
+    sms_template: str | None = Field(default=None, max_length=128)
+    sms_webhook_url: str | None = Field(default=None, max_length=512)
+    test_phone: str | None = Field(default=None, max_length=24)
+
+
+def _redact_secret(text: str, *secrets_to_hide: str | None) -> str:
+    cleaned = text
+    for sec in secrets_to_hide:
+        if sec and len(sec) >= 4:
+            cleaned = cleaned.replace(sec, "***")
+    return cleaned[:280]
+
+
+@protected_router.get("/settings")
+async def get_admin_system_settings(response: Response) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        persisted = normalize_persisted_overrides(getattr(billing, "system_config", {}))
+        await session.commit()
+    return serialize_admin_settings(get_base_settings(), get_settings(), persisted)
+
+
+@protected_router.put("/settings")
+async def update_admin_system_settings(
+    body: AdminSettingsUpdateBody,
+    response: Response,
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    raw_patch: dict[str, Any] = {}
+    if body.config is not None:
+        raw_patch.update(body.config)
+    if body.model_extra:
+        for k, v in body.model_extra.items():
+            if k in ALL_RUNTIME_FIELDS:
+                raw_patch[k] = v
+            else:
+                raise HTTPException(status_code=422, detail=f"تنظیم ناشناخته: {k}")
+
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        try:
+            updated = apply_runtime_patch(
+                getattr(billing, "system_config", {}),
+                raw_patch,
+                clear_secrets=body.clear_secrets,
+                clear_overrides=body.clear_overrides,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        billing.system_config = updated
+        await session.commit()
+
+    set_runtime_overrides(updated)
+    await refresh_runtime_clients()
+    return serialize_admin_settings(get_base_settings(), get_settings(), updated)
+
+
+@protected_router.post("/settings/reset")
+async def reset_admin_system_settings(
+    body: AdminSettingsResetBody,
+    response: Response,
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    keys_to_remove = RESET_SECTION_FIELDS[body.section]
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        current = normalize_persisted_overrides(getattr(billing, "system_config", {}))
+        if body.section == "all":
+            next_config: dict[str, Any] = {}
+        else:
+            next_config = {k: v for k, v in current.items() if k not in keys_to_remove}
+        billing.system_config = next_config
+        await session.commit()
+
+    set_runtime_overrides(next_config)
+    await refresh_runtime_clients()
+    return serialize_admin_settings(get_base_settings(), get_settings(), next_config)
+
+
+@protected_router.post("/settings/test-ai")
+async def test_ai_connection(body: TestAiConnectionBody) -> dict[str, object]:
+    """Probe an OpenAI-compatible AI API (`/models` + optional tiny completion) safely."""
+    settings = get_settings()
+    base_url = (body.llm_base_url or settings.llm_base_url or "").strip().rstrip("/")
+    api_key = (body.llm_api_key or settings.llm_api_key or "").strip()
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=422, detail="آدرس پایه API هوش مصنوعی باید با http:// یا https:// شروع شود.")
+    if not api_key:
+        raise HTTPException(status_code=422, detail="کلید API برای تست اتصال وارد نشده است.")
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    models_list: list[str] = []
+    status_code: int | None = None
+    error_message: str | None = None
+    models_ok = False
+
+    started = time.perf_counter()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            resp = await client.get(f"{base_url}/models", headers=headers)
+            status_code = resp.status_code
+            if resp.status_code < 400:
+                models_ok = True
+                data = resp.json()
+                raw_items = data.get("data") if isinstance(data, dict) else data
+                if isinstance(raw_items, list):
+                    ids = {
+                        str(item["id"]).strip()
+                        for item in raw_items
+                        if isinstance(item, dict) and item.get("id")
+                    }
+                    models_list = sorted(ids)[:150]
+            else:
+                error_message = _redact_secret(resp.text or f"HTTP {resp.status_code}", api_key)
+        except Exception as exc:  # noqa: BLE001
+            error_message = _redact_secret(str(exc) or type(exc).__name__, api_key)
+
+        latency_ms = round((time.perf_counter() - started) * 1000)
+
+        prompt_result: dict[str, object] | None = None
+        if body.run_prompt:
+            chosen_model = (body.test_model or settings.tutor_model or settings.vision_model_primary or "").strip()
+            if not chosen_model:
+                prompt_result = {"ok": False, "error": "مدلی برای تست پرامپت مشخص نشده است."}
+            else:
+                p_start = time.perf_counter()
+                try:
+                    c_resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        headers=headers,
+                        json={
+                            "model": chosen_model,
+                            "messages": [{"role": "user", "content": "فقط یک کلمه فارسی بنویس: سلام"}],
+                            "max_tokens": 24,
+                            "temperature": 0,
+                        },
+                    )
+                    p_latency = round((time.perf_counter() - p_start) * 1000)
+                    if c_resp.status_code >= 400:
+                        prompt_result = {
+                            "ok": False,
+                            "model": chosen_model,
+                            "status_code": c_resp.status_code,
+                            "latency_ms": p_latency,
+                            "error": _redact_secret(c_resp.text, api_key),
+                        }
+                    else:
+                        c_data = c_resp.json()
+                        reply_text = ""
+                        choices = c_data.get("choices") if isinstance(c_data, dict) else None
+                        if isinstance(choices, list) and choices:
+                            msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+                            if isinstance(msg, dict):
+                                reply_text = str(msg.get("content") or "").strip()
+                        prompt_result = {
+                            "ok": True,
+                            "model": chosen_model,
+                            "status_code": c_resp.status_code,
+                            "latency_ms": p_latency,
+                            "reply": reply_text[:160],
+                            "usage": c_data.get("usage") if isinstance(c_data, dict) else None,
+                        }
+                        if not models_ok and status_code in (404, 405):
+                            models_ok = True
+                            error_message = None
+                except Exception as exc:  # noqa: BLE001
+                    prompt_result = {
+                        "ok": False,
+                        "model": chosen_model,
+                        "latency_ms": round((time.perf_counter() - p_start) * 1000),
+                        "error": _redact_secret(str(exc) or type(exc).__name__, api_key),
+                    }
+
+    return {
+        "ok": models_ok or bool(prompt_result and prompt_result.get("ok")),
+        "base_url": base_url,
+        "status_code": status_code,
+        "latency_ms": latency_ms,
+        "models": models_list,
+        "models_count": len(models_list),
+        "error": error_message,
+        "prompt_test": prompt_result,
+    }
+
+
+@protected_router.post("/settings/test-vector")
+async def test_vector_connection(body: TestVectorBody) -> dict[str, object]:
+    settings = get_settings()
+    backend = body.vector_backend or settings.vector_backend
+    qdrant_url = (body.qdrant_url or settings.qdrant_url or "").strip().rstrip("/")
+    qdrant_collection = (body.qdrant_collection or settings.qdrant_collection or "").strip()
+    started = time.perf_counter()
+
+    if backend == "pgvector":
+        is_sqlite = str(getattr(settings, "database_url", "")).startswith("sqlite")
+        if is_sqlite:
+            return {
+                "ok": False,
+                "backend": "pgvector",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "detail": "پایگاه‌داده فعلی SQLite است؛ افزونه pgvector نیازمند PostgreSQL/Supabase است (در حالت Demo از جستجوی واژگانی استفاده می‌شود).",
+            }
+        try:
+            async with async_session_factory() as session:
+                ext_present = bool(
+                    await session.scalar(
+                        sql_text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+                    )
+                )
+                table_exists = bool(
+                    await session.scalar(
+                        sql_text(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_schema = 'public' AND table_name = 'book_page_embeddings'"
+                        )
+                    )
+                )
+                vectors_count = 0
+                if table_exists:
+                    vectors_count = int(
+                        await session.scalar(sql_text("SELECT COUNT(*) FROM public.book_page_embeddings"))
+                        or 0
+                    )
+            return {
+                "ok": ext_present,
+                "backend": "pgvector",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "detail": (
+                    f"افزونه pgvector فعال است؛ تعداد {vectors_count} بردار صفحه ذخیره شده."
+                    if ext_present
+                    else "افزونه vector در PostgreSQL نصب یا فعال نشده است (CREATE EXTENSION vector)."
+                ),
+                "collection_info": {
+                    "extension_enabled": ext_present,
+                    "table_exists": table_exists,
+                    "vectors_count": vectors_count,
+                },
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "backend": "pgvector",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "detail": f"خطا در بررسی pgvector: {str(exc)[:220]}",
+            }
+
+    parsed = urlparse(qdrant_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=422, detail="آدرس Qdrant معتبر نیست.")
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        try:
+            resp = await client.get(f"{qdrant_url}/collections")
+            latency_ms = round((time.perf_counter() - started) * 1000)
+            if resp.status_code >= 400:
+                return {
+                    "ok": False,
+                    "backend": "qdrant",
+                    "latency_ms": latency_ms,
+                    "detail": f"پاسخ غیرموفق از Qdrant (HTTP {resp.status_code})",
+                }
+            payload = resp.json()
+            collections = [
+                c.get("name")
+                for c in (payload.get("result", {}).get("collections") or [])
+                if isinstance(c, dict)
+            ]
+            return {
+                "ok": True,
+                "backend": "qdrant",
+                "latency_ms": latency_ms,
+                "detail": (
+                    f"اتصال به Qdrant برقرار شد؛ مجموعه «{qdrant_collection}» "
+                    + ("یافت شد." if qdrant_collection in collections else "هنوز ایجاد نشده (با اولین ایندکس ساخته می‌شود).")
+                ),
+                "collection_info": {
+                    "collections": collections,
+                    "target_exists": qdrant_collection in collections,
+                },
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "backend": "qdrant",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "detail": f"عدم دسترسی به Qdrant در {qdrant_url}: {str(exc)[:180]}",
+            }
+
+
+@protected_router.post("/settings/test-sms")
+async def test_sms_gateway(body: TestSmsBody) -> dict[str, object]:
+    settings = get_settings()
+    provider_name = body.sms_provider or settings.sms_provider
+    api_key = body.sms_api_key if body.sms_api_key else settings.sms_api_key
+    sender = body.sms_sender if body.sms_sender is not None else settings.sms_sender
+    template = body.sms_template if body.sms_template is not None else settings.sms_template
+    webhook_url = body.sms_webhook_url if body.sms_webhook_url is not None else settings.sms_webhook_url
+
+    if provider_name in ("kavenegar", "sms_ir") and not api_key:
+        return {
+            "ok": False,
+            "provider": provider_name,
+            "detail": f"برای درگاه {provider_name} وارد کردن کلید API الزامی است.",
+        }
+    if provider_name == "sms_ir" and not template:
+        return {
+            "ok": False,
+            "provider": provider_name,
+            "detail": "برای درگاه sms.ir وارد کردن شناسه قالب (Template ID) الزامی است.",
+        }
+    if provider_name == "webhook" and not webhook_url:
+        return {
+            "ok": False,
+            "provider": provider_name,
+            "detail": "برای حالت Webhook وارد کردن آدرس Webhook URL الزامی است.",
+        }
+
+    if body.test_phone and body.test_phone.strip():
+        try:
+            phone = normalize_iranian_phone(body.test_phone)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        probe_settings = settings.model_copy(
+            update={
+                "sms_provider": provider_name,
+                "sms_api_key": api_key,
+                "sms_sender": sender,
+                "sms_template": template,
+                "sms_webhook_url": webhook_url,
+            }
+        )
+        try:
+            delivery = await get_sms_provider(probe_settings).send_otp(phone_number=phone, code="123456")
+            return {
+                "ok": True,
+                "provider": delivery.provider,
+                "detail": f"ارسال آزمایشی کد به {phone} از طریق {delivery.provider} با موفقیت انجام شد.",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "provider": provider_name,
+                "detail": f"خطا در ارسال آزمایشی پیامک: {_redact_secret(str(exc), api_key)}",
+            }
+
+    return {
+        "ok": True,
+        "provider": provider_name,
+        "detail": (
+            "حالت آزمایشی (Demo) فعال است؛ کد ورود مستقیماً در پاسخ نمایش داده می‌شود."
+            if provider_name == "demo"
+            else f"پیکربندی درگاه {provider_name} کامل است و آماده ارسال پیامک است."
+        ),
     }
 
 

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.llm_client import close_llm_clients
+from app.core.runtime_config import load_runtime_overrides_from_db
 from app.db.seed import seed_database
 from app.db.session import engine, get_session
 from app.services.retrieval_service import close_qdrant
@@ -16,6 +17,7 @@ from app.services.retrieval_service import close_qdrant
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await seed_database()
+    await load_runtime_overrides_from_db()
     try:
         yield
     finally:

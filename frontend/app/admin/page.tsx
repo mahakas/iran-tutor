@@ -3,12 +3,15 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   ArrowRight,
   BarChart3,
   BookOpen,
   CheckCircle2,
   Coins,
+  Cpu,
   Crown,
+  Database,
   Download,
   ExternalLink,
   Eye,
@@ -22,16 +25,22 @@ import {
   Monitor,
   Moon,
   Palette,
+  Pencil,
   RefreshCw,
   Save,
   Search,
   ShieldCheck,
+  ShieldOff,
   Sparkles,
   Sun,
+  Trash2,
   Users,
   XCircle,
+  Zap,
 } from "lucide-react";
 import AdminAppearancePanel, { type AdminPreferencesPatch } from "@/components/AdminAppearancePanel";
+import AdminIntegrationsPanel, { type AdminSystemSettingsPayload } from "@/components/AdminIntegrationsPanel";
+import AdminOverviewPanel, { type AdminOverviewData } from "@/components/AdminOverviewPanel";
 import DiffViewer from "@/components/DiffViewer";
 import GlobalSearch, { type SearchItem } from "@/components/GlobalSearch";
 import { computeLineDiff } from "@/lib/diff";
@@ -148,6 +157,18 @@ type BillingSettingsData = {
   token_price_per_1k_toman: number;
   starter_tokens: number;
   starter_duration_days: number;
+  starter_storage_bytes?: number;
+};
+
+type AdminUserSessionRow = {
+  id: string;
+  user_agent: string | null;
+  ip_address: string | null;
+  is_active: boolean;
+  last_seen_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string | null;
 };
 
 type AdminUsersSummary = {
@@ -233,10 +254,16 @@ function formatFaDate(isoDate: string) {
 
 export default function AdminPage() {
   const [authState, setAuthState] = useState<"checking" | "locked" | "authenticated">("checking");
-  const [adminTab, setAdminTab] = useState<"books" | "plans" | "users" | "appearance">("books");
+  const [adminTab, setAdminTab] = useState<
+    "overview" | "books" | "plans" | "users" | "integrations" | "appearance"
+  >("books");
   const tokenRef = useRef<string | null>(null);
   const [activeTokenState, setActiveTokenState] = useState<string | null>(null);
   const pendingJumpPageRef = useRef<{ bookId: number; pageIndex: number } | null>(null);
+  const [systemMode, setSystemMode] = useState<"demo" | "production">("demo");
+  const [overviewData, setOverviewData] = useState<AdminOverviewData | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [overviewError, setOverviewError] = useState("");
   const [adminPreferences, setAdminPreferences] = useState<UserPreferences>(DEFAULT_PREFERENCES);
   const [systemIsDark, setSystemIsDark] = useState(false);
   const [appearanceSaving, setAppearanceSaving] = useState(false);
@@ -253,6 +280,7 @@ export default function AdminPage() {
     token_price_per_1k_toman: 1000,
     starter_tokens: 15000,
     starter_duration_days: 7,
+    starter_storage_bytes: 25 * 1024 * 1024,
   });
   const [plans, setPlans] = useState<PlanItem[]>([]);
   const [billingLoading, setBillingLoading] = useState(false);
@@ -275,10 +303,24 @@ export default function AdminPage() {
   const [userSaving, setUserSaving] = useState(false);
   const [userMessage, setUserMessage] = useState("");
   const [userError, setUserError] = useState("");
+  const [userSessions, setUserSessions] = useState<AdminUserSessionRow[]>([]);
+  const [userSessionsLoading, setUserSessionsLoading] = useState(false);
+  const [revokingSessions, setRevokingSessions] = useState(false);
   const [usageReportUserId, setUsageReportUserId] = useState<string | null>(null);
   const [usageReport, setUsageReport] = useState<AdminUserUsageReport | null>(null);
   const [usageReportLoading, setUsageReportLoading] = useState(false);
   const [usageReportError, setUsageReportError] = useState("");
+
+  // Book lifecycle actions state (edit metadata, reindex vectors, reprocess PDF, delete)
+  const [editingBookMeta, setEditingBookMeta] = useState(false);
+  const [editBookTitle, setEditBookTitle] = useState("");
+  const [editBookGrade, setEditBookGrade] = useState(12);
+  const [editBookMajor, setEditBookMajor] = useState("math_physics");
+  const [bookActionBusy, setBookActionBusy] = useState<string | null>(null);
+  const [bookActionMessage, setBookActionMessage] = useState("");
+  const [bookActionError, setBookActionError] = useState("");
+  const [deleteBookConfirm, setDeleteBookConfirm] = useState<"none" | "confirm" | "force">("none");
+  const [deleteConflictDetail, setDeleteConflictDetail] = useState("");
 
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("فیزیک ۳");
@@ -676,6 +718,230 @@ export default function AdminPage() {
     [fetchBookPages, lockAdminPanel, selectPageForEdit]
   );
 
+  const fetchOverviewData = useCallback(
+    async (tokenOverride?: string | null) => {
+      const token = tokenOverride !== undefined ? tokenOverride : getActiveToken();
+      setOverviewLoading(true);
+      setOverviewError("");
+      try {
+        const res = await fetch("/api/v1/admin/overview", {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: buildAuthHeaders(token),
+        });
+        if (res.status === 401) {
+          lockAdminPanel();
+          return;
+        }
+        const payload = (await res.json()) as AdminOverviewData & { detail?: string };
+        if (!res.ok) throw new Error(payload.detail ?? "خطا در دریافت نمای کلی سیستم");
+        setOverviewData(payload);
+        if (payload.system?.mode) {
+          setSystemMode(payload.system.mode);
+        }
+      } catch (cause) {
+        setOverviewError(cause instanceof Error ? cause.message : "خطا در دریافت نمای کلی");
+      } finally {
+        setOverviewLoading(false);
+      }
+    },
+    [getActiveToken, lockAdminPanel]
+  );
+
+  const fetchUserSessions = useCallback(
+    async (userId: string) => {
+      const token = getActiveToken();
+      setUserSessionsLoading(true);
+      try {
+        const res = await fetch(`/api/v1/admin/users/${userId}/sessions`, {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: buildAuthHeaders(token),
+        });
+        if (res.status === 401) {
+          lockAdminPanel();
+          return;
+        }
+        const payload = (await res.json()) as { sessions?: AdminUserSessionRow[] };
+        if (res.ok && payload.sessions) setUserSessions(payload.sessions);
+      } catch {
+        setUserSessions([]);
+      } finally {
+        setUserSessionsLoading(false);
+      }
+    },
+    [getActiveToken, lockAdminPanel]
+  );
+
+  const handleRevokeUserSessions = async (userId: string) => {
+    const token = getActiveToken();
+    setRevokingSessions(true);
+    setUserMessage("");
+    setUserError("");
+    try {
+      const res = await fetch(`/api/v1/admin/users/${userId}/revoke-sessions`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: buildAuthHeaders(token),
+      });
+      if (res.status === 401) {
+        lockAdminPanel();
+        return;
+      }
+      const payload = (await res.json()) as { revoked_count?: number; detail?: string };
+      if (!res.ok) throw new Error(payload.detail ?? "بستن نشست‌های کاربر انجام نشد");
+      setUserMessage(`${formatFaNumber(payload.revoked_count ?? 0)} نشست فعال کاربر با موفقیت لغو شد.`);
+      await fetchUserSessions(userId);
+    } catch (cause) {
+      setUserError(cause instanceof Error ? cause.message : "خطا در بستن نشست‌ها");
+    } finally {
+      setRevokingSessions(false);
+    }
+  };
+
+  const openBookMetaEditor = (target: BookStatus) => {
+    setEditBookTitle(target.title);
+    setEditBookGrade(target.grade_number ?? 12);
+    setEditBookMajor(target.major_code ?? "math_physics");
+    setEditingBookMeta((prev) => !prev);
+    setBookActionError("");
+    setBookActionMessage("");
+  };
+
+  const handleSaveBookMeta = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!book) return;
+    const token = getActiveToken();
+    setBookActionBusy("meta");
+    setBookActionError("");
+    setBookActionMessage("");
+    try {
+      const res = await fetch(`/api/v1/admin/books/${book.id}`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...buildAuthHeaders(token) },
+        body: JSON.stringify({
+          title: editBookTitle.trim(),
+          grade_number: editBookGrade,
+          major_code: editBookGrade >= 10 ? editBookMajor : null,
+        }),
+      });
+      if (res.status === 401) {
+        lockAdminPanel();
+        return;
+      }
+      const payload = (await res.json()) as { book?: BookStatus; detail?: string };
+      if (!res.ok || !payload.book) throw new Error(payload.detail ?? "ویرایش اطلاعات کتاب انجام نشد");
+      setBook(payload.book);
+      setEditingBookMeta(false);
+      setBookActionMessage("اطلاعات کتاب با موفقیت به‌روزرسانی شد.");
+      await refreshBooksAndSelect(payload.book.id);
+    } catch (cause) {
+      setBookActionError(cause instanceof Error ? cause.message : "خطا در ویرایش کتاب");
+    } finally {
+      setBookActionBusy(null);
+    }
+  };
+
+  const handleReindexBook = async (targetBookId: number) => {
+    const token = getActiveToken();
+    setBookActionBusy("reindex");
+    setBookActionError("");
+    setBookActionMessage("");
+    try {
+      const res = await fetch(`/api/v1/admin/books/${targetBookId}/reindex`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: buildAuthHeaders(token),
+      });
+      if (res.status === 401) {
+        lockAdminPanel();
+        return;
+      }
+      const payload = (await res.json()) as {
+        indexed_pages?: number;
+        vector_backend?: string;
+        detail?: string;
+      };
+      if (!res.ok) throw new Error(payload.detail ?? "ایندکس مجدد کتاب ناموفق بود");
+      setBookActionMessage(
+        `${formatFaNumber(payload.indexed_pages ?? 0)} صفحه در موتور برداری (${payload.vector_backend ?? "vector"}) ایندکس شد.`
+      );
+    } catch (cause) {
+      setBookActionError(cause instanceof Error ? cause.message : "خطا در ایندکس مجدد برداری");
+    } finally {
+      setBookActionBusy(null);
+    }
+  };
+
+  const handleReprocessBook = async (targetBookId: number) => {
+    const token = getActiveToken();
+    setBookActionBusy("reprocess");
+    setBookActionError("");
+    setBookActionMessage("");
+    try {
+      const res = await fetch(`/api/v1/admin/books/${targetBookId}/reprocess`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: buildAuthHeaders(token),
+      });
+      if (res.status === 401) {
+        lockAdminPanel();
+        return;
+      }
+      const payload = (await res.json()) as { detail?: string; start_page?: number; end_page?: number };
+      if (!res.ok) throw new Error(payload.detail ?? "شروع پردازش مجدد ناموفق بود");
+      setBook((prev) => (prev && prev.id === targetBookId ? { ...prev, status: "ingesting" } : prev));
+      setBookActionMessage(
+        `پردازش مجدد صفحه‌های ${payload.start_page ?? 1} تا ${payload.end_page ?? 1} آغاز شد.`
+      );
+    } catch (cause) {
+      setBookActionError(cause instanceof Error ? cause.message : "خطا در پردازش مجدد کتاب");
+    } finally {
+      setBookActionBusy(null);
+    }
+  };
+
+  const handleDeleteBook = async (targetBookId: number, forceDelete: boolean) => {
+    const token = getActiveToken();
+    setBookActionBusy("delete");
+    setBookActionError("");
+    setBookActionMessage("");
+    try {
+      const res = await fetch(`/api/v1/admin/books/${targetBookId}?force=${forceDelete ? "true" : "false"}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: buildAuthHeaders(token),
+      });
+      if (res.status === 401) {
+        lockAdminPanel();
+        return;
+      }
+      const payload = (await res.json()) as { detail?: string };
+      if (res.status === 409) {
+        setDeleteBookConfirm("force");
+        setDeleteConflictDetail(payload.detail ?? "این کتاب دارای سوابق گفت‌وگو یا آزمون است.");
+        return;
+      }
+      if (!res.ok) throw new Error(payload.detail ?? "حذف کتاب ناموفق بود");
+      setDeleteBookConfirm("none");
+      setDeleteConflictDetail("");
+      setEditingBookMeta(false);
+      setPreviewOpen(false);
+      setPages([]);
+      selectPageForEdit(null);
+      setBook(null);
+      setBookActionMessage("کتاب و صفحه‌های مربوطه با موفقیت حذف شدند.");
+      const { items } = await fetchBooks();
+      setBooks(items);
+      if (items.length > 0) setBook(items[0]);
+    } catch (cause) {
+      setBookActionError(cause instanceof Error ? cause.message : "خطا در حذف کتاب");
+    } finally {
+      setBookActionBusy(null);
+    }
+  };
+
   useEffect(() => {
     let active = true;
     const storedToken = getActiveToken();
@@ -701,6 +967,7 @@ export default function AdminPage() {
         const [{ items, unauthorized }] = await Promise.all([
           fetchBooks(storedToken),
           fetchAdminPreferences(storedToken),
+          fetchOverviewData(storedToken),
         ]);
         if (!active) return;
         if (unauthorized) {
@@ -716,7 +983,7 @@ export default function AdminPage() {
     return () => {
       active = false;
     };
-  }, [fetchAdminPreferences, fetchBooks, getActiveToken, lockAdminPanel, setActiveToken]);
+  }, [fetchAdminPreferences, fetchBooks, fetchOverviewData, getActiveToken, lockAdminPanel, setActiveToken]);
 
   const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -745,6 +1012,7 @@ export default function AdminPage() {
       const [{ items, unauthorized }] = await Promise.all([
         fetchBooks(payload.token),
         fetchAdminPreferences(payload.token),
+        fetchOverviewData(payload.token),
       ]);
       if (unauthorized) {
         setActiveToken(null);
@@ -869,6 +1137,8 @@ export default function AdminPage() {
     [diffBeforeMarkdown, editMarkdown]
   );
 
+  const authHeadersMemo = useMemo(() => buildAuthHeaders(activeTokenState), [activeTokenState]);
+
   const cycleQuickColorMode = () => {
     const current = adminPreferences.appearance.color_mode;
     const next = current === "light" ? "dark" : current === "dark" ? "system" : "light";
@@ -921,10 +1191,31 @@ export default function AdminPage() {
   const adminQuickCommands = useMemo<SearchItem[]>(
     () => [
       {
+        id: "cmd-overview",
+        category: "commands",
+        title: "نمای کلی سیستم، آمار زنده و تراکنش‌ها",
+        subtitle: "وضعیت سرویس‌ها، صفحه‌های نیازمند بازبینی، تراکنش‌ها و لاگ مصرف",
+        badge: "تب",
+        icon: "nav",
+        onSelect: () => {
+          setAdminTab("overview");
+          void fetchOverviewData();
+        },
+      },
+      {
+        id: "cmd-integrations",
+        category: "commands",
+        title: "API هوش مصنوعی، مدل‌ها، پیامک و درگاه پرداخت",
+        subtitle: "تنظیم کلید API، تست مدل‌ها، pgvector/Qdrant، کاوه‌نگار و زرین‌پال",
+        badge: "سیستم",
+        icon: "nav",
+        onSelect: () => setAdminTab("integrations"),
+      },
+      {
         id: "cmd-books",
         category: "commands",
         title: "کتاب‌ها و پردازش PDF / Markdown",
-        subtitle: "آپلود کتاب جدید، بررسی وضعیت و بازبینی صفحه‌ها",
+        subtitle: "آپلود کتاب جدید، بررسی وضعیت، ایندکس برداری و بازبینی صفحه‌ها",
         badge: "تب",
         icon: "book",
         onSelect: () => setAdminTab("books"),
@@ -932,8 +1223,8 @@ export default function AdminPage() {
       {
         id: "cmd-plans",
         category: "commands",
-        title: "مدیریت پلن‌ها و قیمت توکن",
-        subtitle: "ویرایش تعرفه پلن‌ها و هدیه ثبت‌نام",
+        title: "مدیریت پلن‌ها، فضای ذخیره و قیمت توکن",
+        subtitle: "ویرایش تعرفه پلن‌ها، حجم مجاز و هدیه ثبت‌نام",
         badge: "تب",
         icon: "plan",
         onSelect: () => {
@@ -944,8 +1235,8 @@ export default function AdminPage() {
       {
         id: "cmd-users",
         category: "commands",
-        title: "مدیریت کاربران و سهمیه‌ها",
-        subtitle: "لیست کاربران، گزارش مصرف و شارژ دستی",
+        title: "مدیریت کاربران، نشست‌ها و سهمیه‌ها",
+        subtitle: "لیست کاربران، گزارش مصرف، شارژ دستی و لغو نشست‌ها",
         badge: "تب",
         icon: "user",
         onSelect: () => {
@@ -964,7 +1255,7 @@ export default function AdminPage() {
         onSelect: () => setAdminTab("appearance"),
       },
     ],
-    [fetchBillingData, fetchUsersData]
+    [fetchBillingData, fetchOverviewData, fetchUsersData]
   );
 
   const selectedImageUrl = selectedPage?.image_url ?? null;
@@ -1223,6 +1514,7 @@ export default function AdminPage() {
           price_toman: Number(plan.price_toman),
           token_quota: Number(plan.token_quota),
           duration_days: Number(plan.duration_days),
+          storage_quota_bytes: Number(plan.storage_quota_bytes || 104_857_600),
           is_active: plan.is_active,
         }),
       });
@@ -1252,6 +1544,7 @@ export default function AdminPage() {
     setEditUserActive(u.is_active);
     setUserMessage("");
     setUserError("");
+    void fetchUserSessions(u.id);
   };
 
   const handleSaveUser = async (event: React.FormEvent) => {
@@ -1385,6 +1678,15 @@ export default function AdminPage() {
         <div className="admin-topbar-actions">
           <button
             type="button"
+            className={`admin-theme-chip ${systemMode === "production" ? "live-mode" : ""}`}
+            onClick={() => setAdminTab("integrations")}
+            title="وضعیت اجرای هوش مصنوعی و تنظیمات API"
+          >
+            <Zap size={14} />
+            <span>{systemMode === "production" ? "تولید AI" : "حالت دمو"}</span>
+          </button>
+          <button
+            type="button"
             className="admin-theme-chip"
             onClick={cycleQuickColorMode}
             title="تغییر سریع حالت رنگ (روشن / تاریک / سیستم)"
@@ -1437,33 +1739,45 @@ export default function AdminPage() {
       <div className="admin-content">
         <div className="admin-heading">
           <div>
-            <span className="eyebrow">مدیریت درسیار</span>
+            <span className="eyebrow">مرکز کنترل جامع مدیریت درسیار</span>
             <h1>
-              {adminTab === "books"
+              {adminTab === "overview"
+                ? "نمای کلی، سلامت سرویس‌ها و تراکنش‌ها"
+                : adminTab === "books"
                 ? "افزودن و بازبینی کتاب درسی"
                 : adminTab === "plans"
-                ? "مدیریت قیمت توکن و پلن‌ها"
+                ? "مدیریت قیمت توکن، فضا و پلن‌ها"
                 : adminTab === "users"
-                ? "مدیریت کاربران و سهمیه‌ها"
+                ? "مدیریت کاربران، نشست‌ها و سهمیه‌ها"
+                : adminTab === "integrations"
+                ? "مرکز کنترل API هوش مصنوعی، مدل‌ها و درگاه‌ها"
                 : "ظاهر، تم و دسترس‌پذیری پنل مدیریت"}
             </h1>
             <p>
-              {adminTab === "books"
-                ? "کتاب را وارد کن، چند صفحه را آزمایشی پردازش کن، خروجی را با PDF بسنج و صفحه‌ها را تأیید کن."
+              {adminTab === "overview"
+                ? "گزارش زنده وضعیت سرور، آمار کل کتاب‌ها و کاربران، صفحه‌های نیازمند بازبینی و آخرین تراکنش‌های مالی و مصرف توکن."
+                : adminTab === "books"
+                ? "کتاب را وارد کن، چند صفحه را آزمایشی پردازش کن، خروجی را با PDF بسنج و صفحه‌ها یا بردارهای RAG را مدیریت کن."
                 : adminTab === "plans"
-                ? "قیمت پایهٔ توکن، سهمیهٔ هر پلن، مدت اعتبار (روز) و مبلغ پلن‌های اقتصادی، حرفه‌ای و هوشمندانه را تنظیم کنید."
+                ? "قیمت پایهٔ توکن، سهمیهٔ هر پلن، فضای ذخیره‌سازی، مدت اعتبار و مبلغ پلن‌ها را تنظیم کنید."
                 : adminTab === "users"
-                ? "وضعیت کاربران ثبت‌نامی، میزان مصرف توکن، پلن فعال و شارژ حساب‌ها را مدیریت کنید."
+                ? "وضعیت کاربران ثبت‌نامی، میزان مصرف توکن، پلن فعال، نشست‌های باز و شارژ حساب‌ها را مدیریت کنید."
+                : adminTab === "integrations"
+                ? "کلید API و آدرس سرویس هوش مصنوعی، مدل‌های معلم/بینایی/صدا/امبدینگ، جستجوی برداری، پیامک OTP و زرین‌پال را بدون نیاز به ری‌استارت تنظیم کنید."
                 : "حالت روشن/تاریک/سیستم، رنگ‌های مستقل، فونت UI و کد، کنتراست و نشانگرهای Diff را تنظیم کنید."}
             </p>
           </div>
           <div className="admin-heading-mark">
-            {adminTab === "books" ? (
+            {adminTab === "overview" ? (
+              <Activity size={25} />
+            ) : adminTab === "books" ? (
               <BookOpen size={25} />
             ) : adminTab === "plans" ? (
               <Crown size={25} />
             ) : adminTab === "users" ? (
               <Users size={25} />
+            ) : adminTab === "integrations" ? (
+              <Cpu size={25} />
             ) : (
               <Palette size={25} />
             )}
@@ -1473,10 +1787,27 @@ export default function AdminPage() {
         <nav className="admin-tabs" aria-label="بخش‌های پنل مدیریت">
           <button
             type="button"
+            className={`admin-tab ${adminTab === "overview" ? "active" : ""}`}
+            onClick={() => {
+              setAdminTab("overview");
+              void fetchOverviewData();
+            }}
+          >
+            <Activity size={16} /> نمای کلی و مانیتورینگ
+          </button>
+          <button
+            type="button"
             className={`admin-tab ${adminTab === "books" ? "active" : ""}`}
             onClick={() => setAdminTab("books")}
           >
             <BookOpen size={16} /> کتاب‌ها و پردازش PDF
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "integrations" ? "active" : ""}`}
+            onClick={() => setAdminTab("integrations")}
+          >
+            <Cpu size={16} /> هوش مصنوعی، API و درگاه‌ها
           </button>
           <button
             type="button"
@@ -1514,6 +1845,35 @@ export default function AdminPage() {
             <b>دسترسی محافظت‌شده با رمز عبور</b> · مسیر /admin از محیط دانش‌آموز جدا شده است. پیش از انتشار نهایی، مقدار ADMIN_PASSWORD را به رمز قوی تغییر دهید.
           </span>
         </div>
+
+        {adminTab === "overview" && (
+          <AdminOverviewPanel
+            overview={overviewData}
+            loading={overviewLoading}
+            error={overviewError}
+            onRefresh={() => void fetchOverviewData()}
+            onJumpToTab={(tab) => {
+              setAdminTab(tab);
+              if (tab === "plans") void fetchBillingData();
+              if (tab === "users") {
+                void fetchUsersData();
+                void fetchBillingData();
+              }
+            }}
+            onJumpToBookPage={handleAdminJumpBook}
+            onJumpToUser={handleAdminJumpUser}
+          />
+        )}
+
+        {adminTab === "integrations" && (
+          <AdminIntegrationsPanel
+            authHeaders={authHeadersMemo}
+            onUnauthorized={lockAdminPanel}
+            onSettingsApplied={(payload: AdminSystemSettingsPayload) => {
+              setSystemMode(payload.config.demo_mode ? "demo" : "production");
+            }}
+          />
+        )}
 
         {adminTab === "appearance" && (
           <AdminAppearancePanel
@@ -1578,6 +1938,24 @@ export default function AdminPage() {
                         setBillingSettings((prev) => ({
                           ...prev,
                           starter_duration_days: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="form-field">
+                    <span>فضای ذخیره هدیه (مگابایت)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10240}
+                      value={Math.max(
+                        1,
+                        Math.round((billingSettings.starter_storage_bytes ?? 25 * 1024 * 1024) / (1024 * 1024))
+                      )}
+                      onChange={(e) =>
+                        setBillingSettings((prev) => ({
+                          ...prev,
+                          starter_storage_bytes: Math.max(1, Number(e.target.value)) * 1024 * 1024,
                         }))
                       }
                     />
@@ -1668,6 +2046,27 @@ export default function AdminPage() {
                             setPlans((prev) =>
                               prev.map((item) =>
                                 item.code === plan.code ? { ...item, duration_days: Number(e.target.value) } : item
+                              )
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="form-field">
+                        <span>حجم فایل (مگابایت)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={102400}
+                          value={Math.max(1, Math.round((plan.storage_quota_bytes || 104_857_600) / (1024 * 1024)))}
+                          onChange={(e) =>
+                            setPlans((prev) =>
+                              prev.map((item) =>
+                                item.code === plan.code
+                                  ? {
+                                      ...item,
+                                      storage_quota_bytes: Math.max(1, Number(e.target.value)) * 1024 * 1024,
+                                    }
+                                  : item
                               )
                             )
                           }
@@ -2091,13 +2490,73 @@ export default function AdminPage() {
                       <span>حساب کاربری فعال باشد</span>
                     </label>
                   </div>
-                  <div className="admin-inline-actions">
+                  <div className="admin-inline-actions" style={{ gap: 10, flexWrap: "wrap" }}>
                     <button type="submit" className="primary-button" disabled={userSaving}>
                       {userSaving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
                       اعمال تغییرات کاربر
                     </button>
+                    <button
+                      type="button"
+                      className="outline-button"
+                      disabled={revokingSessions}
+                      onClick={() => void handleRevokeUserSessions(editingUser.id)}
+                    >
+                      {revokingSessions ? <LoaderCircle className="spin" size={15} /> : <ShieldOff size={15} />}
+                      بستن تمام نشست‌های فعال کاربر
+                    </button>
                   </div>
                 </form>
+
+                <div className="admin-sub-divider" style={{ margin: "18px 0 12px" }} />
+                <div className="card-heading" style={{ marginBottom: 10 }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 13 }}>نشست‌های ورود اخیر کاربر</h3>
+                    <p style={{ margin: "4px 0 0", fontSize: 11 }}>دستگاه‌ها و آی‌پی‌های ورود این دانش‌آموز</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={userSessionsLoading}
+                    onClick={() => void fetchUserSessions(editingUser.id)}
+                  >
+                    <RefreshCw size={13} className={userSessionsLoading ? "spin" : ""} /> بروزرسانی نشست‌ها
+                  </button>
+                </div>
+                {userSessionsLoading ? (
+                  <div className="review-loading">
+                    <LoaderCircle className="spin" size={16} />
+                    <span>در حال دریافت نشست‌ها...</span>
+                  </div>
+                ) : userSessions.length === 0 ? (
+                  <div className="usage-empty">هیچ نشستی برای این کاربر ثبت نشده است.</div>
+                ) : (
+                  <div className="admin-users-table-wrap user-report-scroll">
+                    <table className="admin-users-table compact">
+                      <thead>
+                        <tr>
+                          <th>دستگاه / مرورگر</th>
+                          <th>IP</th>
+                          <th>وضعیت</th>
+                          <th>آخرین فعالیت</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {userSessions.map((sess) => (
+                          <tr key={sess.id}>
+                            <td><small dir="ltr">{sess.user_agent || "نامشخص"}</small></td>
+                            <td><small dir="ltr">{sess.ip_address || "—"}</small></td>
+                            <td>
+                              <span className={`badge-pill ${sess.is_active ? "done" : "failed"}`}>
+                                {sess.is_active ? "فعال" : sess.revoked_at ? "لغوشده" : "منقضی"}
+                              </span>
+                            </td>
+                            <td><small>{formatFaDateTime(sess.last_seen_at)}</small></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </section>
             )}
           </div>
@@ -2238,6 +2697,11 @@ export default function AdminPage() {
                     setPreviewStatus("all");
                     setUploadMessage("");
                     setSaveMessage("");
+                    setEditingBookMeta(false);
+                    setDeleteBookConfirm("none");
+                    setDeleteConflictDetail("");
+                    setBookActionMessage("");
+                    setBookActionError("");
                   }}
                 >
                   {books.map((item) => (
@@ -2333,6 +2797,164 @@ export default function AdminPage() {
                     <ExternalLink size={16} />
                     بازکردن پیش‌نمایش مقایسه‌ای
                   </button>
+                )}
+
+                <div className="admin-book-actions-bar">
+                  <button
+                    type="button"
+                    className="outline-button"
+                    onClick={() => openBookMetaEditor(book)}
+                  >
+                    <Pencil size={14} /> ویرایش مشخصات
+                  </button>
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={bookActionBusy !== null || book.status === "ingesting"}
+                    onClick={() => void handleReindexBook(book.id)}
+                  >
+                    {bookActionBusy === "reindex" ? (
+                      <LoaderCircle className="spin" size={14} />
+                    ) : (
+                      <Database size={14} />
+                    )}
+                    ایندکس مجدد RAG
+                  </button>
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={bookActionBusy !== null || book.status === "ingesting"}
+                    onClick={() => void handleReprocessBook(book.id)}
+                  >
+                    {bookActionBusy === "reprocess" ? (
+                      <LoaderCircle className="spin" size={14} />
+                    ) : (
+                      <RefreshCw size={14} />
+                    )}
+                    پردازش مجدد PDF
+                  </button>
+                  <button
+                    type="button"
+                    className="outline-button danger"
+                    disabled={bookActionBusy !== null}
+                    onClick={() => {
+                      setDeleteBookConfirm((prev) => (prev === "none" ? "confirm" : "none"));
+                      setDeleteConflictDetail("");
+                    }}
+                  >
+                    <Trash2 size={14} /> حذف کتاب
+                  </button>
+                </div>
+
+                {editingBookMeta && (
+                  <form className="admin-book-meta-editor" onSubmit={handleSaveBookMeta}>
+                    <label className="form-field">
+                      <span>عنوان جدید کتاب</span>
+                      <input
+                        value={editBookTitle}
+                        onChange={(e) => setEditBookTitle(e.target.value)}
+                        required
+                      />
+                    </label>
+                    <div className="form-row">
+                      <label className="form-field">
+                        <span>پایه</span>
+                        <select
+                          value={editBookGrade}
+                          onChange={(e) => setEditBookGrade(Number(e.target.value))}
+                        >
+                          {Array.from({ length: 12 }, (_, idx) => idx + 1).map((n) => (
+                            <option key={n} value={n}>
+                              {n === 12 ? "دوازدهم" : `پایهٔ ${n}`}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {editBookGrade >= 10 && (
+                        <label className="form-field">
+                          <span>رشته</span>
+                          <select
+                            value={editBookMajor}
+                            onChange={(e) => setEditBookMajor(e.target.value)}
+                          >
+                            {majors.map((m) => (
+                              <option key={m.code} value={m.code}>
+                                {m.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                    </div>
+                    <div className="report-head-actions">
+                      <button
+                        type="button"
+                        className="outline-button"
+                        onClick={() => setEditingBookMeta(false)}
+                      >
+                        انصراف
+                      </button>
+                      <button
+                        type="submit"
+                        className="primary-button"
+                        disabled={bookActionBusy === "meta"}
+                      >
+                        {bookActionBusy === "meta" ? (
+                          <LoaderCircle className="spin" size={14} />
+                        ) : (
+                          <Save size={14} />
+                        )}
+                        ذخیره مشخصات
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {deleteBookConfirm !== "none" && (
+                  <div className="admin-delete-confirm-box">
+                    <p>
+                      {deleteBookConfirm === "force"
+                        ? deleteConflictDetail
+                        : `آیا از حذف کامل کتاب «${book.title}» و تمام صفحه‌های آن مطمئن هستید؟ این عمل غیرقابل بازگشت است.`}
+                    </p>
+                    <div className="report-head-actions">
+                      <button
+                        type="button"
+                        className="outline-button"
+                        onClick={() => {
+                          setDeleteBookConfirm("none");
+                          setDeleteConflictDetail("");
+                        }}
+                      >
+                        لغو
+                      </button>
+                      <button
+                        type="button"
+                        className="admin-logout-btn"
+                        disabled={bookActionBusy === "delete"}
+                        onClick={() => void handleDeleteBook(book.id, deleteBookConfirm === "force")}
+                      >
+                        {bookActionBusy === "delete" ? (
+                          <LoaderCircle className="spin" size={14} />
+                        ) : (
+                          <Trash2 size={14} />
+                        )}
+                        {deleteBookConfirm === "force" ? "تأیید حذف کامل همراه با سوابق" : "تأیید حذف کتاب"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {bookActionMessage && (
+                  <div className="success-note" style={{ marginTop: 10 }}>
+                    <CheckCircle2 size={15} />
+                    {bookActionMessage}
+                  </div>
+                )}
+                {bookActionError && (
+                  <div className="inline-error" style={{ marginTop: 10 }}>
+                    {bookActionError}
+                  </div>
                 )}
               </div>
             )}
