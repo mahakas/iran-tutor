@@ -66,12 +66,18 @@ async def test_admin_endpoints_require_authentication_and_login_flow():
         after_logout = await client.get("/api/v1/admin/books")
         assert after_logout.status_code == 401
 
-        # Bearer token works even when cookies are blocked (e.g. cross-site iframe preview).
+        # Bearer and X-Admin-Token work even when cookies are blocked (e.g. cross-site iframe preview).
         bearer_session = await client.get(
             "/api/v1/admin/auth/session",
             headers={"Authorization": f"Bearer {login_payload['token']}"},
         )
         assert bearer_session.json() == {"authenticated": True, "username": "admin"}
+
+        x_token_preview = await client.get(
+            "/api/v1/admin/books/1/preview?status=bogus",
+            headers={"X-Admin-Token": login_payload["token"]},
+        )
+        assert x_token_preview.status_code == 422
 
 
 @pytest.mark.asyncio

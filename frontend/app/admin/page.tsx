@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   BookOpen,
@@ -76,8 +76,12 @@ function storeAdminToken(token: string | null): void {
   }
 }
 
-function buildAuthHeaders(token: string | null): HeadersInit {
-  return token ? { Authorization: `Bearer ${token}` } : {};
+function buildAuthHeaders(token: string | null): Record<string, string> {
+  if (!token) return {};
+  return {
+    Authorization: `Bearer ${token}`,
+    "X-Admin-Token": token,
+  };
 }
 
 const majors = [
@@ -95,7 +99,7 @@ const statusLabel: Record<string, string> = {
 
 export default function AdminPage() {
   const [authState, setAuthState] = useState<"checking" | "locked" | "authenticated">("checking");
-  const [authToken, setAuthToken] = useState<string | null>(null);
+  const tokenRef = useRef<string | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -151,9 +155,17 @@ export default function AdminPage() {
     setImageError(false);
   }, []);
 
+  const getActiveToken = useCallback((): string | null => {
+    return tokenRef.current ?? readStoredAdminToken();
+  }, []);
+
+  const setActiveToken = useCallback((token: string | null) => {
+    tokenRef.current = token;
+    storeAdminToken(token);
+  }, []);
+
   const lockAdminPanel = useCallback(() => {
-    storeAdminToken(null);
-    setAuthToken(null);
+    setActiveToken(null);
     setAuthState("locked");
     setBooks([]);
     setBook(null);
@@ -162,11 +174,11 @@ export default function AdminPage() {
     setPreviewHtml("");
     setPreviewOpen(false);
     selectPageForEdit(null);
-  }, [selectPageForEdit]);
+  }, [selectPageForEdit, setActiveToken]);
 
   const fetchBooks = useCallback(
     async (tokenOverride?: string | null): Promise<{ items: BookStatus[]; unauthorized: boolean }> => {
-      const token = tokenOverride !== undefined ? tokenOverride : authToken ?? readStoredAdminToken();
+      const token = tokenOverride !== undefined ? tokenOverride : getActiveToken();
       try {
         const response = await fetch("/api/v1/admin/books", {
           cache: "no-store",
@@ -180,12 +192,12 @@ export default function AdminPage() {
         return { items: [], unauthorized: false };
       }
     },
-    [authToken]
+    [getActiveToken]
   );
 
   const fetchBookPages = useCallback(
     async (bookId: number, tokenOverride?: string | null): Promise<{ items: AdminPageItem[]; unauthorized: boolean }> => {
-      const token = tokenOverride !== undefined ? tokenOverride : authToken ?? readStoredAdminToken();
+      const token = tokenOverride !== undefined ? tokenOverride : getActiveToken();
       try {
         const response = await fetch(`/api/v1/admin/books/${bookId}/pages`, {
           cache: "no-store",
@@ -199,7 +211,7 @@ export default function AdminPage() {
         return { items: [], unauthorized: false };
       }
     },
-    [authToken]
+    [getActiveToken]
   );
 
   const refreshBooksAndSelect = useCallback(
@@ -246,7 +258,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     let active = true;
-    const storedToken = readStoredAdminToken();
+    const storedToken = getActiveToken();
     fetch("/api/v1/admin/auth/session", {
       cache: "no-store",
       credentials: "same-origin",
@@ -261,27 +273,26 @@ export default function AdminPage() {
       .then(async (authenticated) => {
         if (!active) return;
         if (!authenticated) {
-          storeAdminToken(null);
-          setAuthToken(null);
+          setActiveToken(null);
           setAuthState("locked");
           return;
         }
-        setAuthToken(storedToken);
-        setAuthState("authenticated");
         const { items, unauthorized } = await fetchBooks(storedToken);
         if (!active) return;
         if (unauthorized) {
           lockAdminPanel();
           return;
         }
-        if (items.length === 0) return;
-        setBooks(items);
-        setBook((current) => current ?? items[0]);
+        setAuthState("authenticated");
+        if (items.length > 0) {
+          setBooks(items);
+          setBook((current) => current ?? items[0]);
+        }
       });
     return () => {
       active = false;
     };
-  }, [fetchBooks, lockAdminPanel]);
+  }, [fetchBooks, getActiveToken, lockAdminPanel, setActiveToken]);
 
   const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -306,11 +317,16 @@ export default function AdminPage() {
       if (!response.ok || !payload.authenticated || !payload.token) {
         throw new Error(payload.detail ?? "نام کاربری یا رمز عبور مدیر نادرست است.");
       }
-      storeAdminToken(payload.token);
-      setAuthToken(payload.token);
+      setActiveToken(payload.token);
+      const { items, unauthorized } = await fetchBooks(payload.token);
+      if (unauthorized) {
+        setActiveToken(null);
+        throw new Error("نشست احراز هویت در مرورگر حفظ نشد؛ لطفاً صفحه را رفرش یا در تب جدید باز کنید.");
+      }
       setPassword("");
+      setBooks(items);
+      setBook(items[0] ?? null);
       setAuthState("authenticated");
-      await refreshBooksAndSelect(undefined, payload.token);
     } catch (cause) {
       setAuthError(cause instanceof Error ? cause.message : "خطا در ورود به پنل مدیریت");
     } finally {
@@ -319,7 +335,7 @@ export default function AdminPage() {
   };
 
   const handleLogout = async () => {
-    const token = authToken ?? readStoredAdminToken();
+    const token = getActiveToken();
     await fetch("/api/v1/admin/auth/logout", {
       method: "POST",
       credentials: "same-origin",
@@ -337,7 +353,7 @@ export default function AdminPage() {
 
     if (activeBookStatus === "ingesting") {
       const timer = window.setInterval(async () => {
-        const token = authToken ?? readStoredAdminToken();
+        const token = getActiveToken();
         try {
           const response = await fetch(`/api/v1/admin/books/${activeBookId}/status`, {
             cache: "no-store",
@@ -390,7 +406,7 @@ export default function AdminPage() {
     return () => {
       active = false;
     };
-  }, [activeBookId, activeBookStatus, authToken, fetchBookPages, fetchBooks, lockAdminPanel, selectPageForEdit]);
+  }, [activeBookId, activeBookStatus, fetchBookPages, fetchBooks, getActiveToken, lockAdminPanel, selectPageForEdit]);
 
   const selectedPage = useMemo(
     () => pages.find((item) => item.pdf_page_index === selectedIdx) ?? null,
@@ -403,7 +419,7 @@ export default function AdminPage() {
     if (authState !== "authenticated" || !selectedImageUrl) return;
     let active = true;
     let objectUrl: string | null = null;
-    const token = authToken ?? readStoredAdminToken();
+    const token = getActiveToken();
     fetch(`${selectedImageUrl}?v=${previewVersion}`, {
       cache: "no-store",
       credentials: "same-origin",
@@ -439,12 +455,12 @@ export default function AdminPage() {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [authState, authToken, lockAdminPanel, previewVersion, selectedImageUrl]);
+  }, [authState, getActiveToken, lockAdminPanel, previewVersion, selectedImageUrl]);
 
   useEffect(() => {
     if (authState !== "authenticated" || !previewOpen || !activeBookId) return;
     let active = true;
-    const token = authToken ?? readStoredAdminToken();
+    const token = getActiveToken();
     fetch(`/api/v1/admin/books/${activeBookId}/preview?status=${previewStatus}&v=${previewVersion}`, {
       cache: "no-store",
       credentials: "same-origin",
@@ -466,7 +482,7 @@ export default function AdminPage() {
     return () => {
       active = false;
     };
-  }, [activeBookId, authState, authToken, lockAdminPanel, previewOpen, previewStatus, previewVersion]);
+  }, [activeBookId, authState, getActiveToken, lockAdminPanel, previewOpen, previewStatus, previewVersion]);
 
   const processedPages = useMemo(
     () => (book ? Object.values(book.pages).reduce((total, count) => total + count, 0) : 0),
@@ -504,7 +520,7 @@ export default function AdminPage() {
     form.set("end_page", String(endPage));
     if (grade >= 10) form.set("major_code", major);
     try {
-      const token = authToken ?? readStoredAdminToken();
+      const token = getActiveToken();
       const response = await fetch("/api/v1/admin/books/upload-and-ingest", {
         method: "POST",
         credentials: "same-origin",
@@ -555,7 +571,7 @@ export default function AdminPage() {
     }
 
     try {
-      const token = authToken ?? readStoredAdminToken();
+      const token = getActiveToken();
       const response = await fetch(`/api/v1/admin/books/${book.id}/pages/${selectedPage.pdf_page_index}`, {
         method: "PUT",
         headers: {

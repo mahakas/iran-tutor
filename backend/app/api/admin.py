@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 import time
 from pathlib import Path
@@ -32,6 +33,7 @@ from app.services.validation import validate_major_code
 
 ADMIN_COOKIE_NAME = "iran_tutor_admin"
 MAX_PDF_BYTES = 100 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 def _admin_signing_key() -> bytes:
@@ -73,6 +75,10 @@ def _is_admin_authenticated(request: Request) -> bool:
     if not settings.admin_username or not settings.admin_password:
         return False
 
+    token_header = request.headers.get("x-admin-token", "").strip()
+    if token_header and verify_admin_session_token(token_header):
+        return True
+
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
         bearer_token = auth_header[7:].strip()
@@ -94,6 +100,12 @@ def _is_admin_authenticated(request: Request) -> bool:
 
 def require_admin(request: Request) -> None:
     if not _is_admin_authenticated(request):
+        logger.warning(
+            "Admin auth failed for %s; header_keys=%s has_cookie=%s",
+            request.url.path,
+            sorted(k for k in request.headers.keys() if k in {"authorization", "x-admin-token", "cookie"}),
+            ADMIN_COOKIE_NAME in request.cookies,
+        )
         raise HTTPException(status_code=401, detail="احراز هویت مدیر لازم است.")
 
 
