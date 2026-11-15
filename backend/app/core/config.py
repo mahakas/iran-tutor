@@ -46,6 +46,22 @@ class Settings(BaseSettings):
     admin_password: str = Field(default="123", min_length=1)
     admin_session_ttl_seconds: int = Field(default=43200, gt=0)
 
+    # Phase 6: Student SMS OTP authentication, plans, and payment providers
+    auth_secret: str | None = None
+    user_session_ttl_seconds: int = Field(default=2592000, gt=0)
+    otp_ttl_seconds: int = Field(default=180, gt=0)
+    otp_resend_seconds: int = Field(default=60, ge=0)
+    otp_max_attempts: int = Field(default=5, ge=1)
+    sms_provider: Literal["demo", "kavenegar", "sms_ir", "webhook"] = "demo"
+    sms_api_key: str | None = None
+    sms_sender: str | None = None
+    sms_template: str | None = None
+    sms_webhook_url: str | None = None
+    payment_provider: Literal["demo", "zarinpal"] = "demo"
+    zarinpal_merchant_id: str | None = None
+    zarinpal_sandbox: bool = False
+    public_app_url: str | None = None
+
     # Phase 2: textbook vector search. Use "pgvector" for Supabase PostgreSQL,
     # or "qdrant" for a Qdrant server.
     vector_backend: Literal["qdrant", "pgvector"] = "qdrant"

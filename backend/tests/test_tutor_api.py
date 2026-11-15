@@ -2,14 +2,32 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.api.dependencies import require_student
 from app.db.session import get_session
 from app.main import app
+from app.models.auth import User
 from app.models.curriculum import Book, Grade, Major
+
+
+def _fake_student() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="user-test-1",
+        phone_number="09123456789",
+        full_name="دانش‌آموز تست",
+        plan_code="trial",
+        plan_title="هدیه ثبت‌نام",
+        tokens_total=15000,
+        tokens_remaining=15000,
+        tokens_used_total=0,
+        plan_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        is_active=True,
+    )
 
 
 class FakeSession:
@@ -32,6 +50,7 @@ async def test_tutor_rejects_major_that_does_not_match_selected_book(monkeypatch
         raise AssertionError("must reject before retrieval")
 
     app.dependency_overrides[get_session] = fake_session
+    app.dependency_overrides[require_student] = _fake_student
     monkeypatch.setattr("app.api.tutor.answer_from_textbook", should_not_answer)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -64,6 +83,7 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
         return {"answer": "پاسخ مستند", "sources": [], "retrieved_count": 0}
 
     app.dependency_overrides[get_session] = fake_session
+    app.dependency_overrides[require_student] = _fake_student
     monkeypatch.setattr("app.api.tutor.answer_from_textbook", fake_answer)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -109,9 +129,19 @@ async def test_chat_sessions_roundtrip_crud(tmp_path):
             total_pdf_pages=1,
             status="ready",
         )
-        session.add(book)
+        user = User(
+            id="user-chat-1",
+            phone_number="09120000001",
+            plan_code="trial",
+            plan_title="هدیه ثبت‌نام",
+            tokens_total=15000,
+            tokens_remaining=15000,
+            plan_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        )
+        session.add_all([book, user])
         await session.commit()
         await session.refresh(book)
+        await session.refresh(user)
         book_id = book.id
 
     async def override_session():
@@ -119,6 +149,7 @@ async def test_chat_sessions_roundtrip_crud(tmp_path):
             yield session
 
     app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides[require_student] = lambda: user
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             create_resp = await client.post(

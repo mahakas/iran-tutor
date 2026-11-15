@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
 import random
 import re
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from openai import (
@@ -40,6 +44,62 @@ _audio_client: AsyncOpenAI | None = None
 _semaphore: asyncio.Semaphore | None = None
 # Models whose provider rejected `response_format=json_object`.
 _json_mode_unsupported: set[str] = set()
+
+
+@dataclass
+class UsageAccumulator:
+    """Thread/async-safe token usage collector for a single student API request."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def add(
+        self,
+        usage: dict[str, int | None] | None = None,
+        *,
+        fallback_prompt: int = 0,
+        fallback_completion: int = 0,
+    ) -> None:
+        prompt = int((usage or {}).get("prompt_tokens") or 0)
+        completion = int((usage or {}).get("completion_tokens") or 0)
+        total = int((usage or {}).get("total_tokens") or 0)
+        if prompt == 0 and completion == 0 and total == 0:
+            prompt = max(0, fallback_prompt)
+            completion = max(0, fallback_completion)
+            total = prompt + completion
+        elif total == 0:
+            total = prompt + completion
+        elif prompt == 0 and completion == 0:
+            prompt = total
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_tokens += total
+
+
+_current_usage: ContextVar[UsageAccumulator | None] = ContextVar("llm_usage", default=None)
+
+
+@contextmanager
+def track_token_usage() -> Iterator[UsageAccumulator]:
+    """Collect token usage across all LLM/vision/audio calls within this block."""
+    accumulator = UsageAccumulator()
+    token = _current_usage.set(accumulator)
+    try:
+        yield accumulator
+    finally:
+        _current_usage.reset(token)
+
+
+def record_token_usage(
+    usage: dict[str, int | None] | None = None,
+    *,
+    fallback_prompt: int = 0,
+    fallback_completion: int = 0,
+) -> None:
+    acc = _current_usage.get()
+    if acc is not None:
+        acc.add(usage, fallback_prompt=fallback_prompt, fallback_completion=fallback_completion)
 
 
 class InvalidJSONError(ValueError):
@@ -200,7 +260,10 @@ def _demo_questions(messages: list[dict[str, str]]) -> dict[str, Any]:
 async def complete_json(model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
     """Request structured JSON through the shared LLM wrapper with retries."""
     if get_settings().demo_mode:
-        return _demo_questions(messages)
+        demo = _demo_questions(messages)
+        count = len(demo.get("questions", []))
+        record_token_usage(fallback_prompt=220, fallback_completion=max(160, count * 160))
+        return demo
     for attempt in range(MAX_RETRIES + 1):
         try:
             json_messages = list(messages)
@@ -208,7 +271,11 @@ async def complete_json(model: str, messages: list[dict[str, str]]) -> dict[str,
             json_messages.insert(1 if json_messages and json_messages[0]["role"] == "system" else 0, guard)
             async with _get_semaphore():
                 content, _usage = await _complete(model, json_messages)
-            return extract_json(content)
+            parsed = extract_json(content)
+            prompt_est = max(50, sum(len(str(m.get("content", ""))) for m in json_messages) // 4)
+            completion_est = max(50, len(content or "") // 4)
+            record_token_usage(_usage, fallback_prompt=prompt_est, fallback_completion=completion_est)
+            return parsed
         except Exception as error:  # noqa: BLE001 - classified below
             if not _is_retryable(error) or attempt == MAX_RETRIES:
                 _log(
@@ -307,25 +374,30 @@ async def complete_text(model: str, messages: list[dict[str, str]]) -> str:
     if get_settings().demo_mode:
         prompt = messages[-1].get("content", "") if messages else ""
         if "شیب" in prompt and "نمودار" in prompt:
-            return (
+            reply = (
                 "**حالت نمایشی:** شیب نمودار مکان ـ زمان، سرعت را نشان می‌دهد. "
                 "برای محاسبه، تغییر مکان را بر تغییر زمان تقسیم می‌کنیم. "
                 "این پاسخ ثابتِ نمونه است و خروجی مدل هوش مصنوعی واقعی نیست."
             )
-        if "شتاب" in prompt:
-            return (
+        elif "شتاب" in prompt:
+            reply = (
                 "**حالت نمایشی:** شتاب متوسط برابر تغییر سرعت تقسیم بر بازهٔ زمانی است. "
                 "این پاسخ ثابتِ نمونه است و خروجی مدل هوش مصنوعی واقعی نیست."
             )
-        if "طراحی" in prompt or "سؤال" in prompt:
-            return (
+        elif "طراحی" in prompt or "سؤال" in prompt:
+            reply = (
                 "**حالت نمایشی:** درخواست به بک‌اند رسیده و پاسخ‌گویی مدل غیرفعال است. "
                 "برای پاسخ آموزشی واقعی، از تنظیمات provider استفاده کنید."
             )
-        return (
-            "**حالت نمایشی:** درخواست به بک‌اند رسیده و صفحات نمونهٔ کتاب بازیابی شدند. "
-            "این خروجی ثابت است؛ برای استفادهٔ آموزشی واقعی باید مدل زبانی را پیکربندی کنید."
-        )
+        else:
+            reply = (
+                "**حالت نمایشی:** درخواست به بک‌اند رسیده و صفحات نمونهٔ کتاب بازیابی شدند. "
+                "این خروجی ثابت است؛ برای استفادهٔ آموزشی واقعی باید مدل زبانی را پیکربندی کنید."
+            )
+        prompt_est = max(80, sum(len(str(m.get("content", ""))) for m in messages) // 4)
+        completion_est = max(60, len(reply) // 4)
+        record_token_usage(fallback_prompt=prompt_est, fallback_completion=completion_est)
+        return reply
     client = _get_client()
     for attempt in range(MAX_RETRIES + 1):
         started = time.perf_counter()
@@ -339,12 +411,16 @@ async def complete_text(model: str, messages: list[dict[str, str]]) -> str:
             content = response.choices[0].message.content
             if not content or not content.strip():
                 raise InvalidJSONError("empty model response")
+            usage = _usage_dict(response.usage)
+            prompt_est = max(50, sum(len(str(m.get("content", ""))) for m in messages) // 4)
+            completion_est = max(20, len(content.strip()) // 4)
+            record_token_usage(usage, fallback_prompt=prompt_est, fallback_completion=completion_est)
             _log(
                 logging.INFO,
                 "llm.complete_text.ok",
                 model=model,
                 latency_s=round(time.perf_counter() - started, 2),
-                **_usage_dict(response.usage),
+                **usage,
             )
             return content.strip()
         except Exception as error:  # noqa: BLE001 - classified below
@@ -392,6 +468,7 @@ async def transcribe_audio(
     if not audio_bytes:
         raise ValueError("audio file is empty")
     if settings.demo_mode:
+        record_token_usage(fallback_prompt=140, fallback_completion=40)
         return "شیب نمودار مکان ـ زمان چه مفهومی دارد؟ [رونوشت نمونه؛ نه تشخیص واقعی صدا]"
     transcription_model = model or settings.speech_to_text_model
     if not transcription_model:
@@ -407,6 +484,7 @@ async def transcribe_audio(
     text = getattr(response, "text", "")
     if not text or not text.strip():
         raise ValueError("audio transcription returned no text")
+    record_token_usage(fallback_prompt=max(100, len(audio_bytes) // 1024 * 12), fallback_completion=max(20, len(text) // 4))
     _log(logging.INFO, "llm.transcribe_audio.ok", model=transcription_model)
     return text.strip()
 
@@ -447,13 +525,15 @@ async def vision_json(
                 },
                 {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             )
+        demo_usage = {"prompt_tokens": 250, "completion_tokens": 110, "total_tokens": 360}
+        record_token_usage(demo_usage)
         return (
             {
                 "question_text": "نمودار مکان ـ زمان چه مفهومی دارد؟ [صورت سؤال ثابت نمایشی؛ تصویر واقعاً خوانده نشده]",
                 "visual_description": "تصویر در حالت نمایشی تحلیل نمی‌شود.",
                 "uncertain_parts": ["تشخیص بینایی واقعی در حالت نمایشی غیرفعال است"],
             },
-            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            demo_usage,
         )
     image_b64 = base64.b64encode(image_png_bytes).decode("ascii")
     messages: list[dict[str, Any]] = [
@@ -509,6 +589,7 @@ async def vision_json(
             json_mode=model not in _json_mode_unsupported,
             **usage,
         )
+        record_token_usage(usage, fallback_prompt=250, fallback_completion=max(60, len(json.dumps(parsed)) // 4))
         return parsed, usage
 
     raise RuntimeError("unreachable")  # pragma: no cover

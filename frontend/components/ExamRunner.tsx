@@ -5,7 +5,11 @@ import { AlertCircle, ArrowLeft, ArrowRight, Check, Clock3, LoaderCircle, Send }
 import MathContent from "@/components/MathContent";
 import type { Exam, ExamReport } from "@/lib/types";
 
-type Props = { exam: Exam; onExit: () => void };
+type Props = {
+  exam: Exam;
+  authHeaders?: Record<string, string>;
+  onExit: () => void;
+};
 
 function formatTime(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -24,7 +28,7 @@ function parseUtcMs(isoTimestamp: string): number {
   return Date.parse(hasTimezone ? isoTimestamp : `${isoTimestamp}Z`);
 }
 
-export default function ExamRunner({ exam, onExit }: Props) {
+export default function ExamRunner({ exam, authHeaders, onExit }: Props) {
   const [answers, setAnswers] = useState<Record<string, string>>(() => {
     const restored: Record<string, string> = {};
     for (const [key, value] of Object.entries(exam.submitted_answers ?? {})) {
@@ -61,7 +65,11 @@ export default function ExamRunner({ exam, onExit }: Props) {
     try {
       const response = await fetch(`/api/v1/exams/${exam.id}/submit`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authHeaders ?? {}),
+        },
         body: JSON.stringify({ answers }),
       });
       const payload = await response.json();
@@ -73,7 +81,7 @@ export default function ExamRunner({ exam, onExit }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [answers, exam.id, report]);
+  }, [answers, authHeaders, exam.id, report]);
 
   useEffect(() => {
     if (secondsLeft === 0 && !report && !sent.current && !autoSubmitted.current) {

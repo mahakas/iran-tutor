@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import BACKEND_DIR, get_settings
 from app.db.base import Base
 from app.db.session import async_session_factory, engine
+from app.models.auth import BillingSettings, Plan
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
 
 GRADE_TITLES: dict[int, str] = {
@@ -34,6 +35,67 @@ MAJORS: list[tuple[str, str]] = [
     ("experimental", "علوم تجربی"),
     ("humanities", "علوم انسانی"),
 ]
+
+DEFAULT_PLANS: list[dict[str, object]] = [
+    {
+        "code": "normal",
+        "name": "اقتصادی",
+        "description": "مناسب مرور روزانه درس‌ها و حل تمرین — ۵۰۰٬۰۰۰ تومان برای ۳۰ روز",
+        "price_toman": 500_000,
+        "token_quota": 500_000,
+        "duration_days": 30,
+        "sort_order": 1,
+    },
+    {
+        "code": "pro",
+        "name": "حرفه‌ای",
+        "description": "سهمیهٔ توکن بیشتر برای پرسش تصویری، صوتی و آزمون — ۹۰۰٬۰۰۰ تومان برای ۳۰ روز",
+        "price_toman": 900_000,
+        "token_quota": 1_200_000,
+        "duration_days": 30,
+        "sort_order": 2,
+    },
+    {
+        "code": "vip",
+        "name": "هوشمندانه",
+        "description": "بیشترین سهمیهٔ توکن برای آمادگی مستمر و کنکور — ۲٬۷۵۰٬۰۰۰ تومان برای ۹۰ روز",
+        "price_toman": 2_750_000,
+        "token_quota": 4_000_000,
+        "duration_days": 90,
+        "sort_order": 3,
+    },
+]
+
+
+async def seed_plans(session: AsyncSession) -> None:
+    existing = set((await session.scalars(select(Plan.code))).all())
+    for item in DEFAULT_PLANS:
+        if item["code"] not in existing:
+            session.add(
+                Plan(
+                    code=str(item["code"]),
+                    name=str(item["name"]),
+                    description=str(item["description"]),
+                    price_toman=int(item["price_toman"]),  # type: ignore[arg-type]
+                    token_quota=int(item["token_quota"]),  # type: ignore[arg-type]
+                    duration_days=int(item["duration_days"]),  # type: ignore[arg-type]
+                    sort_order=int(item["sort_order"]),  # type: ignore[arg-type]
+                    is_active=True,
+                )
+            )
+
+
+async def seed_billing_settings(session: AsyncSession) -> None:
+    existing = await session.get(BillingSettings, 1)
+    if existing is None:
+        session.add(
+            BillingSettings(
+                id=1,
+                token_price_per_1k_toman=1000,
+                starter_tokens=15_000,
+                starter_duration_days=7,
+            )
+        )
 
 
 async def seed_grades(session: AsyncSession) -> None:
@@ -160,6 +222,8 @@ async def seed_database() -> None:
     async with async_session_factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await seed_plans(session)
+        await seed_billing_settings(session)
         await session.flush()
         if settings.demo_mode:
             grade = await session.scalar(select(Grade).where(Grade.number == 12))

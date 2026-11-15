@@ -26,12 +26,88 @@ export type Source = {
   score?: number;
 };
 
+export type UsageInfo = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_toman: number;
+  tokens_remaining: number;
+};
+
+export type StudentUser = {
+  id: string;
+  phone_number: string;
+  masked_phone: string;
+  full_name: string | null;
+  plan_code: "trial" | "normal" | "pro" | "vip" | string;
+  plan_title: string;
+  tokens_total: number;
+  tokens_remaining: number;
+  tokens_used_total: number;
+  tokens_used_today: number;
+  used_value_toman: number;
+  plan_started_at: string | null;
+  plan_expires_at: string | null;
+  days_remaining: number;
+  is_expired: boolean;
+  is_active: boolean;
+  last_login_at: string | null;
+  created_at: string | null;
+};
+
+export type PlanItem = {
+  id: number;
+  code: string;
+  name: string;
+  description: string;
+  price_toman: number;
+  token_quota: number;
+  duration_days: number;
+  effective_toman_per_1k: number;
+  is_active: boolean;
+  sort_order: number;
+};
+
+export type PublicPlansPayload = {
+  plans: PlanItem[];
+  token_price_per_1k_toman: number;
+  starter_tokens: number;
+  starter_duration_days: number;
+  payment_mode: string;
+};
+
+export type TokenUsageLogItem = {
+  id: string;
+  action: string;
+  book_id: number | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_toman: number;
+  created_at: string | null;
+};
+
+export type PaymentTransactionItem = {
+  id: string;
+  plan_code: string;
+  plan_name: string;
+  amount_toman: number;
+  tokens_granted: number;
+  duration_days: number;
+  provider: string;
+  status: string;
+  ref_id: string | null;
+  created_at: string | null;
+  paid_at: string | null;
+};
+
 export type TutorResponse = {
   answer: string;
   sources: Source[];
   recognized_question?: string;
   transcript?: string;
   uncertain_parts?: string[];
+  usage?: UsageInfo;
 };
 
 export type ExamQuestion = {
@@ -55,6 +131,7 @@ export type Exam = {
   questions: ExamQuestion[];
   report_card?: ExamReport;
   submitted_answers?: Record<string, string | null>;
+  usage?: UsageInfo;
 };
 
 export type ExamSummary = {

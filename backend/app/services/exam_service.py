@@ -7,12 +7,14 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.llm_client import complete_json
+from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
 from app.models.exam import ExamSession, ExamStatus
-from app.services.retrieval_service import search_textbook
+from app.services.retrieval_service import page_embedding_text, search_textbook
 
 
 class GeneratedQuestion(BaseModel):
@@ -204,20 +206,58 @@ async def create_exam(
     time_limit_minutes: int,
     exam_type: Literal["konkoor", "final"],
     chapter_title: str | None = None,
+    user_id: str | None = None,
 ) -> ExamSession:
     if not 3 <= question_count <= 20:
         raise ValueError("question_count must be between 3 and 20")
     if not 5 <= time_limit_minutes <= 120:
         raise ValueError("time_limit_minutes must be between 5 and 120")
 
+    top_k = min(20, max(question_count, 8))
     query = f"مفاهیم، تعریف‌ها، فرمول‌ها و تمرین‌های فصل {chapter_title}" if chapter_title else "مفاهیم و فرمول‌های کلیدی کتاب"
     sources = await search_textbook(
         query,
         grade_number=grade_number,
         major_code=major_code,
         book_id=book_id,
-        top_k=min(20, max(question_count, 8)),
+        top_k=top_k,
     )
+    if not sources:
+        # Fallback for lexical/demo environments where generic query terms are absent from pages.
+        selected_major = major_code or "general"
+        stmt = (
+            select(BookPage, Book.title, Grade.number, func.coalesce(Major.code, "general"))
+            .join(Book, BookPage.book_id == Book.id)
+            .join(Grade, Book.grade_id == Grade.id)
+            .outerjoin(Major, Book.major_id == Major.id)
+            .where(
+                Book.id == book_id,
+                Grade.number == grade_number,
+                func.coalesce(Major.code, "general") == selected_major,
+                BookPage.status == PageStatus.done,
+            )
+            .order_by(BookPage.pdf_page_index.asc())
+            .limit(top_k)
+        )
+        if chapter_title and chapter_title.strip():
+            stmt = stmt.where(BookPage.chapter_title.ilike(f"%{chapter_title.strip()}%"))
+        rows = (await session.execute(stmt)).all()
+        sources = [
+            {
+                "book_id": page.book_id,
+                "book_title": book_title,
+                "grade_number": grade_num,
+                "major_code": maj_code,
+                "pdf_page_index": page.pdf_page_index,
+                "printed_page_number": page.printed_page_number,
+                "chapter_number": page.chapter_number,
+                "chapter_title": page.chapter_title,
+                "full_text": page_embedding_text(page.markdown_content, page.visual_elements),
+                "markdown_content": page.markdown_content,
+                "visual_elements": page.visual_elements or [],
+            }
+            for page, book_title, grade_num, maj_code in rows
+        ]
     if not sources:
         raise LookupError("no approved textbook pages found for the requested exam")
 
@@ -267,6 +307,7 @@ async def create_exam(
     now = datetime.now(timezone.utc)
     exam = ExamSession(
         book_id=book_id,
+        user_id=user_id,
         grade_number=grade_number,
         major_code=major_code or "general",
         title=f"آزمون {chapter_title or 'مروری'}",
