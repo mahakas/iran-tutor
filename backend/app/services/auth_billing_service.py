@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.seed import seed_billing_settings, seed_plans
-from app.models.auth import BillingSettings, Plan, TokenUsageLog, User
+from app.models.auth import BillingSettings, Plan, TokenUsageLog, User, UserSession
+from app.services.account_service import compose_full_name, normalize_preferences
 
 USER_COOKIE_NAME = "iran_tutor_user"
 
@@ -51,23 +52,29 @@ def _user_signing_key() -> bytes:
     return hashlib.sha256(f"iran-tutor-user-v1:{secret}".encode("utf-8")).digest()
 
 
-def create_user_session_token(user_id: str, *, ttl_seconds: int | None = None) -> str:
+def create_user_session_token(
+    user_id: str,
+    *,
+    ttl_seconds: int | None = None,
+    nonce: str | None = None,
+) -> str:
     settings = get_settings()
     ttl = ttl_seconds if ttl_seconds is not None else settings.user_session_ttl_seconds
     expires_at = int(datetime.now(timezone.utc).timestamp()) + ttl
-    nonce = secrets.token_hex(12)
-    payload = f"{user_id}.{expires_at}.{nonce}"
+    token_nonce = nonce or secrets.token_hex(12)
+    payload = f"{user_id}.{expires_at}.{token_nonce}"
     signature = hmac.new(_user_signing_key(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}.{signature}"
 
 
-def verify_user_session_token(token: str | None) -> str | None:
+def parse_user_session_token(token: str | None) -> tuple[str, str, int] | None:
     if not token or token.count(".") != 3:
         return None
     user_id, expires_raw, nonce, signature = token.split(".", 3)
     if not user_id or not expires_raw.isdigit() or not nonce or not signature:
         return None
-    if int(expires_raw) <= int(datetime.now(timezone.utc).timestamp()):
+    expires_ts = int(expires_raw)
+    if expires_ts <= int(datetime.now(timezone.utc).timestamp()):
         return None
     expected = hmac.new(
         _user_signing_key(),
@@ -76,7 +83,12 @@ def verify_user_session_token(token: str | None) -> str | None:
     ).hexdigest()
     if not hmac.compare_digest(signature, expected):
         return None
-    return user_id
+    return user_id, nonce, expires_ts
+
+
+def verify_user_session_token(token: str | None) -> str | None:
+    parsed = parse_user_session_token(token)
+    return parsed[0] if parsed is not None else None
 
 
 def hash_otp_code(otp_id: str, phone_number: str, code: str) -> str:
@@ -157,6 +169,7 @@ def serialize_plan(plan: Plan) -> dict[str, object]:
         "description": plan.description,
         "price_toman": plan.price_toman,
         "token_quota": plan.token_quota,
+        "storage_quota_bytes": int(getattr(plan, "storage_quota_bytes", 104_857_600) or 104_857_600),
         "duration_days": plan.duration_days,
         "effective_toman_per_1k": effective_per_1k,
         "is_active": bool(plan.is_active),
@@ -169,6 +182,7 @@ def serialize_user(
     *,
     today_tokens: int = 0,
     token_price_per_1k_toman: int = 1000,
+    storage_quota_bytes: int | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
     current = now or datetime.now(timezone.utc)
@@ -179,11 +193,26 @@ def serialize_user(
         if expires is not None and not expired
         else 0
     )
+    first_name = getattr(user, "first_name", None)
+    last_name = getattr(user, "last_name", None)
+    full_name = compose_full_name(first_name, last_name, getattr(user, "full_name", None))
+    avatar_path = getattr(user, "avatar_path", None)
+    has_avatar = bool(avatar_path)
     return {
         "id": user.id,
         "phone_number": user.phone_number,
         "masked_phone": mask_phone_number(user.phone_number),
-        "full_name": user.full_name,
+        "full_name": full_name,
+        "first_name": first_name,
+        "last_name": last_name,
+        "email": getattr(user, "email", None),
+        "role": getattr(user, "role", "student") or "student",
+        "has_avatar": has_avatar,
+        "avatar_url": f"/api/v1/account/profile/avatar?v={int(_utc(user.updated_at).timestamp()) if getattr(user, 'updated_at', None) else 1}"
+        if has_avatar
+        else None,
+        "preferences": normalize_preferences(getattr(user, "preferences", None)),
+        "storage_quota_bytes": storage_quota_bytes,
         "plan_code": user.plan_code,
         "plan_title": user.plan_title,
         "tokens_total": user.tokens_total,

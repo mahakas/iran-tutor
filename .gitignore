@@ -7,9 +7,9 @@
 # --- Source material and data (never commit) ---
 *.pdf
 *.PDF
-backend/storage/
-storage/
-data/
+/backend/storage/
+/storage/
+/data/
 *.sqlite3
 
 # --- Docker volumes / local service data ---

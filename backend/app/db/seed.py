@@ -43,6 +43,7 @@ DEFAULT_PLANS: list[dict[str, object]] = [
         "description": "مناسب مرور روزانه درس‌ها و حل تمرین — ۵۰۰٬۰۰۰ تومان برای ۳۰ روز",
         "price_toman": 500_000,
         "token_quota": 500_000,
+        "storage_quota_bytes": 100 * 1024 * 1024,
         "duration_days": 30,
         "sort_order": 1,
     },
@@ -52,6 +53,7 @@ DEFAULT_PLANS: list[dict[str, object]] = [
         "description": "سهمیهٔ توکن بیشتر برای پرسش تصویری، صوتی و آزمون — ۹۰۰٬۰۰۰ تومان برای ۳۰ روز",
         "price_toman": 900_000,
         "token_quota": 1_200_000,
+        "storage_quota_bytes": 250 * 1024 * 1024,
         "duration_days": 30,
         "sort_order": 2,
     },
@@ -61,6 +63,7 @@ DEFAULT_PLANS: list[dict[str, object]] = [
         "description": "بیشترین سهمیهٔ توکن برای آمادگی مستمر و کنکور — ۲٬۷۵۰٬۰۰۰ تومان برای ۹۰ روز",
         "price_toman": 2_750_000,
         "token_quota": 4_000_000,
+        "storage_quota_bytes": 1024 * 1024 * 1024,
         "duration_days": 90,
         "sort_order": 3,
     },
@@ -78,6 +81,7 @@ async def seed_plans(session: AsyncSession) -> None:
                     description=str(item["description"]),
                     price_toman=int(item["price_toman"]),  # type: ignore[arg-type]
                     token_quota=int(item["token_quota"]),  # type: ignore[arg-type]
+                    storage_quota_bytes=int(item["storage_quota_bytes"]),  # type: ignore[arg-type]
                     duration_days=int(item["duration_days"]),  # type: ignore[arg-type]
                     sort_order=int(item["sort_order"]),  # type: ignore[arg-type]
                     is_active=True,
@@ -94,6 +98,7 @@ async def seed_billing_settings(session: AsyncSession) -> None:
                 token_price_per_1k_toman=1000,
                 starter_tokens=15_000,
                 starter_duration_days=7,
+                starter_storage_bytes=25 * 1024 * 1024,
             )
         )
 

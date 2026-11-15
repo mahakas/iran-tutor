@@ -7,6 +7,8 @@ from app.models.auth import (  # noqa: F401
     Plan,
     TokenUsageLog,
     User,
+    UserFile,
+    UserSession,
 )
 from app.models.chat import ChatSession  # noqa: F401
 from app.models.curriculum import Book, BookPage, Grade, Major  # noqa: F401
@@ -25,4 +27,6 @@ __all__ = [
     "OtpCode",
     "PaymentTransaction",
     "TokenUsageLog",
+    "UserSession",
+    "UserFile",
 ]

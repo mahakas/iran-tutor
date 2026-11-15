@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,7 @@ from app.api.dependencies import require_student
 from app.core.config import get_settings
 from app.db.session import get_session
 from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User
+from app.services.account_service import get_user_storage_quota_bytes
 from app.services.auth_billing_service import (
     apply_plan_to_user,
     get_or_init_billing_settings,
@@ -131,6 +132,7 @@ async def checkout_plan(
                 user,
                 today_tokens=today_tokens,
                 token_price_per_1k_toman=billing.token_price_per_1k_toman,
+                storage_quota_bytes=int(getattr(plan, "storage_quota_bytes", 104_857_600) or 104_857_600),
                 now=now,
             ),
         }
@@ -165,6 +167,7 @@ async def _verify_transaction(
     billing = await get_or_init_billing_settings(session)
     if tx.status == "paid":
         today_tokens = await get_user_today_tokens(session, user.id)
+        storage_quota = await get_user_storage_quota_bytes(session, user, billing)
         return {
             "status": "paid",
             "transaction_id": tx.id,
@@ -173,6 +176,7 @@ async def _verify_transaction(
                 user,
                 today_tokens=today_tokens,
                 token_price_per_1k_toman=billing.token_price_per_1k_toman,
+                storage_quota_bytes=storage_quota,
             ),
         }
 
@@ -204,6 +208,7 @@ async def _verify_transaction(
     await session.commit()
     await session.refresh(user)
     today_tokens = await get_user_today_tokens(session, user.id)
+    storage_quota = await get_user_storage_quota_bytes(session, user, billing)
     return {
         "status": "paid",
         "transaction_id": tx.id,
@@ -212,6 +217,7 @@ async def _verify_transaction(
             user,
             today_tokens=today_tokens,
             token_price_per_1k_toman=billing.token_price_per_1k_toman,
+            storage_quota_bytes=storage_quota,
             now=now,
         ),
     }
@@ -251,12 +257,15 @@ async def verify_plan_payment_get(
 
 @router.get("/usage")
 async def get_my_usage(
+    response: Response,
     limit: int = Query(default=30, ge=1, le=100),
     user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
     billing = await get_or_init_billing_settings(session)
     today_tokens = await get_user_today_tokens(session, user.id)
+    storage_quota = await get_user_storage_quota_bytes(session, user, billing)
     logs = (
         await session.scalars(
             select(TokenUsageLog)
@@ -278,6 +287,7 @@ async def get_my_usage(
             user,
             today_tokens=today_tokens,
             token_price_per_1k_toman=billing.token_price_per_1k_toman,
+            storage_quota_bytes=storage_quota,
         ),
         "token_price_per_1k_toman": billing.token_price_per_1k_toman,
         "logs": [

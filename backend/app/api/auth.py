@@ -12,10 +12,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_optional_student, require_student
+from app.api.dependencies import extract_user_token, get_optional_student, require_student
 from app.core.config import get_settings
 from app.db.session import get_session
-from app.models.auth import OtpCode, User
+from app.models.auth import OtpCode, User, UserSession
+from app.services.account_service import get_user_storage_quota_bytes
 from app.services.auth_billing_service import (
     USER_COOKIE_NAME,
     apply_plan_to_user,
@@ -24,6 +25,7 @@ from app.services.auth_billing_service import (
     get_user_today_tokens,
     hash_otp_code,
     normalize_iranian_phone,
+    parse_user_session_token,
     serialize_user,
     verify_otp_hash,
 )
@@ -207,12 +209,30 @@ async def verify_otp(
             user.full_name = body.full_name.strip()
 
     user.last_login_at = now
+    await session.flush()
+
+    settings = get_settings()
+    token_nonce = secrets.token_hex(12)
+    token = create_user_session_token(user.id, nonce=token_nonce)
+    user_agent = (request.headers.get("user-agent") or "")[:512] or None
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    client_ip = (forwarded_for or (request.client.host if request.client else ""))[:64] or None
+    session.add(
+        UserSession(
+            user_id=user.id,
+            token_nonce=token_nonce,
+            user_agent=user_agent,
+            ip_address=client_ip,
+            last_seen_at=now,
+            expires_at=now + timedelta(seconds=settings.user_session_ttl_seconds),
+            created_at=now,
+        )
+    )
     await session.commit()
     await session.refresh(user)
 
-    settings = get_settings()
-    token = create_user_session_token(user.id)
     https = _is_https(request)
+    response.headers["Cache-Control"] = "no-store"
     response.set_cookie(
         key=USER_COOKIE_NAME,
         value=token,
@@ -223,6 +243,7 @@ async def verify_otp(
         path="/",
     )
     today_tokens = await get_user_today_tokens(session, user.id)
+    storage_quota = await get_user_storage_quota_bytes(session, user, billing)
     return {
         "authenticated": True,
         "is_new_user": is_new_user,
@@ -231,6 +252,7 @@ async def verify_otp(
             user,
             today_tokens=today_tokens,
             token_price_per_1k_toman=billing.token_price_per_1k_toman,
+            storage_quota_bytes=storage_quota,
             now=now,
         ),
     }
@@ -238,19 +260,23 @@ async def verify_otp(
 
 @router.get("/me")
 async def get_me(
+    response: Response,
     user: User | None = Depends(get_optional_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
     if user is None or not user.is_active:
         return {"authenticated": False, "user": None}
     billing = await get_or_init_billing_settings(session)
     today_tokens = await get_user_today_tokens(session, user.id)
+    storage_quota = await get_user_storage_quota_bytes(session, user, billing)
     return {
         "authenticated": True,
         "user": serialize_user(
             user,
             today_tokens=today_tokens,
             token_price_per_1k_toman=billing.token_price_per_1k_toman,
+            storage_quota_bytes=storage_quota,
         ),
     }
 
@@ -266,18 +292,40 @@ async def update_me(
     await session.refresh(user)
     billing = await get_or_init_billing_settings(session)
     today_tokens = await get_user_today_tokens(session, user.id)
+    storage_quota = await get_user_storage_quota_bytes(session, user, billing)
     return {
         "user": serialize_user(
             user,
             today_tokens=today_tokens,
             token_price_per_1k_toman=billing.token_price_per_1k_toman,
+            storage_quota_bytes=storage_quota,
         )
     }
 
 
 @router.post("/logout")
-async def logout(request: Request, response: Response) -> dict[str, bool]:
+async def logout(
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    token = extract_user_token(request)
+    parsed = parse_user_session_token(token)
+    if parsed is not None:
+        user_id, nonce, _ = parsed
+        session_row = await session.scalar(
+            select(UserSession).where(
+                UserSession.user_id == user_id,
+                UserSession.token_nonce == nonce,
+                UserSession.revoked_at.is_(None),
+            )
+        )
+        if session_row is not None:
+            session_row.revoked_at = datetime.now(timezone.utc)
+            await session.commit()
+
     https = _is_https(request)
+    response.headers["Cache-Control"] = "no-store"
     response.delete_cookie(
         key=USER_COOKIE_NAME,
         path="/",

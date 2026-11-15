@@ -22,6 +22,7 @@ from app.db.session import async_session_factory
 from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User
 from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
 from app.services.document_parser import detect_document_format, parse_structured_document
+from app.services.account_service import get_user_storage_quota_bytes
 from app.services.auth_billing_service import (
     apply_plan_to_user,
     calculate_token_cost_toman,
@@ -616,6 +617,7 @@ class BillingSettingsUpdateBody(BaseModel):
     token_price_per_1k_toman: int = Field(ge=1, le=100_000_000)
     starter_tokens: int = Field(ge=0, le=100_000_000)
     starter_duration_days: int = Field(ge=1, le=3650)
+    starter_storage_bytes: int | None = Field(default=None, ge=1_048_576, le=10_737_418_240)
 
 
 class PlanUpdateBody(BaseModel):
@@ -624,6 +626,7 @@ class PlanUpdateBody(BaseModel):
     price_toman: int | None = Field(default=None, ge=0, le=1_000_000_000)
     token_quota: int | None = Field(default=None, ge=1, le=1_000_000_000)
     duration_days: int | None = Field(default=None, ge=1, le=3650)
+    storage_quota_bytes: int | None = Field(default=None, ge=1_048_576, le=107_374_182_400)
     is_active: bool | None = None
 
 
@@ -648,6 +651,7 @@ async def get_admin_billing() -> dict[str, object]:
                 "token_price_per_1k_toman": billing.token_price_per_1k_toman,
                 "starter_tokens": billing.starter_tokens,
                 "starter_duration_days": billing.starter_duration_days,
+                "starter_storage_bytes": billing.starter_storage_bytes,
             },
             "plans": [serialize_plan(plan) for plan in plans],
         }
@@ -660,6 +664,8 @@ async def update_admin_billing_settings(body: BillingSettingsUpdateBody) -> dict
         billing.token_price_per_1k_toman = body.token_price_per_1k_toman
         billing.starter_tokens = body.starter_tokens
         billing.starter_duration_days = body.starter_duration_days
+        if body.starter_storage_bytes is not None:
+            billing.starter_storage_bytes = body.starter_storage_bytes
         await session.commit()
         await session.refresh(billing)
         return {
@@ -667,6 +673,7 @@ async def update_admin_billing_settings(body: BillingSettingsUpdateBody) -> dict
                 "token_price_per_1k_toman": billing.token_price_per_1k_toman,
                 "starter_tokens": billing.starter_tokens,
                 "starter_duration_days": billing.starter_duration_days,
+                "starter_storage_bytes": billing.starter_storage_bytes,
             }
         }
 
@@ -689,6 +696,8 @@ async def update_admin_plan(plan_code: str, body: PlanUpdateBody) -> dict[str, o
             plan.token_quota = body.token_quota
         if "duration_days" in fields and body.duration_days is not None:
             plan.duration_days = body.duration_days
+        if "storage_quota_bytes" in fields and body.storage_quota_bytes is not None:
+            plan.storage_quota_bytes = body.storage_quota_bytes
         if "is_active" in fields and body.is_active is not None:
             plan.is_active = body.is_active
         await session.commit()
@@ -744,6 +753,8 @@ async def list_admin_users(
             )
             or 0
         )
+        plans_list = await get_or_init_plans(session)
+        plan_storage = {p.code: int(p.storage_quota_bytes) for p in plans_list}
         await session.commit()
 
         return {
@@ -762,6 +773,11 @@ async def list_admin_users(
                     u,
                     today_tokens=today_by_user.get(u.id, 0),
                     token_price_per_1k_toman=billing.token_price_per_1k_toman,
+                    storage_quota_bytes=(
+                        int(billing.starter_storage_bytes)
+                        if u.plan_code == "trial"
+                        else plan_storage.get(u.plan_code, int(billing.starter_storage_bytes))
+                    ),
                 )
                 for u in users
             ],
@@ -851,11 +867,13 @@ async def update_admin_user(user_id: str, body: AdminUserUpdateBody) -> dict[str
         await session.commit()
         await session.refresh(user)
         today_tokens = await get_user_today_tokens(session, user.id)
+        storage_quota = await get_user_storage_quota_bytes(session, user, billing)
         return {
             "user": serialize_user(
                 user,
                 today_tokens=today_tokens,
                 token_price_per_1k_toman=billing.token_price_per_1k_toman,
+                storage_quota_bytes=storage_quota,
                 now=now,
             )
         }
@@ -934,11 +952,13 @@ async def get_admin_user_usage(
             )
         ).all()
 
+        storage_quota = await get_user_storage_quota_bytes(session, user, billing)
         return {
             "user": serialize_user(
                 user,
                 today_tokens=today_tokens,
                 token_price_per_1k_toman=billing.token_price_per_1k_toman,
+                storage_quota_bytes=storage_quota,
                 now=now,
             ),
             "token_price_per_1k_toman": billing.token_price_per_1k_toman,
