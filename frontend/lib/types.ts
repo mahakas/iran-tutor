@@ -39,6 +39,7 @@ export type UserPreferences = {
     code_font_size: number;
     reduce_motion: ReduceMotionMode;
     contrast: number;
+    diff_markers: boolean;
   };
   notifications: {
     email_updates: boolean;

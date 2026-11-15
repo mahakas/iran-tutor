@@ -42,6 +42,10 @@ class BillingSettings(Base):
     starter_storage_bytes: Mapped[int] = mapped_column(
         BigInteger, default=26_214_400, server_default="26214400", nullable=False
     )
+    _json_type = JSON().with_variant(JSONB, "postgresql")
+    admin_preferences: Mapped[dict] = mapped_column(
+        _json_type, default=dict, server_default="{}", nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

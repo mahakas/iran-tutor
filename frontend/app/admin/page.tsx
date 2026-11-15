@@ -15,18 +15,41 @@ import {
   EyeOff,
   FileText,
   FileUp,
+  GitCompareArrows,
   LoaderCircle,
   LockKeyhole,
   LogOut,
+  Monitor,
+  Moon,
+  Palette,
   RefreshCw,
   Save,
   Search,
   ShieldCheck,
   Sparkles,
+  Sun,
   Users,
   XCircle,
 } from "lucide-react";
-import type { PaymentTransactionItem, PlanItem, StudentUser, TokenUsageLogItem } from "@/lib/types";
+import AdminAppearancePanel, { type AdminPreferencesPatch } from "@/components/AdminAppearancePanel";
+import DiffViewer from "@/components/DiffViewer";
+import GlobalSearch, { type SearchItem } from "@/components/GlobalSearch";
+import { computeLineDiff } from "@/lib/diff";
+import {
+  applyPreferencesToDocument,
+  DEFAULT_PREFERENCES,
+  normalizePreferencesClient,
+  readCachedAdminPreferences,
+  resolveEffectiveColorMode,
+  writeCachedAdminPreferences,
+} from "@/lib/preferences";
+import type {
+  PaymentTransactionItem,
+  PlanItem,
+  StudentUser,
+  TokenUsageLogItem,
+  UserPreferences,
+} from "@/lib/types";
 
 type BookStatus = {
   id: number;
@@ -52,6 +75,7 @@ type AdminPageItem = {
   status: string;
   warnings: string[];
   markdown_content: string;
+  original_markdown_content?: string | null;
   visual_elements: VisualElement[];
   extraction_model: string | null;
   edited_by_human: boolean;
@@ -209,8 +233,13 @@ function formatFaDate(isoDate: string) {
 
 export default function AdminPage() {
   const [authState, setAuthState] = useState<"checking" | "locked" | "authenticated">("checking");
-  const [adminTab, setAdminTab] = useState<"books" | "plans" | "users">("books");
+  const [adminTab, setAdminTab] = useState<"books" | "plans" | "users" | "appearance">("books");
   const tokenRef = useRef<string | null>(null);
+  const [activeTokenState, setActiveTokenState] = useState<string | null>(null);
+  const pendingJumpPageRef = useRef<{ bookId: number; pageIndex: number } | null>(null);
+  const [adminPreferences, setAdminPreferences] = useState<UserPreferences>(DEFAULT_PREFERENCES);
+  const [systemIsDark, setSystemIsDark] = useState(false);
+  const [appearanceSaving, setAppearanceSaving] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -277,6 +306,8 @@ export default function AdminPage() {
   const [saveMessage, setSaveMessage] = useState("");
   const [saveError, setSaveError] = useState("");
   const [imageError, setImageError] = useState(false);
+  const [showReviewDiff, setShowReviewDiff] = useState(true);
+  const [diffBaseline, setDiffBaseline] = useState<"saved" | "original">("saved");
 
   const selectPageForEdit = useCallback((page: AdminPageItem | null) => {
     if (!page) {
@@ -304,6 +335,7 @@ export default function AdminPage() {
 
   const setActiveToken = useCallback((token: string | null) => {
     tokenRef.current = token;
+    setActiveTokenState(token);
     storeAdminToken(token);
   }, []);
 
@@ -317,7 +349,128 @@ export default function AdminPage() {
     setPreviewHtml("");
     setPreviewOpen(false);
     selectPageForEdit(null);
+    writeCachedAdminPreferences(null);
+    setAdminPreferences(DEFAULT_PREFERENCES);
   }, [selectPageForEdit, setActiveToken]);
+
+  const fetchAdminPreferences = useCallback(
+    async (tokenOverride?: string | null): Promise<UserPreferences | null> => {
+      const token = tokenOverride !== undefined ? tokenOverride : getActiveToken();
+      try {
+        const res = await fetch("/api/v1/admin/preferences", {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: buildAuthHeaders(token),
+        });
+        if (!res.ok) return null;
+        const payload = (await res.json()) as { preferences?: UserPreferences };
+        if (!payload.preferences) return null;
+        const normalized = normalizePreferencesClient(payload.preferences);
+        setAdminPreferences(normalized);
+        writeCachedAdminPreferences(normalized);
+        return normalized;
+      } catch {
+        return null;
+      }
+    },
+    [getActiveToken]
+  );
+
+  const patchAdminPreferences = useCallback(
+    async (patch: AdminPreferencesPatch) => {
+      const optimistic = normalizePreferencesClient({
+        general: { ...adminPreferences.general, ...(patch.general ?? {}) },
+        appearance: {
+          ...adminPreferences.appearance,
+          ...(patch.appearance ?? {}),
+          light: { ...adminPreferences.appearance.light, ...(patch.appearance?.light ?? {}) },
+          dark: { ...adminPreferences.appearance.dark, ...(patch.appearance?.dark ?? {}) },
+        },
+        notifications: adminPreferences.notifications,
+        privacy: adminPreferences.privacy,
+      });
+      setAdminPreferences(optimistic);
+      writeCachedAdminPreferences(optimistic);
+
+      const token = getActiveToken();
+      if (!token && authState !== "authenticated") return;
+      setAppearanceSaving(true);
+      try {
+        const res = await fetch("/api/v1/admin/preferences", {
+          method: "PUT",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", ...buildAuthHeaders(token) },
+          body: JSON.stringify(patch),
+        });
+        if (res.status === 401) {
+          lockAdminPanel();
+          throw new Error("نشست مدیریت منقضی شده است؛ لطفاً دوباره وارد شوید.");
+        }
+        const payload = (await res.json().catch(() => ({}))) as {
+          preferences?: UserPreferences;
+          detail?: string;
+        };
+        if (!res.ok || !payload.preferences) {
+          throw new Error(payload.detail ?? "ذخیره تنظیمات ظاهری انجام نشد.");
+        }
+        const normalized = normalizePreferencesClient(payload.preferences);
+        setAdminPreferences(normalized);
+        writeCachedAdminPreferences(normalized);
+      } finally {
+        setAppearanceSaving(false);
+      }
+    },
+    [adminPreferences, authState, getActiveToken, lockAdminPanel]
+  );
+
+  const resetAdminPreferences = useCallback(async () => {
+    const token = getActiveToken();
+    setAppearanceSaving(true);
+    try {
+      const res = await fetch("/api/v1/admin/preferences/reset", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...buildAuthHeaders(token) },
+        body: JSON.stringify({ section: "appearance" }),
+      });
+      if (res.status === 401) {
+        lockAdminPanel();
+        throw new Error("نشست مدیریت منقضی شده است.");
+      }
+      const payload = (await res.json().catch(() => ({}))) as {
+        preferences?: UserPreferences;
+        detail?: string;
+      };
+      if (!res.ok || !payload.preferences) {
+        throw new Error(payload.detail ?? "بازنشانی تنظیمات انجام نشد.");
+      }
+      const normalized = normalizePreferencesClient(payload.preferences);
+      setAdminPreferences(normalized);
+      writeCachedAdminPreferences(normalized);
+    } finally {
+      setAppearanceSaving(false);
+    }
+  }, [getActiveToken, lockAdminPanel]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = (event: MediaQueryListEvent) => setSystemIsDark(event.matches);
+    const timer = window.setTimeout(() => {
+      setSystemIsDark(mq.matches);
+      const cached = readCachedAdminPreferences();
+      if (cached) setAdminPreferences(cached);
+    }, 0);
+    mq.addEventListener?.("change", handler);
+    return () => {
+      window.clearTimeout(timer);
+      mq.removeEventListener?.("change", handler);
+    };
+  }, []);
+
+  useEffect(() => {
+    applyPreferencesToDocument(adminPreferences, systemIsDark);
+  }, [adminPreferences, systemIsDark]);
 
   const fetchBooks = useCallback(
     async (tokenOverride?: string | null): Promise<{ items: BookStatus[]; unauthorized: boolean }> => {
@@ -544,7 +697,11 @@ export default function AdminPage() {
           setAuthState("locked");
           return;
         }
-        const { items, unauthorized } = await fetchBooks(storedToken);
+        setActiveToken(storedToken);
+        const [{ items, unauthorized }] = await Promise.all([
+          fetchBooks(storedToken),
+          fetchAdminPreferences(storedToken),
+        ]);
         if (!active) return;
         if (unauthorized) {
           lockAdminPanel();
@@ -559,7 +716,7 @@ export default function AdminPage() {
     return () => {
       active = false;
     };
-  }, [fetchBooks, getActiveToken, lockAdminPanel, setActiveToken]);
+  }, [fetchAdminPreferences, fetchBooks, getActiveToken, lockAdminPanel, setActiveToken]);
 
   const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -585,7 +742,10 @@ export default function AdminPage() {
         throw new Error(payload.detail ?? "نام کاربری یا رمز عبور مدیر نادرست است.");
       }
       setActiveToken(payload.token);
-      const { items, unauthorized } = await fetchBooks(payload.token);
+      const [{ items, unauthorized }] = await Promise.all([
+        fetchBooks(payload.token),
+        fetchAdminPreferences(payload.token),
+      ]);
       if (unauthorized) {
         setActiveToken(null);
         throw new Error("نشست احراز هویت در مرورگر حفظ نشد؛ لطفاً صفحه را رفرش یا در تب جدید باز کنید.");
@@ -666,8 +826,16 @@ export default function AdminPage() {
         selectPageForEdit(null);
         return;
       }
+      const pending = pendingJumpPageRef.current;
+      const jumped =
+        pending && pending.bookId === activeBookId
+          ? items.find((item) => item.pdf_page_index === pending.pageIndex)
+          : undefined;
+      if (pending && pending.bookId === activeBookId) {
+        pendingJumpPageRef.current = null;
+      }
       const firstNeedsReview = items.find((item) => item.status === "needs_review" || item.status === "failed");
-      selectPageForEdit(firstNeedsReview ?? items[0]);
+      selectPageForEdit(jumped ?? firstNeedsReview ?? items[0]);
     });
 
     return () => {
@@ -678,6 +846,125 @@ export default function AdminPage() {
   const selectedPage = useMemo(
     () => pages.find((item) => item.pdf_page_index === selectedIdx) ?? null,
     [pages, selectedIdx]
+  );
+
+  const effectiveAdminColorMode = resolveEffectiveColorMode(adminPreferences, systemIsDark);
+  const diffMarkersEnabled = adminPreferences.appearance.diff_markers !== false;
+  const hasOriginalSnapshot = Boolean(
+    selectedPage &&
+      selectedPage.original_markdown_content !== null &&
+      selectedPage.original_markdown_content !== undefined
+  );
+  const effectiveDiffBaseline =
+    diffBaseline === "original" && hasOriginalSnapshot ? "original" : "saved";
+  const diffBeforeMarkdown = useMemo(() => {
+    if (!selectedPage) return "";
+    if (effectiveDiffBaseline === "original") {
+      return selectedPage.original_markdown_content ?? selectedPage.markdown_content ?? "";
+    }
+    return selectedPage.markdown_content ?? "";
+  }, [effectiveDiffBaseline, selectedPage]);
+  const liveMarkdownDiff = useMemo(
+    () => computeLineDiff(diffBeforeMarkdown, editMarkdown),
+    [diffBeforeMarkdown, editMarkdown]
+  );
+
+  const cycleQuickColorMode = () => {
+    const current = adminPreferences.appearance.color_mode;
+    const next = current === "light" ? "dark" : current === "dark" ? "system" : "light";
+    void patchAdminPreferences({ appearance: { color_mode: next } }).catch(() => undefined);
+  };
+
+  const handleAdminJumpBook = useCallback(
+    (targetBookId: number, pageIndex?: number) => {
+      setAdminTab("books");
+      const targetBook = books.find((b) => b.id === targetBookId);
+      if (book?.id === targetBookId) {
+        if (pageIndex !== undefined) {
+          const targetPage = pages.find((p) => p.pdf_page_index === pageIndex);
+          if (targetPage) selectPageForEdit(targetPage);
+        }
+        return;
+      }
+      if (pageIndex !== undefined) {
+        pendingJumpPageRef.current = { bookId: targetBookId, pageIndex };
+      }
+      if (targetBook) {
+        setBook(targetBook);
+        setPages([]);
+        setPagesLoading(targetBook.status !== "ingesting");
+      } else {
+        void fetchBooks().then(({ items }) => {
+          setBooks(items);
+          const match = items.find((b) => b.id === targetBookId) ?? null;
+          if (match) {
+            setBook(match);
+            setPages([]);
+            setPagesLoading(match.status !== "ingesting");
+          }
+        });
+      }
+    },
+    [book?.id, books, fetchBooks, pages, selectPageForEdit]
+  );
+
+  const handleAdminJumpUser = useCallback(
+    (userId: string) => {
+      setAdminTab("users");
+      void fetchUsersData();
+      void fetchBillingData();
+      void fetchUserUsageReport(userId);
+    },
+    [fetchBillingData, fetchUserUsageReport, fetchUsersData]
+  );
+
+  const adminQuickCommands = useMemo<SearchItem[]>(
+    () => [
+      {
+        id: "cmd-books",
+        category: "commands",
+        title: "کتاب‌ها و پردازش PDF / Markdown",
+        subtitle: "آپلود کتاب جدید، بررسی وضعیت و بازبینی صفحه‌ها",
+        badge: "تب",
+        icon: "book",
+        onSelect: () => setAdminTab("books"),
+      },
+      {
+        id: "cmd-plans",
+        category: "commands",
+        title: "مدیریت پلن‌ها و قیمت توکن",
+        subtitle: "ویرایش تعرفه پلن‌ها و هدیه ثبت‌نام",
+        badge: "تب",
+        icon: "plan",
+        onSelect: () => {
+          setAdminTab("plans");
+          void fetchBillingData();
+        },
+      },
+      {
+        id: "cmd-users",
+        category: "commands",
+        title: "مدیریت کاربران و سهمیه‌ها",
+        subtitle: "لیست کاربران، گزارش مصرف و شارژ دستی",
+        badge: "تب",
+        icon: "user",
+        onSelect: () => {
+          setAdminTab("users");
+          void fetchUsersData();
+          void fetchBillingData();
+        },
+      },
+      {
+        id: "cmd-appearance",
+        category: "commands",
+        title: "تنظیمات ظاهر، تم، فونت و Diff Markers",
+        subtitle: "حالت روشن/تاریک/سیستم، رنگ‌بندی، کنتراست و دسترس‌پذیری",
+        badge: "ظاهر",
+        icon: "appearance",
+        onSelect: () => setAdminTab("appearance"),
+      },
+    ],
+    [fetchBillingData, fetchUsersData]
   );
 
   const selectedImageUrl = selectedPage?.image_url ?? null;
@@ -1096,12 +1383,55 @@ export default function AdminPage() {
           </div>
         </div>
         <div className="admin-topbar-actions">
+          <button
+            type="button"
+            className="admin-theme-chip"
+            onClick={cycleQuickColorMode}
+            title="تغییر سریع حالت رنگ (روشن / تاریک / سیستم)"
+            aria-label="تغییر سریع حالت رنگ"
+          >
+            {adminPreferences.appearance.color_mode === "system" ? (
+              <Monitor size={15} />
+            ) : effectiveAdminColorMode === "dark" ? (
+              <Moon size={15} />
+            ) : (
+              <Sun size={15} />
+            )}
+            <span>
+              {adminPreferences.appearance.color_mode === "system"
+                ? "سیستم"
+                : effectiveAdminColorMode === "dark"
+                ? "تاریک"
+                : "روشن"}
+            </span>
+          </button>
+          <button
+            type="button"
+            className={`admin-theme-chip ${adminTab === "appearance" ? "active" : ""}`}
+            onClick={() => setAdminTab("appearance")}
+            title="تنظیمات ظاهر و دسترس‌پذیری"
+          >
+            <Palette size={15} />
+            <span>ظاهر</span>
+          </button>
           <Link className="back-link" href="/">
             <ArrowRight size={17} /> مشاهدهٔ سایت
           </Link>
           <button type="button" className="admin-logout-btn" onClick={() => void handleLogout()}>
             <LogOut size={15} /> خروج
           </button>
+          <GlobalSearch
+            mode="admin"
+            authToken={activeTokenState}
+            isAuthenticated
+            quickCommands={adminQuickCommands}
+            onAdminSelectBook={handleAdminJumpBook}
+            onAdminSelectUser={handleAdminJumpUser}
+            onAdminSelectPlan={() => {
+              setAdminTab("plans");
+              void fetchBillingData();
+            }}
+          />
         </div>
       </header>
       <div className="admin-content">
@@ -1113,18 +1443,30 @@ export default function AdminPage() {
                 ? "افزودن و بازبینی کتاب درسی"
                 : adminTab === "plans"
                 ? "مدیریت قیمت توکن و پلن‌ها"
-                : "مدیریت کاربران و سهمیه‌ها"}
+                : adminTab === "users"
+                ? "مدیریت کاربران و سهمیه‌ها"
+                : "ظاهر، تم و دسترس‌پذیری پنل مدیریت"}
             </h1>
             <p>
               {adminTab === "books"
                 ? "کتاب را وارد کن، چند صفحه را آزمایشی پردازش کن، خروجی را با PDF بسنج و صفحه‌ها را تأیید کن."
                 : adminTab === "plans"
                 ? "قیمت پایهٔ توکن، سهمیهٔ هر پلن، مدت اعتبار (روز) و مبلغ پلن‌های اقتصادی، حرفه‌ای و هوشمندانه را تنظیم کنید."
-                : "وضعیت کاربران ثبت‌نامی، میزان مصرف توکن، پلن فعال و شارژ حساب‌ها را مدیریت کنید."}
+                : adminTab === "users"
+                ? "وضعیت کاربران ثبت‌نامی، میزان مصرف توکن، پلن فعال و شارژ حساب‌ها را مدیریت کنید."
+                : "حالت روشن/تاریک/سیستم، رنگ‌های مستقل، فونت UI و کد، کنتراست و نشانگرهای Diff را تنظیم کنید."}
             </p>
           </div>
           <div className="admin-heading-mark">
-            {adminTab === "books" ? <BookOpen size={25} /> : adminTab === "plans" ? <Crown size={25} /> : <Users size={25} />}
+            {adminTab === "books" ? (
+              <BookOpen size={25} />
+            ) : adminTab === "plans" ? (
+              <Crown size={25} />
+            ) : adminTab === "users" ? (
+              <Users size={25} />
+            ) : (
+              <Palette size={25} />
+            )}
           </div>
         </div>
 
@@ -1157,6 +1499,13 @@ export default function AdminPage() {
           >
             <Users size={16} /> کاربران و سهمیه‌ها
           </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "appearance" ? "active" : ""}`}
+            onClick={() => setAdminTab("appearance")}
+          >
+            <Palette size={16} /> ظاهر و دسترس‌پذیری
+          </button>
         </nav>
 
         <div className="admin-warning admin-protected-note">
@@ -1165,6 +1514,16 @@ export default function AdminPage() {
             <b>دسترسی محافظت‌شده با رمز عبور</b> · مسیر /admin از محیط دانش‌آموز جدا شده است. پیش از انتشار نهایی، مقدار ADMIN_PASSWORD را به رمز قوی تغییر دهید.
           </span>
         </div>
+
+        {adminTab === "appearance" && (
+          <AdminAppearancePanel
+            preferences={adminPreferences}
+            systemIsDark={systemIsDark}
+            saving={appearanceSaving}
+            onPatchPreferences={patchAdminPreferences}
+            onResetPreferences={resetAdminPreferences}
+          />
+        )}
 
         {adminTab === "plans" && (
           <div className="admin-billing-stack">
@@ -2079,7 +2438,14 @@ export default function AdminPage() {
 
                       <div className="form-row">
                         <label className="form-field">
-                          <span>شمارهٔ صفحهٔ چاپی</span>
+                          <span className="field-label-with-diff">
+                            شمارهٔ صفحهٔ چاپی
+                            {diffMarkersEnabled &&
+                              editPrintedPage !==
+                                (selectedPage.printed_page_number !== null
+                                  ? String(selectedPage.printed_page_number)
+                                  : "") && <span className="diff-field-badge">~ تغییریافته</span>}
+                          </span>
                           <input
                             type="number"
                             min={0}
@@ -2089,7 +2455,14 @@ export default function AdminPage() {
                           />
                         </label>
                         <label className="form-field">
-                          <span>شمارهٔ فصل</span>
+                          <span className="field-label-with-diff">
+                            شمارهٔ فصل
+                            {diffMarkersEnabled &&
+                              editChapterNumber !==
+                                (selectedPage.chapter_number !== null
+                                  ? String(selectedPage.chapter_number)
+                                  : "") && <span className="diff-field-badge">~ تغییریافته</span>}
+                          </span>
                           <input
                             type="number"
                             min={0}
@@ -2101,13 +2474,61 @@ export default function AdminPage() {
                       </div>
 
                       <label className="form-field">
-                        <span>عنوان فصل</span>
+                        <span className="field-label-with-diff">
+                          عنوان فصل
+                          {diffMarkersEnabled &&
+                            editChapterTitle !== (selectedPage.chapter_title ?? "") && (
+                              <span className="diff-field-badge">~ تغییریافته</span>
+                            )}
+                        </span>
                         <input
                           placeholder="مثلاً حرکت بر خط راست"
                           value={editChapterTitle}
                           onChange={(event) => setEditChapterTitle(event.target.value)}
                         />
                       </label>
+
+                      <div className="review-diff-toolbar">
+                        <div className="review-diff-status">
+                          <GitCompareArrows size={15} />
+                          <span>نمای تغییرات متن (Diff Markers)</span>
+                          {liveMarkdownDiff.hasChanges ? (
+                            <span className="diff-pill-group">
+                              <span className="diff-pill added">+{liveMarkdownDiff.addedCount}</span>
+                              <span className="diff-pill removed">-{liveMarkdownDiff.removedCount}</span>
+                            </span>
+                          ) : (
+                            <span className="diff-pill neutral">بدون تغییر</span>
+                          )}
+                        </div>
+                        <div className="review-diff-actions">
+                          {hasOriginalSnapshot && (
+                            <div className="segmented-control" role="group" aria-label="مبنای مقایسه Diff">
+                              <button
+                                type="button"
+                                className={effectiveDiffBaseline === "saved" ? "active" : ""}
+                                onClick={() => setDiffBaseline("saved")}
+                              >
+                                نسخه فعلی
+                              </button>
+                              <button
+                                type="button"
+                                className={effectiveDiffBaseline === "original" ? "active" : ""}
+                                onClick={() => setDiffBaseline("original")}
+                              >
+                                استخراج اولیه
+                              </button>
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            className="outline-button"
+                            onClick={() => setShowReviewDiff((prev) => !prev)}
+                          >
+                            {showReviewDiff ? "بستن Diff" : "نمایش Diff"}
+                          </button>
+                        </div>
+                      </div>
 
                       <label className="form-field">
                         <span>متن مارک‌داون و LaTeX صفحه</span>
@@ -2118,6 +2539,20 @@ export default function AdminPage() {
                           onChange={(event) => setEditMarkdown(event.target.value)}
                         />
                       </label>
+
+                      {showReviewDiff && (
+                        <DiffViewer
+                          beforeText={diffBeforeMarkdown}
+                          afterText={editMarkdown}
+                          diffMarkersEnabled={diffMarkersEnabled}
+                          codeFontSize={adminPreferences.appearance.code_font_size}
+                          title={
+                            effectiveDiffBaseline === "original"
+                              ? "مقایسه با نسخه استخراج اولیه"
+                              : "تغییرات پیش‌نویس نسبت به نسخه ذخیره‌شده"
+                          }
+                        />
+                      )}
 
                       {selectedPage.visual_elements.length > 0 && (
                         <div className="review-visuals">

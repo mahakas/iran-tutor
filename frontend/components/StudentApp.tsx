@@ -34,6 +34,7 @@ import AccountAvatar from "@/components/AccountAvatar";
 import AccountMenu from "@/components/AccountMenu";
 import { buildUserAuthHeaders, useAppContext } from "@/components/AppProvider";
 import ExamRunner from "@/components/ExamRunner";
+import GlobalSearch, { type SearchItem } from "@/components/GlobalSearch";
 import MathContent from "@/components/MathContent";
 import ThemedSelect from "@/components/ThemedSelect";
 import { formatDateTime, formatNumber } from "@/lib/i18n";
@@ -554,37 +555,40 @@ export default function StudentApp() {
     tutoringMode,
   ]);
 
-  const openChatSession = async (sessionId: string) => {
-    const token = getActiveToken();
-    if (!token) {
-      openLoginModal();
-      return;
-    }
-    setMessageError("");
-    try {
-      const response = await authFetch(`/api/v1/tutor/sessions/${sessionId}`);
-      if (!response.ok) {
-        throw new Error(lang === "en" ? "Conversation not found" : "گفت‌وگو پیدا نشد");
+  const openChatSession = useCallback(
+    async (sessionId: string) => {
+      const token = getActiveToken();
+      if (!token) {
+        openLoginModal();
+        return;
       }
-      const detail = (await response.json()) as ChatSessionDetail;
-      setGradeNumber(detail.grade_number);
-      setMajorCode(detail.major_code === "general" ? "" : detail.major_code);
-      setBookId(String(detail.book_id));
-      setTutoringMode(detail.mode);
-      setMessages(detail.messages ?? []);
-      setActiveChatId(detail.id);
-      clearAttachments();
-      setSidebarOpen(false);
-    } catch (error) {
-      setMessageError(
-        error instanceof Error
-          ? error.message
-          : lang === "en"
-          ? "Could not open chat"
-          : "بازکردن گفت‌وگو انجام نشد"
-      );
-    }
-  };
+      setMessageError("");
+      try {
+        const response = await authFetch(`/api/v1/tutor/sessions/${sessionId}`);
+        if (!response.ok) {
+          throw new Error(lang === "en" ? "Conversation not found" : "گفت‌وگو پیدا نشد");
+        }
+        const detail = (await response.json()) as ChatSessionDetail;
+        setGradeNumber(detail.grade_number);
+        setMajorCode(detail.major_code === "general" ? "" : detail.major_code);
+        setBookId(String(detail.book_id));
+        setTutoringMode(detail.mode);
+        setMessages(detail.messages ?? []);
+        setActiveChatId(detail.id);
+        clearAttachments();
+        setSidebarOpen(false);
+      } catch (error) {
+        setMessageError(
+          error instanceof Error
+            ? error.message
+            : lang === "en"
+            ? "Could not open chat"
+            : "بازکردن گفت‌وگو انجام نشد"
+        );
+      }
+    },
+    [authFetch, clearAttachments, getActiveToken, lang, openLoginModal]
+  );
 
   const deleteChatSession = async (sessionId: string) => {
     const token = getActiveToken();
@@ -603,7 +607,7 @@ export default function StudentApp() {
     }
   };
 
-  const openExamHistory = async () => {
+  const openExamHistory = useCallback(async () => {
     const token = getActiveToken();
     if (!currentUser || !token) {
       setSidebarOpen(false);
@@ -619,41 +623,44 @@ export default function StudentApp() {
     setHistoryLoading(true);
     await loadExamHistory(token);
     setHistoryLoading(false);
-  };
+  }, [currentUser, getActiveToken, lang, loadExamHistory, openLoginModal]);
 
-  const openSavedExam = async (examId: string) => {
-    const token = getActiveToken();
-    if (!token) {
-      openLoginModal();
-      return;
-    }
-    setBusy(true);
-    setMessageError("");
-    try {
-      const response = await authFetch(`/api/v1/exams/${examId}`);
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(
-          errorMessage(
-            payload,
-            lang === "en" ? "Failed to open exam" : "دریافت آزمون انجام نشد"
-          )
-        );
+  const openSavedExam = useCallback(
+    async (examId: string) => {
+      const token = getActiveToken();
+      if (!token) {
+        openLoginModal();
+        return;
       }
-      setActiveExam(payload as Exam);
-      setExamHistoryOpen(false);
-    } catch (error) {
-      setMessageError(
-        error instanceof Error
-          ? error.message
-          : lang === "en"
-          ? "Failed to load exam"
-          : "دریافت آزمون انجام نشد"
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
+      setBusy(true);
+      setMessageError("");
+      try {
+        const response = await authFetch(`/api/v1/exams/${examId}`);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(
+            errorMessage(
+              payload,
+              lang === "en" ? "Failed to open exam" : "دریافت آزمون انجام نشد"
+            )
+          );
+        }
+        setActiveExam(payload as Exam);
+        setExamHistoryOpen(false);
+      } catch (error) {
+        setMessageError(
+          error instanceof Error
+            ? error.message
+            : lang === "en"
+            ? "Failed to load exam"
+            : "دریافت آزمون انجام نشد"
+        );
+      } finally {
+        setBusy(false);
+      }
+    },
+    [authFetch, getActiveToken, lang, openLoginModal]
+  );
 
   const startRecording = async () => {
     if (recording) {
@@ -805,6 +812,170 @@ export default function StudentApp() {
   const visibleChatHistory = currentUser ? chatHistory : [];
   const visibleExamHistory = currentUser ? examHistory : [];
   const visibleActiveExam = currentUser ? activeExam : null;
+
+  const handledDeepLinkRef = useRef(false);
+  useEffect(() => {
+    if (typeof window === "undefined" || handledDeepLinkRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const jumpBookId = params.get("bookId");
+    const jumpGrade = params.get("grade");
+    const jumpMajor = params.get("major");
+    const jumpTopic = params.get("topic");
+    const jumpChatId = params.get("chatId");
+    const jumpExamId = params.get("examId");
+    const jumpAction = params.get("action");
+
+    if (jumpBookId && jumpGrade) {
+      handledDeepLinkRef.current = true;
+      const timer = window.setTimeout(() => {
+        setActiveExam(null);
+        setGradeNumber(Number(jumpGrade));
+        setMajorCode(jumpMajor ?? "");
+        setBookId(jumpBookId);
+        if (jumpTopic) {
+          setDraft(
+            lang === "en"
+              ? `Explain "${jumpTopic}" from this textbook clearly.`
+              : `لطفاً مبحث «${jumpTopic}» از این کتاب را توضیح بده.`
+          );
+        }
+        router.replace("/");
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    if (jumpChatId && currentUser) {
+      handledDeepLinkRef.current = true;
+      const timer = window.setTimeout(() => {
+        setActiveExam(null);
+        void openChatSession(jumpChatId);
+        router.replace("/");
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    if (jumpExamId && currentUser) {
+      handledDeepLinkRef.current = true;
+      const timer = window.setTimeout(() => {
+        void openSavedExam(jumpExamId);
+        router.replace("/");
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    if (jumpAction === "new-exam") {
+      handledDeepLinkRef.current = true;
+      const timer = window.setTimeout(() => {
+        setActiveExam(null);
+        setExamSetupOpen(true);
+        router.replace("/");
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    if (jumpAction === "exams" && currentUser) {
+      handledDeepLinkRef.current = true;
+      const timer = window.setTimeout(() => {
+        setActiveExam(null);
+        void openExamHistory();
+        router.replace("/");
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    if (jumpAction === "new-chat") {
+      handledDeepLinkRef.current = true;
+      const timer = window.setTimeout(() => {
+        setActiveExam(null);
+        resetChat();
+        router.replace("/");
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, [currentUser, lang, openChatSession, openExamHistory, openSavedExam, resetChat, router]);
+
+  const studentQuickCommands = useMemo<SearchItem[]>(
+    () => [
+      {
+        id: "st-cmd-new-chat",
+        category: "chats",
+        title: lang === "en" ? "Start New Tutor Chat" : "شروع گفت‌وگوی تازه با معلم",
+        subtitle: "Ctrl + K",
+        badge: lang === "en" ? "New chat" : "گفت‌وگوی تازه",
+        icon: "chat",
+        onSelect: () => {
+          setActiveExam(null);
+          resetChat();
+        },
+      },
+      {
+        id: "st-cmd-new-exam",
+        category: "exams",
+        title: lang === "en" ? "Create New Timed Exam" : "ساخت آزمون زمان‌دار جدید",
+        subtitle: lang === "en" ? "Generate questions from textbook" : "طراحی آزمون از صفحه‌های تأییدشده کتاب",
+        badge: lang === "en" ? "New exam" : "آزمون جدید",
+        icon: "exam",
+        onSelect: () => {
+          setActiveExam(null);
+          setExamHistoryOpen(false);
+          setExamSetupOpen(true);
+        },
+      },
+      {
+        id: "st-cmd-exam-history",
+        category: "exams",
+        title: lang === "en" ? "My Exam History & Reports" : "آزمون‌های من و کارنامه‌ها",
+        subtitle: lang === "en" ? "Open past exams and scorecards" : "مشاهده آزمون‌های قبلی و کارنامه",
+        badge: lang === "en" ? "Archive" : "آرشیو",
+        icon: "exam",
+        onSelect: () => {
+          setActiveExam(null);
+          void openExamHistory();
+        },
+      },
+      {
+        id: "st-cmd-storage",
+        category: "files",
+        title: lang === "en" ? "Storage & Uploaded Files" : "مدیریت حافظه و فایل‌های شخصی",
+        subtitle: lang === "en" ? "Inspect quota and attachments" : "مشاهده فایل‌ها، تصاویر و صوت‌های آپلودشده",
+        badge: lang === "en" ? "Storage" : "حافظه",
+        icon: "file",
+        onSelect: () => router.push("/account/settings/storage"),
+      },
+      {
+        id: "st-cmd-appearance",
+        category: "commands",
+        title: lang === "en" ? "Appearance & Theme Settings" : "تنظیمات ظاهر، تم و فونت",
+        subtitle: lang === "en" ? "Light/Dark mode, colors, contrast" : "حالت روشن/تاریک، رنگ‌ها و کنتراست",
+        badge: lang === "en" ? "Settings" : "تنظیمات",
+        icon: "appearance",
+        onSelect: () => router.push("/account/settings/appearance"),
+      },
+      {
+        id: "st-cmd-upgrade",
+        category: "commands",
+        title: lang === "en" ? "Plans & Token Balance" : "ارتقای پلن و موجودی توکن",
+        subtitle: lang === "en" ? "Compare plans & usage history" : "مقایسه پلن‌ها و گزارش مصرف",
+        badge: lang === "en" ? "Billing" : "اشتراک",
+        icon: "plan",
+        onSelect: () => router.push("/account/upgrade"),
+      },
+      {
+        id: "st-cmd-profile",
+        category: "commands",
+        title: lang === "en" ? "User Profile & Phone" : "پروفایل کاربری و تغییر شماره",
+        subtitle: lang === "en" ? "Name, email, avatar & phone OTP" : "نام، ایمیل، تصویر پروفایل",
+        badge: lang === "en" ? "Account" : "حساب",
+        icon: "nav",
+        onSelect: () => router.push("/account/profile"),
+      },
+      {
+        id: "st-cmd-help",
+        category: "commands",
+        title: lang === "en" ? "Help & Keyboard Shortcuts" : "راهنما و کلیدهای میانبر",
+        subtitle: lang === "en" ? "Documentation and FAQ" : "پرسش‌های متداول و مستندات",
+        badge: lang === "en" ? "Help" : "راهنما",
+        icon: "help",
+        onSelect: () => router.push("/account/help"),
+      },
+    ],
+    [lang, openExamHistory, resetChat, router]
+  );
 
   const examAuthHeaders = useMemo(() => buildUserAuthHeaders(userTokenState), [userTokenState]);
 
@@ -1010,6 +1181,39 @@ export default function StudentApp() {
             >
               <CircleHelp size={18} />
             </Link>
+            <GlobalSearch
+              mode="student"
+              lang={lang}
+              authToken={userTokenState}
+              isAuthenticated={Boolean(currentUser)}
+              quickCommands={studentQuickCommands}
+              onStudentSelectBook={({ bookId: nextBookId, gradeNumber: nextGrade, majorCode: nextMajor, topicTitle }) => {
+                setActiveExam(null);
+                setExamHistoryOpen(false);
+                setExamSetupOpen(false);
+                setGradeNumber(nextGrade);
+                setMajorCode(nextMajor);
+                setBookId(String(nextBookId));
+                setMessages([]);
+                setActiveChatId(null);
+                setMessageError("");
+                if (topicTitle) {
+                  setDraft(
+                    lang === "en"
+                      ? `Explain "${topicTitle}" from this textbook clearly.`
+                      : `لطفاً مبحث «${topicTitle}» از این کتاب را توضیح بده.`
+                  );
+                }
+                window.setTimeout(() => inputRef.current?.focus(), 20);
+              }}
+              onStudentSelectChat={(chatId) => {
+                setActiveExam(null);
+                void openChatSession(chatId);
+              }}
+              onStudentSelectExam={(examId) => void openSavedExam(examId)}
+              onNavigateRoute={(href) => router.push(href)}
+              onRequestLogin={() => openLoginModal()}
+            />
           </div>
         </header>
 

@@ -113,6 +113,7 @@ DEFAULT_PREFERENCES: dict[str, Any] = {
         "code_font_size": 13,
         "reduce_motion": "system",
         "contrast": 50,
+        "diff_markers": True,
     },
     "notifications": {
         "email_updates": False,
@@ -257,6 +258,8 @@ def normalize_preferences(raw: Any, *, strict: bool = False) -> dict[str, Any]:
             except (TypeError, ValueError) as exc:
                 if strict:
                     raise ValueError("مقدار کنتراست باید بین ۰ تا ۱۰۰ باشد.") from exc
+        if "diff_markers" in app_in and app_in["diff_markers"] is not None:
+            prefs["appearance"]["diff_markers"] = bool(app_in["diff_markers"])
 
     # Notifications
     notif_in = raw.get("notifications")

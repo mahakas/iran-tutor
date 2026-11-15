@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pymupdf
 from PIL import Image, ImageDraw
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import BACKEND_DIR, get_settings
@@ -218,12 +218,35 @@ async def _seed_demo_book(session: AsyncSession, *, grade: Grade, major: Major) 
         )
 
 
+async def _ensure_sqlite_demo_columns(connection) -> None:
+    """Safely add newly introduced columns when upgrading an existing SQLite demo DB."""
+    if connection.dialect.name != "sqlite":
+        return
+    billing_cols = {
+        row[1]
+        for row in (await connection.execute(text("PRAGMA table_info(billing_settings)"))).fetchall()
+    }
+    if billing_cols and "admin_preferences" not in billing_cols:
+        await connection.execute(
+            text("ALTER TABLE billing_settings ADD COLUMN admin_preferences JSON NOT NULL DEFAULT '{}'")
+        )
+    page_cols = {
+        row[1]
+        for row in (await connection.execute(text("PRAGMA table_info(book_pages)"))).fetchall()
+    }
+    if page_cols and "original_markdown_content" not in page_cols:
+        await connection.execute(
+            text("ALTER TABLE book_pages ADD COLUMN original_markdown_content TEXT")
+        )
+
+
 async def seed_database() -> None:
     """Create demo schema when requested and seed curriculum reference data."""
     settings = get_settings()
     if settings.demo_mode:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await _ensure_sqlite_demo_columns(connection)
     async with async_session_factory() as session:
         await seed_grades(session)
         await seed_majors(session)

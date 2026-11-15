@@ -176,6 +176,10 @@ export default function HelpPage() {
               <kbd dir="ltr">Ctrl / ⌘ + K</kbd>
             </div>
             <div className="shortcut-item">
+              <span>{lang === "en" ? "Open global quick search" : "باز کردن جستجوی سریع"}</span>
+              <kbd dir="ltr">/  یا  Ctrl + /</kbd>
+            </div>
+            <div className="shortcut-item">
               <span>{lang === "en" ? "Close open menu / dialog" : "بستن منو یا پنجره باز"}</span>
               <kbd dir="ltr">Esc</kbd>
             </div>
