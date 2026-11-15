@@ -6,6 +6,7 @@ import type {
 } from "./types";
 
 export const PREFERENCES_STORAGE_KEY = "darsyar_preferences_cache_v1";
+export const ADMIN_PREFERENCES_STORAGE_KEY = "darsyar_admin_preferences_cache_v1";
 
 export type ThemePreset = {
   id: ThemePresetId;
@@ -238,6 +239,7 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
     code_font_size: 13,
     reduce_motion: "system",
     contrast: 50,
+    diff_markers: true,
   },
   notifications: {
     email_updates: false,
@@ -480,7 +482,30 @@ export function applyPreferencesToDocument(
   root.setAttribute("data-theme", bgIsDark ? "dark" : effectiveMode);
   root.setAttribute("data-visual-style", prefs.appearance.visual_style);
   root.setAttribute("data-reduce-motion", reduceMotion ? "true" : "false");
+  root.setAttribute(
+    "data-diff-markers",
+    prefs.appearance.diff_markers !== false ? "true" : "false"
+  );
   root.style.colorScheme = bgIsDark ? "dark" : "light";
+
+  const highContrastShift = Math.max(0, (prefs.appearance.contrast - 50) / 50);
+  const diffAddBg = bgIsDark
+    ? mixHex(computed.cardBg, "#10b981", 0.16 + highContrastShift * 0.1)
+    : mixHex(computed.cardBg, "#10b981", 0.12 + highContrastShift * 0.08);
+  const diffAddBorder = bgIsDark ? "#34d399" : "#059669";
+  const diffAddInk = bgIsDark ? "#a7f3d0" : "#065f46";
+
+  const diffDelBg = bgIsDark
+    ? mixHex(computed.cardBg, "#ef4444", 0.17 + highContrastShift * 0.1)
+    : mixHex(computed.cardBg, "#ef4444", 0.11 + highContrastShift * 0.08);
+  const diffDelBorder = bgIsDark ? "#f87171" : "#dc2626";
+  const diffDelInk = bgIsDark ? "#fecaca" : "#991b1b";
+
+  const diffModBg = bgIsDark
+    ? mixHex(computed.cardBg, "#f59e0b", 0.16 + highContrastShift * 0.1)
+    : mixHex(computed.cardBg, "#f59e0b", 0.12 + highContrastShift * 0.08);
+  const diffModBorder = bgIsDark ? "#fbbf24" : "#d97706";
+  const diffModInk = bgIsDark ? "#fde68a" : "#92400e";
 
   root.style.setProperty("--ink", computed.fg);
   root.style.setProperty("--ink-secondary", computed.secondaryInk);
@@ -501,6 +526,15 @@ export function applyPreferencesToDocument(
   root.style.setProperty("--teal-soft", accentSoft);
   root.style.setProperty("--mint", accentBorder);
   root.style.setProperty("--accent-ink", accentInk);
+  root.style.setProperty("--diff-add-bg", diffAddBg);
+  root.style.setProperty("--diff-add-border", diffAddBorder);
+  root.style.setProperty("--diff-add-ink", diffAddInk);
+  root.style.setProperty("--diff-del-bg", diffDelBg);
+  root.style.setProperty("--diff-del-border", diffDelBorder);
+  root.style.setProperty("--diff-del-ink", diffDelInk);
+  root.style.setProperty("--diff-mod-bg", diffModBg);
+  root.style.setProperty("--diff-mod-border", diffModBorder);
+  root.style.setProperty("--diff-mod-ink", diffModInk);
   root.style.setProperty("--ui-font-family", fontStack);
   root.style.setProperty("--ui-font-size", `${prefs.appearance.ui_font_size}px`);
   root.style.setProperty("--code-font-size", `${prefs.appearance.code_font_size}px`);
@@ -530,6 +564,30 @@ export function writeCachedPreferences(prefs: UserPreferences | null): void {
       window.localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(prefs));
     } else {
       window.localStorage.removeItem(PREFERENCES_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function readCachedAdminPreferences(): UserPreferences | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(ADMIN_PREFERENCES_STORAGE_KEY);
+    if (!raw) return null;
+    return normalizePreferencesClient(JSON.parse(raw) as Partial<UserPreferences>);
+  } catch {
+    return null;
+  }
+}
+
+export function writeCachedAdminPreferences(prefs: UserPreferences | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (prefs) {
+      window.localStorage.setItem(ADMIN_PREFERENCES_STORAGE_KEY, JSON.stringify(prefs));
+    } else {
+      window.localStorage.removeItem(ADMIN_PREFERENCES_STORAGE_KEY);
     }
   } catch {
     // ignore storage errors

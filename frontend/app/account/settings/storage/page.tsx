@@ -90,6 +90,18 @@ export default function StorageSettingsPage() {
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const initialQ = new URLSearchParams(window.location.search).get("q")?.trim();
+    if (!initialQ) return;
+    const t = window.setTimeout(() => {
+      setSearchInput(initialQ);
+      setDebouncedQuery(initialQ);
+      setPage(1);
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
     const t = window.setTimeout(() => {
       setDebouncedQuery(searchInput.trim());
       setPage(1);

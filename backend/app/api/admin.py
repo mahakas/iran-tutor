@@ -9,6 +9,7 @@ import logging
 import secrets
 import time
 from pathlib import Path
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -22,7 +23,12 @@ from app.db.session import async_session_factory
 from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User
 from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
 from app.services.document_parser import detect_document_format, parse_structured_document
-from app.services.account_service import get_user_storage_quota_bytes
+from app.services.account_service import (
+    default_preferences,
+    get_user_storage_quota_bytes,
+    merge_preferences,
+    normalize_preferences,
+)
 from app.services.auth_billing_service import (
     apply_plan_to_user,
     calculate_token_cost_toman,
@@ -485,6 +491,7 @@ async def list_book_pages(book_id: int) -> list[dict[str, object]]:
                 "status": row.status.value if hasattr(row.status, "value") else row.status,
                 "warnings": row.warnings or [],
                 "markdown_content": row.markdown_content or "",
+                "original_markdown_content": getattr(row, "original_markdown_content", None),
                 "visual_elements": row.visual_elements or [],
                 "extraction_model": row.extraction_model,
                 "edited_by_human": bool(row.edited_by_human),
@@ -531,6 +538,8 @@ async def fix_page(book_id: int, idx: int, body: PageFixBody) -> dict[str, objec
 
         fields = body.model_fields_set
         if "markdown_content" in fields and body.markdown_content is not None:
+            if getattr(page, "original_markdown_content", None) is None:
+                page.original_markdown_content = page.markdown_content or ""
             page.markdown_content = body.markdown_content
         if "printed_page_number" in fields:
             page.printed_page_number = body.printed_page_number
@@ -556,7 +565,13 @@ async def fix_page(book_id: int, idx: int, body: PageFixBody) -> dict[str, objec
         )
         if rows:
             _export_assets(book_id, build_export_pages(rows))
-        return {"book_id": book_id, "pdf_page_index": idx, "status": "done", "edited_by_human": True}
+        return {
+            "book_id": book_id,
+            "pdf_page_index": idx,
+            "status": "done",
+            "edited_by_human": True,
+            "original_markdown_content": getattr(page, "original_markdown_content", None),
+        }
 
 
 PREVIEW_STATUSES = ("all", "done", "failed", "needs_review", "pending")
@@ -1008,6 +1023,215 @@ async def get_admin_user_usage(
                 for tx in payments
             ],
         }
+
+
+class AdminPreferencesPatchBody(BaseModel):
+    general: dict[str, Any] | None = None
+    appearance: dict[str, Any] | None = None
+    notifications: dict[str, Any] | None = None
+    privacy: dict[str, Any] | None = None
+
+
+class AdminPreferencesResetBody(BaseModel):
+    section: Literal["all", "general", "appearance", "notifications", "privacy"] = "appearance"
+
+
+@protected_router.get("/preferences")
+async def get_admin_preferences(response: Response) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        await session.commit()
+        return {"preferences": normalize_preferences(billing.admin_preferences, strict=False)}
+
+
+@protected_router.put("/preferences")
+async def update_admin_preferences(
+    body: AdminPreferencesPatchBody,
+    response: Response,
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    patch: dict[str, Any] = {}
+    for section in ("general", "appearance", "notifications", "privacy"):
+        val = getattr(body, section)
+        if val is not None:
+            patch[section] = val
+
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        try:
+            updated = merge_preferences(billing.admin_preferences, patch)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        billing.admin_preferences = updated
+        await session.commit()
+        return {"preferences": updated}
+
+
+@protected_router.post("/preferences/reset")
+async def reset_admin_preferences(
+    body: AdminPreferencesResetBody,
+    response: Response,
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    defaults = default_preferences()
+    async with async_session_factory() as session:
+        billing = await get_or_init_billing_settings(session)
+        if body.section == "all":
+            billing.admin_preferences = defaults
+        else:
+            current = normalize_preferences(billing.admin_preferences, strict=False)
+            current[body.section] = defaults[body.section]
+            billing.admin_preferences = current
+        await session.commit()
+        return {"preferences": normalize_preferences(billing.admin_preferences, strict=False)}
+
+
+def _build_snippet(text: str | None, term: str, max_len: int = 120) -> str:
+    clean = " ".join((text or "").split())
+    if not clean:
+        return ""
+    idx = clean.lower().find(term.lower())
+    if idx < 0:
+        return clean[:max_len] + ("…" if len(clean) > max_len else "")
+    start = max(0, idx - 32)
+    end = min(len(clean), idx + len(term) + 64)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(clean) else ""
+    return f"{prefix}{clean[start:end]}{suffix}"
+
+
+@protected_router.get("/search")
+async def search_admin(
+    response: Response,
+    q: str = Query(default="", max_length=120),
+    category: Literal["all", "books", "pages", "users", "plans"] = Query("all"),
+    limit: int = Query(default=12, ge=1, le=30),
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    term = q.strip()
+    pattern = f"%{term}%" if term else None
+    numeric_term = int(term) if term and term.isdigit() else None
+
+    books_out: list[dict[str, object]] = []
+    pages_out: list[dict[str, object]] = []
+    users_out: list[dict[str, object]] = []
+    plans_out: list[dict[str, object]] = []
+
+    async with async_session_factory() as session:
+        if category in ("all", "books"):
+            book_stmt = (
+                select(Book, Grade.number, Grade.title, Major.title)
+                .join(Grade, Book.grade_id == Grade.id)
+                .outerjoin(Major, Book.major_id == Major.id)
+            )
+            if pattern is not None:
+                book_filters = [Book.title.ilike(pattern), Grade.title.ilike(pattern)]
+                if numeric_term is not None:
+                    book_filters.append(Book.id == numeric_term)
+                    book_filters.append(Grade.number == numeric_term)
+                book_stmt = book_stmt.where(or_(*book_filters))
+            book_rows = (await session.execute(book_stmt.order_by(Book.id.desc()).limit(limit))).all()
+            books_out = [
+                {
+                    "id": book.id,
+                    "title": book.title,
+                    "grade_number": grade_num,
+                    "grade_title": grade_title,
+                    "major_title": major_title,
+                    "total_pdf_pages": book.total_pdf_pages,
+                    "status": book.status.value if hasattr(book.status, "value") else book.status,
+                }
+                for book, grade_num, grade_title, major_title in book_rows
+            ]
+
+        if category in ("all", "pages"):
+            page_stmt = select(BookPage, Book.title).join(Book, BookPage.book_id == Book.id)
+            if pattern is not None:
+                page_filters = [
+                    BookPage.chapter_title.ilike(pattern),
+                    BookPage.markdown_content.ilike(pattern),
+                ]
+                if numeric_term is not None:
+                    page_filters.append(BookPage.pdf_page_index == numeric_term)
+                    page_filters.append(BookPage.printed_page_number == numeric_term)
+                page_stmt = page_stmt.where(or_(*page_filters))
+            page_rows = (
+                await session.execute(
+                    page_stmt.order_by(BookPage.book_id.desc(), BookPage.pdf_page_index.asc()).limit(limit)
+                )
+            ).all()
+            pages_out = [
+                {
+                    "book_id": page.book_id,
+                    "book_title": book_title,
+                    "pdf_page_index": page.pdf_page_index,
+                    "printed_page_number": page.printed_page_number,
+                    "chapter_number": page.chapter_number,
+                    "chapter_title": page.chapter_title,
+                    "status": page.status.value if hasattr(page.status, "value") else page.status,
+                    "edited_by_human": bool(page.edited_by_human),
+                    "snippet": _build_snippet(page.markdown_content or page.chapter_title, term) if term else _build_snippet(page.markdown_content or page.chapter_title, ""),
+                }
+                for page, book_title in page_rows
+            ]
+
+        if category in ("all", "users"):
+            user_stmt = select(User)
+            if pattern is not None:
+                user_stmt = user_stmt.where(
+                    or_(
+                        User.phone_number.ilike(pattern),
+                        User.full_name.ilike(pattern),
+                        User.email.ilike(pattern),
+                        User.plan_code.ilike(pattern),
+                        User.plan_title.ilike(pattern),
+                    )
+                )
+            user_rows = (await session.scalars(user_stmt.order_by(User.created_at.desc()).limit(limit))).all()
+            users_out = [
+                {
+                    "id": u.id,
+                    "phone_number": u.phone_number,
+                    "full_name": u.full_name,
+                    "plan_code": u.plan_code,
+                    "plan_title": u.plan_title,
+                    "tokens_remaining": u.tokens_remaining,
+                    "is_active": u.is_active,
+                }
+                for u in user_rows
+            ]
+
+        if category in ("all", "plans"):
+            plan_stmt = select(Plan)
+            if pattern is not None:
+                plan_stmt = plan_stmt.where(
+                    or_(
+                        Plan.name.ilike(pattern),
+                        Plan.code.ilike(pattern),
+                        Plan.description.ilike(pattern),
+                    )
+                )
+            plan_rows = (await session.scalars(plan_stmt.order_by(Plan.sort_order.asc()).limit(limit))).all()
+            plans_out = [
+                {
+                    "code": p.code,
+                    "name": p.name,
+                    "price_toman": p.price_toman,
+                    "token_quota": p.token_quota,
+                    "duration_days": p.duration_days,
+                    "is_active": p.is_active,
+                }
+                for p in plan_rows
+            ]
+
+    return {
+        "query": term,
+        "books": books_out,
+        "pages": pages_out,
+        "users": users_out,
+        "plans": plans_out,
+    }
 
 
 router.include_router(protected_router)

@@ -71,6 +71,7 @@ class BookPage(Base):
     chapter_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chapter_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     markdown_content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    original_markdown_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     visual_elements: Mapped[dict] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"), default=dict, nullable=False
     )

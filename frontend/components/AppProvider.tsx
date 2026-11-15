@@ -194,9 +194,12 @@ export default function AppProvider({ children }: { children: React.ReactNode })
   }, []);
 
   // Apply CSS variables & document dir/lang whenever preferences or system theme change
+  // Admin routes manage their own independent Admin Appearance preferences.
+  const isAdminRoute = pathname?.startsWith("/admin") ?? false;
   useEffect(() => {
+    if (isAdminRoute) return;
     applyPreferencesToDocument(preferences, systemIsDark);
-  }, [preferences, systemIsDark]);
+  }, [isAdminRoute, preferences, systemIsDark]);
 
   const updateUserSynced = useCallback(
     (updater: React.SetStateAction<StudentUser | null>) => {
