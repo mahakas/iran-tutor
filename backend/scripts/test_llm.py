@@ -1,4 +1,4 @@
-"""Smoke test: send a tiny Persian + formula image to both vision models.
+"""Smoke test: send a tiny Persian + formula image to both vision models (via the gateway).
 
 Run from `backend/`:  .venv\\Scripts\\python scripts\\test_llm.py
 """
@@ -68,12 +68,22 @@ def make_test_png() -> bytes:
 
 
 async def run_model(label: str, model: str, png: bytes) -> bool:
-    from app.core.llm_client import vision_json
+    # Always exercise the Central AI Gateway, never a provider SDK directly.
+    from app.services.ai_gateway import CallContext, vision_json_via_gateway
 
     print(f"\n=== {label}: {model} ===")
     started = time.perf_counter()
     try:
-        parsed, usage = await vision_json(model, SYSTEM_PROMPT, USER_TEXT, png)
+        result = await vision_json_via_gateway(
+            ctx=CallContext(feature_key="vision_ocr", textbook_strict=False),
+            system_prompt=SYSTEM_PROMPT,
+            user_text=USER_TEXT,
+            image_bytes=png,
+            image_mime_type="image/png",
+            model=model,
+        )
+        parsed = result.content
+        usage = {"tokens_in": result.tokens_in, "tokens_out": result.tokens_out}
     except Exception as error:  # noqa: BLE001 - report any failure per model
         latency = time.perf_counter() - started
         print(f"result  : FAILURE ({type(error).__name__}: {str(error)[:300]})")
@@ -84,6 +94,7 @@ async def run_model(label: str, model: str, png: bytes) -> bool:
     flat = json.dumps(parsed, ensure_ascii=False)
     print("result  : SUCCESS")
     print(f"latency : {latency:.2f}s")
+    print(f"model   : {result.model_name} | audit_id: {result.audit_id}")
     print(f"usage   : {usage}")
     print(f"parsed  : {flat}")
     print(f"saw persian text '{PERSIAN_TEXT}': {PERSIAN_TEXT in flat}")

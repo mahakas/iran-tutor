@@ -98,14 +98,14 @@ async def test_pgvector_search_compiles_scoped_cosine_query_and_routes_when_enab
             observed["params"] = params
             return FakeMappingResult()
 
-    async def fake_embed_texts(texts):
-        return [[0.5, 0.5] for _ in texts]
+    async def fake_embed_gateway(*, ctx, texts, model=None, session=None, **kwargs):
+        return SimpleNamespace(content=[[0.5, 0.5] for _ in texts], audit_id=None)
 
     async def no_lexical(*args, **kwargs):
         return []
 
     monkeypatch.setattr(retrieval_service, "async_session_factory", lambda: FakeSession())
-    monkeypatch.setattr(retrieval_service, "embed_texts", fake_embed_texts)
+    monkeypatch.setattr(retrieval_service, "embed_via_gateway", fake_embed_gateway)
     monkeypatch.setattr(retrieval_service, "_search_postgres", no_lexical)
     monkeypatch.setattr(
         retrieval_service,

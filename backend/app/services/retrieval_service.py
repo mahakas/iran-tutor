@@ -5,15 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import AsyncQdrantClient, models
 from sqlalchemy import Text, cast, func, select, text as sql_text
 
 from app.core.config import get_settings
-from app.core.llm_client import embed_texts
+from app.services.ai_gateway import CallContext, embed_via_gateway
 from app.db.session import async_session_factory
 from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
 
@@ -251,7 +253,12 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
             async with async_session_factory() as write_session:
                 for start in range(0, len(documents), batch_size):
                     batch = documents[start : start + batch_size]
-                    vectors = await embed_texts([text for _, text in batch])
+                    vectors = (
+                        await embed_via_gateway(
+                            ctx=CallContext(feature_key="embedding", book_id=book_id),
+                            texts=[text for _, text in batch],
+                        )
+                    ).content
                     for (page, _text), vector in zip(batch, vectors, strict=True):
                         await write_session.execute(
                             upsert_sql,
@@ -276,7 +283,12 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
         points: list[models.PointStruct] = []
         for start in range(0, len(documents), batch_size):
             batch = documents[start : start + batch_size]
-            vectors = await embed_texts([text for _, text in batch])
+            vectors = (
+                await embed_via_gateway(
+                    ctx=CallContext(feature_key="embedding", book_id=book_id),
+                    texts=[text for _, text in batch],
+                )
+            ).content
             for (page, text), vector in zip(batch, vectors, strict=True):
                 points.append(
                     models.PointStruct(
@@ -462,7 +474,12 @@ async def _search_pgvector(
     book_id: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    vector = (await embed_texts([query]))[0]
+    vector = (
+        await embed_via_gateway(
+            ctx=CallContext(feature_key="embedding_query", book_id=book_id),
+            texts=[query],
+        )
+    ).content[0]
     selected_major = major_code or "general"
     statement = sql_text(
         """
@@ -535,7 +552,12 @@ async def _search_qdrant(
     book_id: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    vector = (await embed_texts([query]))[0]
+    vector = (
+        await embed_via_gateway(
+            ctx=CallContext(feature_key="embedding_query", book_id=book_id),
+            texts=[query],
+        )
+    ).content[0]
     settings = get_settings()
     response = await _get_qdrant().query_points(
         collection_name=settings.qdrant_collection,
@@ -607,3 +629,72 @@ async def search_textbook(
     return merge_hybrid_results(
         vector_results, lexical_results, top_k=top_k
     )
+
+
+async def probe_qdrant(url: str | None = None, collection: str | None = None) -> dict[str, Any]:
+    """Live connectivity probe for the Qdrant backend (`POST /admin/settings/test-vector`).
+
+    Owns the only direct Qdrant HTTP call outside the client library, keeping the API
+    layer free of transport code.
+    """
+    import httpx
+
+    settings = get_settings()
+    base = (url or settings.qdrant_url or "").strip().rstrip("/")
+    target = (collection or settings.qdrant_collection or "").strip()
+    started = time.perf_counter()
+
+    def _elapsed() -> int:
+        return max(1, int(round((time.perf_counter() - started) * 1000)))
+
+    parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return {
+            "ok": False,
+            "backend": "qdrant",
+            "latency_ms": _elapsed(),
+            "detail": "آدرس Qdrant معتبر نیست.",
+            "invalid_url": True,
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(f"{base}/collections")
+            latency_ms = _elapsed()
+            if response.status_code >= 400:
+                return {
+                    "ok": False,
+                    "backend": "qdrant",
+                    "latency_ms": latency_ms,
+                    "detail": f"پاسخ غیرموفق از Qdrant (HTTP {response.status_code})",
+                }
+            payload = response.json()
+            collections = [
+                item.get("name")
+                for item in ((payload.get("result") or {}).get("collections") or [])
+                if isinstance(item, dict)
+            ]
+            return {
+                "ok": True,
+                "backend": "qdrant",
+                "latency_ms": latency_ms,
+                "detail": (
+                    f"اتصال به Qdrant برقرار شد؛ مجموعه «{target}» "
+                    + (
+                        "یافت شد."
+                        if target in collections
+                        else "هنوز ایجاد نشده (با اولین ایندکس ساخته می‌شود)."
+                    )
+                ),
+                "collection_info": {
+                    "collections": collections,
+                    "target_exists": target in collections,
+                },
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "backend": "qdrant",
+            "latency_ms": _elapsed(),
+            "detail": f"عدم دسترسی به Qdrant در {base}: {str(exc)[:180]}",
+        }

@@ -25,9 +25,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.llm_client import vision_json
 from app.db.session import async_session_factory
 from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
+from app.services.ai_gateway import CallContext, vision_json_via_gateway
 from app.services.ingestion_checks import (
     check_printed_consistency,
     choose_escalation,
@@ -236,9 +236,19 @@ async def _run_page(
     async with sem:
         started = time.perf_counter()
         try:
-            parsed, usage = await vision_json(
-                model, EXTRACTION_SYSTEM_PROMPT, USER_PROMPT, image_path.read_bytes()
+            gateway_result = await vision_json_via_gateway(
+                ctx=CallContext(feature_key="ingest_ocr", book_id=carry.get("book_id")),
+                system_prompt=EXTRACTION_SYSTEM_PROMPT,
+                user_text=USER_PROMPT,
+                image_bytes=image_path.read_bytes(),
+                model=model,
             )
+            parsed = gateway_result.content
+            usage = {
+                "prompt_tokens": gateway_result.tokens_in,
+                "completion_tokens": gateway_result.tokens_out,
+                "total_tokens": gateway_result.tokens_in + gateway_result.tokens_out,
+            }
             latency = time.perf_counter() - started
             try:
                 extraction = PageExtraction.model_validate(parsed)

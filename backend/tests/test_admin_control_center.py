@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import pymupdf
@@ -187,37 +186,67 @@ async def test_admin_runtime_settings_masking_reset_and_cookie_invariance(tmp_pa
 async def test_admin_diagnostics_ai_vector_sms(tmp_path, monkeypatch):
     engine, _, _ = await _setup_admin_control_db(tmp_path, monkeypatch)
     try:
-        class _FakeResponse:
-            def __init__(self, status_code: int, payload: dict, text: str = ""):
-                self.status_code = status_code
-                self._payload = payload
-                self.text = text
+        # Outbound provider/Qdrant transport now lives behind the service seams:
+        # ai_gateway.probe_endpoint (shared by /settings/test-ai and
+        # /admin/providers/{id}/test) and retrieval_service.probe_qdrant.
+        from app.services import ai_gateway
 
-            def json(self):
-                return self._payload
+        probe_calls: list[dict[str, object]] = []
 
-        class _FakeAsyncClient:
-            def __init__(self, *args, **kwargs):
-                pass
+        async def _fake_probe_endpoint(
+            *,
+            base_url,
+            api_key,
+            provider_type=None,
+            model=None,
+            run_prompt=True,
+            include_models=True,
+        ):
+            probe_calls.append({"base_url": base_url, "api_key": api_key, "model": model})
+            if api_key == "sk-secret-leak":
+                return {
+                    "ok": False,
+                    "base_url": base_url,
+                    "status_code": 401,
+                    "models": [],
+                    "models_count": 0,
+                    "latency_ms": 7,
+                    "error": "HTTP 401",  # secret already scrubbed upstream
+                    "prompt_test": None,
+                }
+            return {
+                "ok": True,
+                "base_url": base_url,
+                "status_code": 200,
+                "models": ["gemini-2.5-flash", "gpt-4o"],
+                "models_count": 2,
+                "latency_ms": 11,
+                "error": None,
+                "prompt_test": (
+                    {
+                        "ok": True,
+                        "model": model,
+                        "status_code": 200,
+                        "latency_ms": 5,
+                        "reply": "سلام",
+                        "usage": {"total_tokens": 5},
+                    }
+                    if run_prompt
+                    else None
+                ),
+            }
 
-            async def __aenter__(self):
-                return self
+        async def _fake_probe_qdrant(url=None, collection=None):
+            return {
+                "ok": True,
+                "backend": "qdrant",
+                "latency_ms": 3,
+                "detail": "اتصال به Qdrant برقرار شد.",
+                "collection_info": {"collections": [], "target_exists": False},
+            }
 
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, url, headers=None):
-                if url.endswith("/models") and headers and "sk-secret-leak" in headers.get("Authorization", ""):
-                    return _FakeResponse(401, {}, text="Invalid token sk-secret-leak")
-                return _FakeResponse(200, {"data": [{"id": "gpt-4o"}, {"id": "gemini-2.5-flash"}]})
-
-            async def post(self, url, headers=None, json=None):
-                return _FakeResponse(
-                    200,
-                    {"choices": [{"message": {"content": "سلام"}}], "usage": {"total_tokens": 5}},
-                )
-
-        monkeypatch.setattr(admin_api.httpx, "AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(ai_gateway, "probe_endpoint", _fake_probe_endpoint)
+        monkeypatch.setattr(retrieval_service, "probe_qdrant", _fake_probe_qdrant)
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -251,10 +280,11 @@ async def test_admin_diagnostics_ai_vector_sms(tmp_path, monkeypatch):
 
             vec_res = await client.post(
                 "/api/v1/admin/settings/test-vector",
-                json={"vector_backend": "pgvector"},
+                json={"vector_backend": "qdrant", "qdrant_url": "http://qdrant.local:6333"},
             )
             assert vec_res.status_code == 200
-            assert vec_res.json()["backend"] == "pgvector"
+            assert vec_res.json()["backend"] == "qdrant"
+            assert vec_res.json()["ok"] is True
 
             sms_res = await client.post(
                 "/api/v1/admin/settings/test-sms",

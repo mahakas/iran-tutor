@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.llm_client import complete_json
+from app.services.ai_gateway import CallContext, complete_json_via_gateway
 from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
 from app.models.exam import ExamSession, ExamStatus
 from app.services.retrieval_service import page_embedding_text, search_textbook
@@ -280,13 +280,23 @@ async def create_exam(
         "\"prompt\":\"...\",\"choices\":{\"A\":\"...\",\"B\":\"...\",\"C\":\"...\",\"D\":\"...\"},"
         "\"correct_option\":\"A|B|C|D\",\"explanation\":\"...\",\"source_index\":0}}]}} برگردان."
     )
-    generated = await complete_json(
-        settings.tutor_model,
-        [
+    gateway_result = await complete_json_via_gateway(
+        ctx=CallContext(
+            feature_key="quiz",
+            user_id=user_id,
+            book_id=book_id,
+            textbook_strict=True,
+            citations=sources,
+            rag_hit_count=len(sources),
+        ),
+        messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": "\n\n---\n\n".join(context_parts)[:28_000]},
         ],
+        model=settings.tutor_model,
+        session=session,
     )
+    generated = gateway_result.content
     parsed_questions = validate_questions(
         generated, expected_count=question_count, source_count=len(sources)
     )

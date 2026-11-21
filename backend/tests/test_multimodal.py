@@ -15,15 +15,19 @@ from app.services import multimodal_service
 
 @pytest.mark.asyncio
 async def test_image_question_is_transcribed_then_routed_through_textbook_rag(monkeypatch):
-    async def fake_vision(model, system, prompt, image, mime):
+    async def fake_vision_gateway(*, ctx, system_prompt, user_text, image_bytes, image_mime_type="image/png", model=None, session=None, **kwargs):
         assert model == "vision-test"
-        assert mime == "image/png"
-        assert image == b"normalized-image"
-        return {
-            "question_text": "جسمی با سرعت اولیه ۲ حرکت می‌کند.",
-            "visual_description": "نمودار مکان بر حسب زمان خطی است.",
-            "uncertain_parts": ["عدد کنار محور کمی ناخواناست"],
-        }, {}
+        assert image_mime_type == "image/png"
+        assert ctx.feature_key == "vision_ocr"
+        assert image_bytes == b"normalized-image"
+        return SimpleNamespace(
+            content={
+                "question_text": "جسمی با سرعت اولیه ۲ حرکت می‌کند.",
+                "visual_description": "نمودار مکان بر حسب زمان خطی است.",
+                "uncertain_parts": ["عدد کنار محور کمی ناخواناست"],
+            },
+            audit_id="audit-vision",
+        )
 
     async def fake_answer(**kwargs):
         assert kwargs["query"].startswith("جسمی با سرعت اولیه")
@@ -33,7 +37,7 @@ async def test_image_question_is_transcribed_then_routed_through_textbook_rag(mo
     monkeypatch.setattr(
         multimodal_service, "get_settings", lambda: SimpleNamespace(vision_model_primary="vision-test")
     )
-    monkeypatch.setattr(multimodal_service, "vision_json", fake_vision)
+    monkeypatch.setattr(multimodal_service, "vision_json_via_gateway", fake_vision_gateway)
     monkeypatch.setattr(multimodal_service, "answer_from_textbook", fake_answer)
 
     result = await multimodal_service.answer_image_question(
@@ -51,17 +55,20 @@ async def test_image_question_is_transcribed_then_routed_through_textbook_rag(mo
 
 @pytest.mark.asyncio
 async def test_audio_transcript_is_sent_to_textbook_rag(monkeypatch):
-    async def fake_transcribe(data, *, filename, content_type):
-        assert data == b"audio"
+    async def fake_transcribe_gateway(*, ctx, audio_bytes, filename, content_type, model=None, session=None, **kwargs):
+        assert audio_bytes == b"audio"
         assert filename == "question.wav"
         assert content_type == "audio/wav"
-        return "شتاب ثابت یعنی چه؟"
+        assert ctx.feature_key == "stt"
+        return SimpleNamespace(content="شتاب ثابت یعنی چه؟")
 
     async def fake_answer(**kwargs):
         assert kwargs["query"] == "شتاب ثابت یعنی چه؟"
         return {"answer": "توضیح کتابی", "sources": []}
 
-    monkeypatch.setattr(multimodal_service, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(
+        multimodal_service, "transcribe_audio_via_gateway", fake_transcribe_gateway
+    )
     monkeypatch.setattr(multimodal_service, "answer_from_textbook", fake_answer)
 
     result = await multimodal_service.answer_audio_question(

@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     admin_password: str = Field(default="123", min_length=1)
     admin_session_ttl_seconds: int = Field(default=43200, gt=0)
 
+    # Phase 1: master key material for the encrypted AI-provider vault (Fernet).
+    # Never returned by any API. Falls back to a derived value in non-production.
+    secret_key: str | None = None
+
+    # Phase 1: quota / rate-limit engine. Redis is optional; without it the limiter
+    # degrades to an in-process sliding window (single-worker only).
+    redis_url: str | None = None
+    rate_limit_enabled: bool = True
+
     # Phase 6: Student SMS OTP authentication, plans, and payment providers
     auth_secret: str | None = None
     user_session_ttl_seconds: int = Field(default=2592000, gt=0)

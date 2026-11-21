@@ -80,8 +80,13 @@ async def test_tutor_returns_no_guess_when_no_textbook_matches(monkeypatch):
     async def should_not_call_llm(*args, **kwargs):
         raise AssertionError("LLM must not be called without retrieved evidence")
 
+    async def should_not_reach_gateway(*args, **kwargs):
+        raise AssertionError("AI gateway must not be called without retrieved evidence")
+
     monkeypatch.setattr(tutor_service, "search_textbook", no_pages)
-    monkeypatch.setattr(tutor_service, "complete_text", should_not_call_llm)
+    monkeypatch.setattr(
+        tutor_service, "complete_text_via_gateway", should_not_reach_gateway
+    )
 
     response = await tutor_service.answer_from_textbook(
         query="سوال ناموجود", grade_number=12, major_code="math_physics", book_id=1
@@ -112,13 +117,17 @@ async def test_tutor_adds_sources_from_retrieved_pages(monkeypatch):
     async def matching_pages(*args, **kwargs):
         return pages
 
-    async def fake_completion(model, messages):
+    async def fake_gateway(*, ctx, messages, model=None, session=None, **kwargs):
         assert model == "tutor-test-model"
         assert "شیب نمودار مکان-زمان" in messages[1]["content"]
-        return "شیب نمودار مکان-زمان نشان‌دهندهٔ سرعت است."
+        assert ctx.feature_key == "chat"
+        assert ctx.rag_hit_count == 1
+        return SimpleNamespace(
+            content="شیب نمودار مکان-زمان نشان‌دهندهٔ سرعت است.", audit_id="audit-test"
+        )
 
     monkeypatch.setattr(tutor_service, "search_textbook", matching_pages)
-    monkeypatch.setattr(tutor_service, "complete_text", fake_completion)
+    monkeypatch.setattr(tutor_service, "complete_text_via_gateway", fake_gateway)
     monkeypatch.setattr(
         tutor_service, "get_settings", lambda: SimpleNamespace(tutor_model="tutor-test-model")
     )
@@ -188,13 +197,13 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
             wait=True,
         )
 
-        async def fake_embed_texts(texts):
-            return [[1.0, 0.0] for _ in texts]
+        async def fake_embed_gateway(*, ctx, texts, model=None, session=None, **kwargs):
+            return SimpleNamespace(content=[[1.0, 0.0] for _ in texts], audit_id=None)
 
         async def no_lexical_results(*args, **kwargs):
             return []
 
-        monkeypatch.setattr(retrieval_service, "embed_texts", fake_embed_texts)
+        monkeypatch.setattr(retrieval_service, "embed_via_gateway", fake_embed_gateway)
         monkeypatch.setattr(retrieval_service, "_search_postgres", no_lexical_results)
         results = await retrieval_service.search_textbook(
             "شتاب چیست؟",
