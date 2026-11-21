@@ -37,6 +37,7 @@ from app.models.chat import ChatSession
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
 from app.models.exam import ExamSession
 from app.models.governance import AiAuditLog, AiProvider, FeatureModelRoute
+from app.services.upload_guard import verify_extension, verify_pdf
 from app.services.ai_provider_service import (
     PROVIDER_CAPABILITIES,
     PROVIDER_TYPES,
@@ -366,9 +367,13 @@ async def upload_and_ingest(
         if len(raw_bytes) > MAX_PDF_BYTES:
             raise HTTPException(status_code=413, detail="file exceeds 100 MiB limit")
 
+        if doc_format == "pdf":
+            verify_pdf(raw_bytes)
+        else:
+            verify_extension(upload.filename or "", raw_bytes)
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         default_ext = ".pdf" if doc_format == "pdf" else f".{doc_format if doc_format != 'markdown' else 'md'}"
-        suffix = Path(upload.filename or f"upload{default_ext}").suffix or default_ext
+        suffix = default_ext
         dest = UPLOAD_DIR / f"{uuid4().hex}{suffix}"
 
         if doc_format == "pdf":

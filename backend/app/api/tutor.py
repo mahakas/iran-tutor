@@ -37,6 +37,8 @@ from app.services.auth_billing_service import (
 )
 from app.services.capability_service import check_capability_access
 from app.services.quota_service import enforce_ai_quota
+from app.services.search_normalize import search_key
+from app.services.upload_guard import verify_audio
 from app.services.multimodal_service import answer_audio_question, answer_image_question
 from app.services.tutor_service import TutorMode, answer_from_textbook
 from app.services.chat_stream import (
@@ -470,6 +472,7 @@ async def ask_tutor_with_audio(
     if content_type not in AUDIO_MIME_TYPES:
         raise HTTPException(status_code=415, detail="unsupported audio format")
     audio_bytes = await _read_upload_limited(audio, MAX_AUDIO_BYTES)
+    verify_audio(content_type, audio_bytes)
     saved_file = await _maybe_store_tutor_attachment(
         session,
         user=current_user,
@@ -572,12 +575,12 @@ async def search_chat_sessions(
     for chat, book_title in rows:
         messages = chat.messages or []
         hit = None
-        if needle.casefold() in (chat.title or "").casefold():
+        if search_key(needle) in search_key(chat.title):
             hit = {"message_id": None, "role": None, "snippet": chat.title}
         else:
             for message in messages:
                 content = str(message.get("content") or "")
-                if needle.casefold() in content.casefold():
+                if search_key(needle) in search_key(content):
                     hit = {
                         "message_id": message.get("id"),
                         "role": message.get("role"),

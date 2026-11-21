@@ -24,6 +24,7 @@ from app.models.auth import OtpCode, User, UserFile, UserSession
 from app.models.chat import ChatSession
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
 from app.models.exam import ExamSession
+from app.services.upload_guard import verify_extension
 from app.services.account_service import (
     ALLOWED_PERSONAL_FILE_EXTS,
     MAX_SINGLE_USER_UPLOAD_BYTES,
@@ -551,6 +552,7 @@ async def upload_personal_file(
     if len(data) > MAX_SINGLE_USER_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="حجم فایل نباید بیشتر از ۲۵ مگابایت باشد.")
 
+    verify_extension(filename, data)
     if expected_mime.startswith("image/"):
         try:
             with Image.open(io.BytesIO(data)) as img:

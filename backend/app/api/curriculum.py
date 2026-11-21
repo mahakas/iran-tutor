@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.services.search_normalize import search_key, sql_search_key
 from app.services.validation import validate_major_code
 
 router = APIRouter(prefix="/api/v1/curriculum", tags=["curriculum"])
@@ -78,7 +79,7 @@ async def search_curriculum(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     term = q.strip()
-    pattern = f"%{term}%" if term else None
+    pattern = f"%{search_key(term)}%" if term else None
 
     book_stmt = (
         select(Book, Grade.number, Grade.title, Major.code, Major.title)
@@ -88,7 +89,7 @@ async def search_curriculum(
     )
     if pattern is not None:
         book_stmt = book_stmt.where(
-            or_(Book.title.ilike(pattern), Grade.title.ilike(pattern), Major.title.ilike(pattern))
+            or_(sql_search_key(Book.title).like(pattern), sql_search_key(Grade.title).like(pattern), sql_search_key(Major.title).like(pattern))
         )
     book_rows = (await session.execute(book_stmt.order_by(Book.title).limit(limit))).all()
 
@@ -102,9 +103,9 @@ async def search_curriculum(
     if pattern is not None:
         topic_stmt = topic_stmt.where(
             or_(
-                BookPage.chapter_title.ilike(pattern),
-                BookPage.markdown_content.ilike(pattern),
-                Book.title.ilike(pattern),
+                sql_search_key(BookPage.chapter_title).like(pattern),
+                sql_search_key(BookPage.markdown_content).like(pattern),
+                sql_search_key(Book.title).like(pattern),
             )
         )
     topic_rows = (
