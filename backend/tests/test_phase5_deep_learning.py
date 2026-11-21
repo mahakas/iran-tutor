@@ -241,8 +241,8 @@ async def test_validator_fails_closed_when_model_omits_verdict(env):
 
 
 @pytest.mark.asyncio
-async def test_validator_disabled_by_admin_runs_deterministic_checks_and_logs(env):
-    # Disable the validator capability: model stage is skipped, structural checks still apply.
+async def test_validator_disabled_by_admin_fails_closed_and_logs(env):
+    # Grounding cannot be verified without the validator model, so no candidate is accepted.
     async with env.factory() as session:
         cap = await capability_service.get_capability(session, "quiz_validator")
         cap.is_enabled = False
@@ -258,8 +258,24 @@ async def test_validator_disabled_by_admin_runs_deterministic_checks_and_logs(en
             user_id=env.ids["student_id"], book_id=env.ids["book_id"],
         )
         await session.commit()
-    assert [d.verdict for d in outcome.decisions] == ["approved", "rejected"]
+    assert outcome.accepted == []
+    assert [d.verdict for d in outcome.decisions] == ["rejected", "rejected"]
+    assert all("validator_model_disabled" in d.reasons for d in outcome.decisions)
     assert await _count(env.factory, AiAuditLog, AiAuditLog.flag_reason == "validator_model_disabled") == 1
+    assert await _count(env.factory, AiAuditLog, AiAuditLog.flag_reason == "validator_rejected") == 2
+
+
+@pytest.mark.asyncio
+async def test_validator_approval_is_logged(env):
+    env.fake.json_reply = lambda messages: {"verdicts": [_verdict(0)]}
+    async with env.factory() as session:
+        outcome = await quiz_validator.validate_questions(
+            session, items=[{"question": dict(GOOD_QUESTION), "source_text": "متن"}],
+            user_id=env.ids["student_id"], book_id=env.ids["book_id"],
+        )
+        await session.commit()
+    assert outcome.decisions[0].verdict == "approved"
+    assert await _count(env.factory, AiAuditLog, AiAuditLog.flag_reason == "validator_approved") == 1
 
 
 def test_latex_and_structure_checks():
@@ -561,3 +577,79 @@ async def test_phase5_ai_calls_route_through_runtime_and_gateway(env, monkeypatc
         await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
     assert seen == ["deep_solve"]
     assert await _count(env.factory, AiAuditLog, AiAuditLog.feature_key == "deep_solve") >= 1
+
+
+# ---------------------------------------------------------------------------
+# 8. Wiring: capabilities seeded, routable, quota-tracked, admin-visible
+# ---------------------------------------------------------------------------
+PHASE5_CAPABILITIES = ("immersive_reader", "deep_solve", "mistake_bank", "mastery_path", "quiz", "quiz_validator")
+
+
+@pytest.mark.asyncio
+async def test_phase5_capabilities_seeded_with_routes_and_feature_keys(env):
+    from app.models.capabilities import Capability
+    from app.services.ai_provider_service import ROUTABLE_FEATURE_KEYS
+
+    async with env.factory() as session:
+        rows = {
+            row.key: row
+            for row in (await session.scalars(select(Capability).where(Capability.key.in_(PHASE5_CAPABILITIES)))).all()
+        }
+    assert set(rows) == set(PHASE5_CAPABILITIES)
+    assert all(row.is_enabled for row in rows.values())
+    # AI-backed capabilities must have a route key that the admin can route to a model.
+    for key in ("immersive_reader", "deep_solve", "quiz", "quiz_validator"):
+        assert rows[key].default_route_key == key
+        assert key in ROUTABLE_FEATURE_KEYS
+    # Non-AI capabilities have no model route and make no model calls (checked below).
+    assert rows["mistake_bank"].default_route_key is None
+    assert rows["mastery_path"].default_route_key is None
+
+
+@pytest.mark.asyncio
+async def test_ai_capabilities_consume_user_quota_rows(env):
+    from app.models.governance import UserQuota
+
+    book_id = env.ids["book_id"]
+    async with _client() as client:
+        r1 = await client.post(f"/api/v1/immersive/books/{book_id}/assist",
+                               json={"action": "summarize", "pdf_page_index": 2})
+        r2 = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئلهٔ آزمایشی"})
+    assert r1.status_code == 200
+    assert r2.status_code in (201, 502)  # plan may be invalid in the stub; quota must still be touched
+    async with env.factory() as session:
+        features = set((await session.scalars(
+            select(UserQuota.feature_key).where(UserQuota.user_id == env.ids["student_id"])
+        )).all())
+    assert "immersive_reader" in features
+
+
+def test_non_ai_capabilities_make_no_model_calls():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "app" / "services"
+    for name in ("mistake_bank_service.py", "mastery_service.py"):
+        source = (root / name).read_text(encoding="utf-8")
+        assert "ai_gateway" not in source, name
+        assert "capability_runtime" not in source, name
+        assert "complete_json" not in source and "complete_text" not in source, name
+
+
+@pytest.mark.asyncio
+async def test_admin_views_expose_phase5_data_per_student(env):
+    # Seed one wrong answer, one validator rejection and one deep-solve session, then read them as admin.
+    await _insert_exam(env, [_question("q1", answer="A")])
+    async with _client() as client:
+        submit = await client.post("/api/v1/exams/exam-1/submit", json={"answers": {"q1": "B"}})
+        assert submit.status_code in (200, 201)
+        mistakes = await client.get(f"/api/v1/admin/users/{env.ids['student_id']}/mistakes", headers=ADMIN_HEADERS)
+        mastery = await client.get(f"/api/v1/admin/users/{env.ids['student_id']}/mastery",
+                                   params={"book_id": env.ids["book_id"]}, headers=ADMIN_HEADERS)
+        sessions = await client.get(f"/api/v1/admin/users/{env.ids['student_id']}/deep-solve-sessions",
+                                    headers=ADMIN_HEADERS)
+        validation = await client.get(f"/api/v1/admin/users/{env.ids['student_id']}/quiz-validation",
+                                      headers=ADMIN_HEADERS)
+    assert mistakes.status_code == 200 and mistakes.json()["items"]
+    assert mastery.status_code == 200 and mastery.json()["chapters"]
+    assert sessions.status_code == 200 and "items" in sessions.json()
+    assert validation.status_code == 200 and "items" in validation.json()

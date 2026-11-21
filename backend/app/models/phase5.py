@@ -41,10 +41,10 @@ class MistakeBankItem(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     exam_id: Mapped[str] = mapped_column(String(36), nullable=False)
     question_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    book_id: Mapped[int | None] = mapped_column(ForeignKey("books.id"), nullable=True, index=True)
+    book_id: Mapped[int | None] = mapped_column(ForeignKey("books.id", ondelete="CASCADE"), nullable=True, index=True)
     chapter_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chapter_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     printed_page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -73,8 +73,8 @@ class DeepSolveSession(Base):
     __table_args__ = (Index("ix_deep_solve_user", "user_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
-    book_id: Mapped[int | None] = mapped_column(ForeignKey("books.id"), nullable=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    book_id: Mapped[int | None] = mapped_column(ForeignKey("books.id", ondelete="SET NULL"), nullable=True)
     problem_text: Mapped[str] = mapped_column(Text, nullable=False)
     topic: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     subject: Mapped[str] = mapped_column(String(64), nullable=False, default="")
@@ -100,8 +100,8 @@ class MasteryChapterProgress(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id", ondelete="CASCADE"), nullable=False)
     chapter_number: Mapped[int] = mapped_column(Integer, nullable=False)
     exam_correct: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     exam_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -119,7 +119,7 @@ class MasteryBookSettings(Base):
 
     __tablename__ = "mastery_book_settings"
 
-    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id", ondelete="CASCADE"), primary_key=True)
     threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
     unlock_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="sequential")  # sequential | open
     # {"<chapter_number>": "locked" | "open"} overrides set by admin.

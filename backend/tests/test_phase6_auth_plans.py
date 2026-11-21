@@ -159,6 +159,16 @@ async def test_otp_auth_flow_cooldown_attempts_and_starter_tokens(tmp_path, monk
     monkeypatch.setattr("app.core.llm_client.get_settings", lambda: cfg)
     monkeypatch.setattr(retrieval_service, "async_session_factory", factory)
     monkeypatch.setattr(retrieval_service, "get_settings", lambda: cfg)
+    # Demo-mode generation has no answer-key verdicts; the Validator Gate is covered by
+    # test_phase5_deep_learning.py. Here the gate is stubbed to accept all candidates so the
+    # token/usage assertions in this test stay about auth, plans and metering.
+    from app.services import quiz_validator
+    from app.services.quiz_validator import ValidationOutcome
+
+    async def _approve_all(session, *, items, user_id, book_id, exam_id=None):
+        return ValidationOutcome(accepted=[dict(item["question"]) for item in items])
+
+    monkeypatch.setattr(quiz_validator, "validate_questions", _approve_all)
 
     async def override_session():
         async with factory() as session:

@@ -223,6 +223,8 @@ async def validate_questions(
         model_mode = "error"
         logger.exception("quiz_validator.model_call_failed; rejecting all candidates")
 
+    # Fail closed: grounding and key confirmation are model checks. Without the model
+    # nothing can be verified against the textbook, so no candidate is accepted.
     if model_mode == "disabled":
         await record_decision_audit(
             feature_key=VALIDATOR_FEATURE,
@@ -241,7 +243,7 @@ async def validate_questions(
         problems = structural_problems(original)
         verdict_row = verdicts.get(index)
         if model_mode == "disabled":
-            reasons = list(problems)
+            reasons = [*problems, "validator_model_disabled"]
             verdict_row = {}
         elif verdict_row is None:
             reasons = [*problems, "validator_missing_verdict"]
@@ -251,7 +253,16 @@ async def validate_questions(
 
         if not reasons:
             accepted.append(original)
-            decisions.append(QuestionDecision(index, "approved", [], original, audit_id))
+            approved_audit = await record_decision_audit(
+                feature_key=VALIDATOR_FEATURE,
+                user_id=user_id,
+                session_id=None,
+                request_text=str(original.get("prompt") or "")[:1500],
+                decision={"verdict": "approved", "reasons": [], "exam_id": exam_id, "index": index},
+                flag_reason="validator_approved",
+                session=session,
+            )
+            decisions.append(QuestionDecision(index, "approved", [], original, approved_audit or audit_id))
             continue
 
         repaired: dict[str, Any] | None = None
@@ -267,6 +278,8 @@ async def validate_questions(
             ):
                 repaired = candidate
 
+        if model_mode == "disabled":
+            repaired = None
         if repaired is not None:
             accepted.append(repaired)
             decisions.append(QuestionDecision(index, "fixed", reasons, repaired, audit_id))
