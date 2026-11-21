@@ -13,7 +13,7 @@ from qdrant_client import AsyncQdrantClient, models
 from sqlalchemy import Text, cast, func, select, text as sql_text
 
 from app.core.config import get_settings
-from app.core.llm_client import embed_texts
+from app.services.ai_gateway import CallContext, embed_via_gateway
 from app.db.session import async_session_factory
 from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
 
@@ -251,7 +251,12 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
             async with async_session_factory() as write_session:
                 for start in range(0, len(documents), batch_size):
                     batch = documents[start : start + batch_size]
-                    vectors = await embed_texts([text for _, text in batch])
+                    vectors = (
+                        await embed_via_gateway(
+                            ctx=CallContext(feature_key="embedding", book_id=book_id),
+                            texts=[text for _, text in batch],
+                        )
+                    ).content
                     for (page, _text), vector in zip(batch, vectors, strict=True):
                         await write_session.execute(
                             upsert_sql,
@@ -276,7 +281,12 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
         points: list[models.PointStruct] = []
         for start in range(0, len(documents), batch_size):
             batch = documents[start : start + batch_size]
-            vectors = await embed_texts([text for _, text in batch])
+            vectors = (
+                await embed_via_gateway(
+                    ctx=CallContext(feature_key="embedding", book_id=book_id),
+                    texts=[text for _, text in batch],
+                )
+            ).content
             for (page, text), vector in zip(batch, vectors, strict=True):
                 points.append(
                     models.PointStruct(
@@ -462,7 +472,12 @@ async def _search_pgvector(
     book_id: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    vector = (await embed_texts([query]))[0]
+    vector = (
+        await embed_via_gateway(
+            ctx=CallContext(feature_key="embedding_query", book_id=book_id),
+            texts=[query],
+        )
+    ).content[0]
     selected_major = major_code or "general"
     statement = sql_text(
         """
@@ -535,7 +550,12 @@ async def _search_qdrant(
     book_id: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    vector = (await embed_texts([query]))[0]
+    vector = (
+        await embed_via_gateway(
+            ctx=CallContext(feature_key="embedding_query", book_id=book_id),
+            texts=[query],
+        )
+    ).content[0]
     settings = get_settings()
     response = await _get_qdrant().query_points(
         collection_name=settings.qdrant_collection,

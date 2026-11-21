@@ -13,6 +13,12 @@ from app.models.auth import (  # noqa: F401
 from app.models.chat import ChatSession  # noqa: F401
 from app.models.curriculum import Book, BookPage, Grade, Major  # noqa: F401
 from app.models.exam import ExamSession  # noqa: F401
+from app.models.governance import (  # noqa: F401
+    AiAuditLog,
+    AiProvider,
+    FeatureModelRoute,
+    UserQuota,
+)
 
 __all__ = [
     "Grade",
@@ -29,4 +35,8 @@ __all__ = [
     "TokenUsageLog",
     "UserSession",
     "UserFile",
+    "AiProvider",
+    "FeatureModelRoute",
+    "UserQuota",
+    "AiAuditLog",
 ]

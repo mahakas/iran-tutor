@@ -19,6 +19,7 @@ import {
   FileText,
   FileUp,
   GitCompareArrows,
+  KeyRound,
   LoaderCircle,
   LockKeyhole,
   LogOut,
@@ -40,7 +41,10 @@ import {
 } from "lucide-react";
 import AdminAppearancePanel, { type AdminPreferencesPatch } from "@/components/AdminAppearancePanel";
 import AdminIntegrationsPanel, { type AdminSystemSettingsPayload } from "@/components/AdminIntegrationsPanel";
+import AdminObservabilityPanel from "@/components/AdminObservabilityPanel";
 import AdminOverviewPanel, { type AdminOverviewData } from "@/components/AdminOverviewPanel";
+import AdminProvidersPanel from "@/components/AdminProvidersPanel";
+import AdminRolesQuotasPanel from "@/components/AdminRolesQuotasPanel";
 import DiffViewer from "@/components/DiffViewer";
 import GlobalSearch, { type SearchItem } from "@/components/GlobalSearch";
 import { computeLineDiff } from "@/lib/diff";
@@ -255,7 +259,15 @@ function formatFaDate(isoDate: string) {
 export default function AdminPage() {
   const [authState, setAuthState] = useState<"checking" | "locked" | "authenticated">("checking");
   const [adminTab, setAdminTab] = useState<
-    "overview" | "books" | "plans" | "users" | "integrations" | "appearance"
+    | "overview"
+    | "books"
+    | "plans"
+    | "users"
+    | "integrations"
+    | "appearance"
+    | "providers"
+    | "observability"
+    | "roles"
   >("books");
   const tokenRef = useRef<string | null>(null);
   const [activeTokenState, setActiveTokenState] = useState<string | null>(null);
@@ -1811,6 +1823,27 @@ export default function AdminPage() {
           </button>
           <button
             type="button"
+            className={`admin-tab ${adminTab === "providers" ? "active" : ""}`}
+            onClick={() => setAdminTab("providers")}
+          >
+            <KeyRound size={16} /> ارائه‌دهنده‌ها و مسیر مدل
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "observability" ? "active" : ""}`}
+            onClick={() => setAdminTab("observability")}
+          >
+            <Eye size={16} /> مرکز شفافیت (Observability)
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "roles" ? "active" : ""}`}
+            onClick={() => setAdminTab("roles")}
+          >
+            <ShieldCheck size={16} /> نقش‌ها و سهمیه‌ها
+          </button>
+          <button
+            type="button"
             className={`admin-tab ${adminTab === "plans" ? "active" : ""}`}
             onClick={() => {
               setAdminTab("plans");
@@ -1872,6 +1905,27 @@ export default function AdminPage() {
             onSettingsApplied={(payload: AdminSystemSettingsPayload) => {
               setSystemMode(payload.config.demo_mode ? "demo" : "production");
             }}
+          />
+        )}
+
+        {adminTab === "providers" && (
+          <AdminProvidersPanel
+            authHeaders={authHeadersMemo}
+            onUnauthorized={lockAdminPanel}
+          />
+        )}
+
+        {adminTab === "observability" && (
+          <AdminObservabilityPanel
+            authHeaders={authHeadersMemo}
+            onUnauthorized={lockAdminPanel}
+          />
+        )}
+
+        {adminTab === "roles" && (
+          <AdminRolesQuotasPanel
+            authHeaders={authHeadersMemo}
+            onUnauthorized={lockAdminPanel}
           />
         )}
 

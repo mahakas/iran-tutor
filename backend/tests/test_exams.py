@@ -271,8 +271,13 @@ async def test_create_exam_falls_back_to_approved_book_pages_when_search_is_empt
             ]
         }
 
+    async def fake_complete_json_gateway(*, ctx, messages, model=None, session=None, **kwargs):
+        assert ctx.feature_key == "quiz"
+        assert ctx.textbook_strict is True
+        return SimpleNamespace(content=await fake_complete_json(model, messages), audit_id="audit-quiz")
+
     monkeypatch.setattr(exam_service, "search_textbook", empty_search)
-    monkeypatch.setattr(exam_service, "complete_json", fake_complete_json)
+    monkeypatch.setattr(exam_service, "complete_json_via_gateway", fake_complete_json_gateway)
     monkeypatch.setattr(exam_service, "get_settings", lambda: SimpleNamespace(tutor_model="demo-tutor"))
 
     page = SimpleNamespace(

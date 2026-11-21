@@ -16,7 +16,8 @@ from app.db.session import get_session
 from app.models.auth import User
 from app.models.curriculum import Book
 from app.models.exam import ExamSession
-from app.services.auth_billing_service import ensure_user_can_consume, record_and_deduct_usage
+from app.services.auth_billing_service import record_and_deduct_usage
+from app.services.quota_service import enforce_ai_quota
 from app.services.exam_service import create_exam, exam_summary, public_exam, submit_exam
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ async def start_exam(
         grade_number=body.grade_number,
         major_code=body.major_code,
     )
-    ensure_user_can_consume(current_user)
+    await enforce_ai_quota(session, user=current_user, feature_key="quiz")
     try:
         with track_token_usage() as usage:
             exam = await create_exam(

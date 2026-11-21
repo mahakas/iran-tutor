@@ -27,15 +27,22 @@ from app.services.account_service import (
     serialize_user_file,
 )
 from app.services.auth_billing_service import (
-    ensure_user_can_consume,
     get_or_init_billing_settings,
     record_and_deduct_usage,
 )
+from app.services.quota_service import enforce_ai_quota
 from app.services.multimodal_service import answer_audio_question, answer_image_question
 from app.services.tutor_service import TutorMode, answer_from_textbook
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/tutor", tags=["tutor"])
+
+# Feature keys so admins can route a different model per tutor mode (Phase 1).
+TUTOR_MODE_FEATURES = {
+    "tutor": "chat",
+    "problem_solver": "solve",
+    "question_designer": "quiz",
+}
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
@@ -72,6 +79,7 @@ class AskRequest(BaseModel):
     book_id: int = Field(gt=0)
     top_k: int = Field(default=5, ge=1, le=20)
     mode: TutorMode = "tutor"
+    chat_session_id: str | None = Field(default=None, max_length=64)
 
 
 class ChatMessageItem(BaseModel):
@@ -237,7 +245,11 @@ async def ask_tutor(
         grade_number=body.grade_number,
         major_code=body.major_code,
     )
-    ensure_user_can_consume(current_user)
+    await enforce_ai_quota(
+        session,
+        user=current_user,
+        feature_key=TUTOR_MODE_FEATURES.get(body.mode, "chat"),
+    )
     try:
         with track_token_usage() as usage:
             result = await answer_from_textbook(
@@ -247,6 +259,9 @@ async def ask_tutor(
                 book_id=book.id,
                 top_k=body.top_k,
                 mode=body.mode,
+                user_id=current_user.id,
+                session_id=body.chat_session_id,
+                db_session=session,
             )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="tutor") from error
@@ -284,7 +299,7 @@ async def ask_tutor_with_image(
         grade_number=grade_number,
         major_code=major_code,
     )
-    ensure_user_can_consume(current_user)
+    await enforce_ai_quota(session, user=current_user, feature_key="vision_ocr")
     image_bytes = await _read_upload_limited(image, MAX_IMAGE_BYTES)
     image_bytes = _normalize_image(image_bytes, image.content_type or "")
     saved_file = await _maybe_store_tutor_attachment(
@@ -306,6 +321,9 @@ async def ask_tutor_with_image(
                 book_id=book.id,
                 top_k=top_k,
                 mode=mode,
+                user_id=current_user.id,
+                session_id=chat_session_id,
+                db_session=session,
             )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         if saved_file is not None:
@@ -351,7 +369,7 @@ async def ask_tutor_with_audio(
         grade_number=grade_number,
         major_code=major_code,
     )
-    ensure_user_can_consume(current_user)
+    await enforce_ai_quota(session, user=current_user, feature_key="stt")
     filename = Path(audio.filename or "question.webm").name
     content_type = (audio.content_type or "").lower()
     if content_type in {"", "application/octet-stream"}:
@@ -379,6 +397,9 @@ async def ask_tutor_with_audio(
                 book_id=book.id,
                 top_k=top_k,
                 mode=mode,
+                user_id=current_user.id,
+                session_id=chat_session_id,
+                db_session=session,
             )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         if saved_file is not None:

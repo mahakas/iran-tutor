@@ -242,6 +242,18 @@ async def _ensure_sqlite_demo_columns(connection) -> None:
         await connection.execute(
             text("ALTER TABLE book_pages ADD COLUMN original_markdown_content TEXT")
         )
+    # Phase 1 RBAC columns on `users` (existing demo SQLite files).
+    user_cols = {
+        row[1]
+        for row in (await connection.execute(text("PRAGMA table_info(users)"))).fetchall()
+    }
+    if user_cols:
+        if "grade_level" not in user_cols:
+            await connection.execute(text("ALTER TABLE users ADD COLUMN grade_level INTEGER"))
+        if "major" not in user_cols:
+            await connection.execute(text("ALTER TABLE users ADD COLUMN major VARCHAR(64)"))
+        if "plan_id" not in user_cols:
+            await connection.execute(text("ALTER TABLE users ADD COLUMN plan_id INTEGER"))
 
 
 async def seed_database() -> None:

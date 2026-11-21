@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from app.core.config import get_settings
-from app.core.llm_client import complete_text
+from app.services.ai_gateway import CallContext, complete_text_via_gateway
 from app.services.retrieval_service import search_textbook
 
 SYSTEM_PROMPT = """تو معلم خصوصی فارسیِ دانش‌آموزان ایران هستی.
@@ -90,6 +90,14 @@ def _source_reference(page: dict[str, Any]) -> str:
     return f"{title}، {chapter}، {page_ref}"
 
 
+# `mode` -> gateway `feature_key`, so admins can route a different model per feature.
+MODE_FEATURE_KEYS: dict[TutorMode, str] = {
+    "tutor": "chat",
+    "problem_solver": "solve",
+    "question_designer": "quiz",
+}
+
+
 async def answer_from_textbook(
     *,
     query: str,
@@ -98,8 +106,15 @@ async def answer_from_textbook(
     book_id: int,
     top_k: int = 5,
     mode: TutorMode = "tutor",
+    user_id: str | None = None,
+    session_id: str | None = None,
+    db_session: Any | None = None,
 ) -> dict[str, Any]:
-    """Retrieve book evidence, answer only from it, and return server-owned citations."""
+    """Retrieve book evidence, answer only from it, and return server-owned citations.
+
+    Every model call goes through the central AI gateway so it is audited,
+    quota-checked, and admin-routable.
+    """
     pages = await search_textbook(
         query,
         grade_number=grade_number,
@@ -123,12 +138,25 @@ async def answer_from_textbook(
         }
 
     settings = get_settings()
-    if not settings.tutor_model:
-        raise RuntimeError("TUTOR_MODEL must be configured before asking the tutor")
-    answer = await complete_text(
-        settings.tutor_model,
-        build_tutor_messages(query=query, grade_number=grade_number, context=context, mode=mode),
+    feature_key = MODE_FEATURE_KEYS.get(mode, "chat")
+    call_ctx = CallContext(
+        feature_key=feature_key,
+        user_id=user_id,
+        session_id=session_id,
+        book_id=book_id,
+        textbook_strict=True,
+        citations=pages,
+        rag_hit_count=len(pages),
     )
+    gateway_result = await complete_text_via_gateway(
+        ctx=call_ctx,
+        messages=build_tutor_messages(
+            query=query, grade_number=grade_number, context=context, mode=mode
+        ),
+        model=settings.tutor_model,
+        session=db_session,
+    )
+    answer = gateway_result.content
 
     sources: list[dict[str, Any]] = []
     seen: set[tuple[Any, Any]] = set()
@@ -154,4 +182,9 @@ async def answer_from_textbook(
     answer += "\n\n**منابع:**\n" + "\n".join(
         f"- {source['citation']}" for source in sources
     )
-    return {"answer": answer, "sources": sources, "retrieved_count": len(pages)}
+    return {
+        "answer": answer,
+        "sources": sources,
+        "retrieved_count": len(pages),
+        "audit_id": gateway_result.audit_id,
+    }

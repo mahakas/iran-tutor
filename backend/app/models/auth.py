@@ -65,6 +65,11 @@ class User(Base):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     avatar_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     role: Mapped[str] = mapped_column(String(32), default="student", server_default="student", nullable=False)
+    # Phase 1 RBAC metadata: grade level (1-12, null = unspecified), study major,
+    # and an optional reference to the plans table alongside the legacy plan_code.
+    grade_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    major: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    plan_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     _json_type = JSON().with_variant(JSONB, "postgresql")
     preferences: Mapped[dict] = mapped_column(_json_type, default=dict, server_default="{}", nullable=False)
     plan_code: Mapped[str] = mapped_column(String(32), default="trial", nullable=False, index=True)

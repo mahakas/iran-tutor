@@ -37,6 +37,12 @@ from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User, UserF
 from app.models.chat import ChatSession
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
 from app.models.exam import ExamSession
+from app.models.governance import AiAuditLog, AiProvider, FeatureModelRoute
+from app.services.ai_provider_service import (
+    PROVIDER_CAPABILITIES,
+    PROVIDER_TYPES,
+)
+from app.db.session import get_session
 from app.services.document_parser import detect_document_format, parse_structured_document
 from app.services.account_service import (
     default_preferences,
@@ -141,15 +147,67 @@ def _is_admin_authenticated(request: Request) -> bool:
     return verify_admin_session_token(request.cookies.get(ADMIN_COOKIE_NAME))
 
 
-def require_admin(request: Request) -> None:
-    if not _is_admin_authenticated(request):
-        logger.warning(
-            "Admin auth failed for %s; header_keys=%s has_cookie=%s",
-            request.url.path,
-            sorted(k for k in request.headers.keys() if k in {"authorization", "x-admin-token", "cookie"}),
-            ADMIN_COOKIE_NAME in request.cookies,
+async def _resolve_rbac_admin(request: Request, session: AsyncSession):
+    """Return the user behind an admin-role session token, or `None`."""
+    from app.api.rbac_deps import normalize_role
+    from app.services.rbac import get_optional_user
+
+    try:
+        user = await get_optional_user(request, session)
+    except Exception:  # noqa: BLE001 - the legacy HMAC session is the fallback path
+        logger.exception("admin.auth.rbac_lookup_failed")
+        return None
+    if user is None or not user.is_active:
+        return None
+    if normalize_role(user.role) != "admin":
+        return None
+    return user
+
+
+async def require_admin(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> None:
+    """Guard every `/api/v1/admin/*` route (Phase 1, Rule 2).
+
+    Accepts either the legacy admin session (shared admin password, cookie /
+    X-Admin-Token) or a real user session whose role is `admin`.
+    Unauthenticated -> 401, authenticated but not an admin -> 403.
+    """
+    if _is_admin_authenticated(request):
+        request.state.admin_identity = {"kind": "admin_session", "user_id": None, "role": "admin"}
+        return
+
+    user = await _resolve_rbac_admin(request, session)
+    if user is not None:
+        request.state.admin_identity = {
+            "kind": "user_session",
+            "user_id": user.id,
+            "role": "admin",
+        }
+        request.state.current_user = user
+        return
+
+    from app.api.rbac_deps import normalize_role
+    from app.services.rbac import get_optional_user
+
+    try:
+        candidate = await get_optional_user(request, session)
+    except Exception:  # noqa: BLE001
+        candidate = None
+
+    logger.warning(
+        "Admin auth failed for %s; header_keys=%s has_cookie=%s role=%s",
+        request.url.path,
+        sorted(k for k in request.headers.keys() if k in {"authorization", "x-admin-token", "cookie"}),
+        ADMIN_COOKIE_NAME in request.cookies,
+        normalize_role(candidate.role) if candidate is not None else None,
+    )
+    if candidate is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="این بخش فقط برای مدیران سامانه در دسترس است.",
         )
-        raise HTTPException(status_code=401, detail="احراز هویت مدیر لازم است.")
+    raise HTTPException(status_code=401, detail="احراز هویت مدیر لازم است.")
 
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -2135,6 +2193,542 @@ async def test_sms_gateway(body: TestSmsBody) -> dict[str, object]:
             else f"پیکربندی درگاه {provider_name} کامل است و آماده ارسال پیامک است."
         ),
     }
+
+
+
+# ---------------------------------------------------------------------------
+# PHASE 1 — AI Provider Vault, Model Routing, Quotas, Observability & RBAC
+# ---------------------------------------------------------------------------
+
+FEATURE_ROUTE_LABELS: dict[str, str] = {
+    "chat": "گفت‌وگوی معلم",
+    "solve": "حل تمرین",
+    "quiz": "طراحی آزمون",
+    "vision_ocr": "خواندن تصویر دانش‌آموز",
+    "stt": "تبدیل گفتار به متن",
+    "embedding": "بردارسازی (RAG)",
+    "flashcards": "فلش‌کارت",
+    "ingest_ocr": "پردازش کتاب (OCR)",
+}
+
+
+class AiProviderCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    provider_type: Literal["openai", "anthropic", "gemini", "openai_compatible", "local"]
+    base_url: str | None = Field(default=None, max_length=512)
+    api_key: str | None = Field(default=None, max_length=512)
+    capabilities: list[str] = Field(default_factory=list)
+    is_active: bool = True
+
+
+class AiProviderUpdateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    provider_type: Literal["openai", "anthropic", "gemini", "openai_compatible", "local"] | None = None
+    base_url: str | None = Field(default=None, max_length=512)
+    api_key: str | None = Field(default=None, max_length=512)
+    clear_api_key: bool = False
+    capabilities: list[str] | None = None
+    is_active: bool | None = None
+
+
+class FeatureRouteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    feature_key: str = Field(min_length=1, max_length=64)
+    provider_id: int = Field(gt=0)
+    model_name: str = Field(min_length=1, max_length=255)
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, ge=1, le=200_000)
+    fallback_provider_id: int | None = Field(default=None, gt=0)
+    fallback_model_name: str | None = Field(default=None, max_length=255)
+    is_active: bool = True
+
+
+class QuotaPolicyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    daily_tokens: int | None = Field(default=None, ge=0)
+    monthly_tokens: int | None = Field(default=None, ge=0)
+    daily_requests: int | None = Field(default=None, ge=0)
+    requests_per_minute: int | None = Field(default=None, ge=0)
+
+
+class AdminUserRoleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["admin", "teacher", "student", "guardian"] | None = None
+    grade_level: int | None = Field(default=None, ge=1, le=12)
+    major: str | None = Field(default=None, max_length=64)
+    plan_id: int | None = Field(default=None, gt=0)
+    is_active: bool | None = None
+
+
+class AuditFlagBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=255)
+
+
+@protected_router.get("/providers")
+async def list_ai_providers(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    """List configured providers. API keys are never returned in plaintext."""
+    from app.services.ai_provider_service import serialize_provider
+
+    rows = (
+        await session.scalars(select(AiProvider).order_by(AiProvider.id.asc()))
+    ).all()
+    return {
+        "providers": [serialize_provider(provider) for provider in rows],
+        "provider_types": list(PROVIDER_TYPES),
+        "capabilities": list(PROVIDER_CAPABILITIES),
+    }
+
+
+@protected_router.post("/providers")
+async def create_ai_provider(
+    body: AiProviderCreateBody, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    from app.services.ai_provider_service import (
+        normalize_capabilities,
+        serialize_provider,
+        set_provider_api_key,
+        validate_provider_type,
+    )
+
+    try:
+        provider_type = validate_provider_type(body.provider_type)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if await session.scalar(select(AiProvider).where(AiProvider.name == body.name.strip())):
+        raise HTTPException(status_code=409, detail="ارائه‌دهنده‌ای با این نام از قبل وجود دارد.")
+
+    provider = AiProvider(
+        name=body.name.strip(),
+        provider_type=provider_type,
+        base_url=(body.base_url or "").strip().rstrip("/") or None,
+        capabilities=normalize_capabilities(body.capabilities),
+        is_active=body.is_active,
+    )
+    set_provider_api_key(provider, body.api_key)
+    session.add(provider)
+    await session.commit()
+    await session.refresh(provider)
+    return {"provider": serialize_provider(provider)}
+
+
+@protected_router.put("/providers/{provider_id}")
+async def update_ai_provider(
+    provider_id: int,
+    body: AiProviderUpdateBody,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    from app.services.ai_provider_service import (
+        normalize_capabilities,
+        serialize_provider,
+        set_provider_api_key,
+    )
+
+    provider = await session.get(AiProvider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="ارائه‌دهنده پیدا نشد.")
+
+    if body.name is not None and body.name.strip() != provider.name:
+        clash = await session.scalar(select(AiProvider).where(AiProvider.name == body.name.strip()))
+        if clash is not None:
+            raise HTTPException(status_code=409, detail="ارائه‌دهنده‌ای با این نام از قبل وجود دارد.")
+        provider.name = body.name.strip()
+    if body.provider_type is not None:
+        provider.provider_type = body.provider_type
+    if body.base_url is not None:
+        provider.base_url = body.base_url.strip().rstrip("/") or None
+    if body.capabilities is not None:
+        provider.capabilities = normalize_capabilities(body.capabilities)
+    if body.is_active is not None:
+        provider.is_active = body.is_active
+    if body.clear_api_key:
+        provider.encrypted_api_key = None
+    elif body.api_key is not None and body.api_key.strip():
+        set_provider_api_key(provider, body.api_key)
+
+    await session.commit()
+    await session.refresh(provider)
+    return {"provider": serialize_provider(provider)}
+
+
+@protected_router.delete("/providers/{provider_id}")
+async def delete_ai_provider(
+    provider_id: int, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    provider = await session.get(AiProvider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="ارائه‌دهنده پیدا نشد.")
+    in_use = await session.scalar(
+        select(func.count())
+        .select_from(FeatureModelRoute)
+        .where(
+            or_(
+                FeatureModelRoute.provider_id == provider_id,
+                FeatureModelRoute.fallback_provider_id == provider_id,
+            )
+        )
+    )
+    if in_use:
+        raise HTTPException(
+            status_code=409,
+            detail="این ارائه‌دهنده در مسیر مدل‌ها استفاده می‌شود؛ ابتدا مسیرها را تغییر دهید.",
+        )
+    await session.delete(provider)
+    await session.commit()
+    return {"deleted": True, "id": provider_id}
+
+
+@protected_router.post("/providers/{provider_id}/test")
+async def test_ai_provider(
+    provider_id: int,
+    session: AsyncSession = Depends(get_session),
+    run_prompt: bool = Query(default=True),
+) -> dict[str, object]:
+    """Live connectivity test for one stored provider (key decrypted server-side only)."""
+    from datetime import datetime, timezone
+
+    from app.services.ai_gateway import probe_provider
+
+    provider = await session.get(AiProvider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="ارائه‌دهنده پیدا نشد.")
+
+    route = await session.scalar(
+        select(FeatureModelRoute)
+        .where(FeatureModelRoute.provider_id == provider_id, FeatureModelRoute.is_active.is_(True))
+        .order_by(FeatureModelRoute.id.asc())
+    )
+    result = await probe_provider(
+        provider, provider_model=route.model_name if route else None, run_prompt=run_prompt
+    )
+    provider.last_test_status = "ok" if result.get("ok") else "failed"
+    provider.last_test_latency_ms = int(result.get("latency_ms") or 0)
+    provider.last_test_at = datetime.now(timezone.utc)
+    await session.commit()
+    return result
+
+
+@protected_router.get("/routes")
+async def list_feature_routes(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    from app.services.ai_provider_service import serialize_route
+
+    rows = (
+        await session.scalars(select(FeatureModelRoute).order_by(FeatureModelRoute.feature_key.asc()))
+    ).all()
+    providers = (await session.scalars(select(AiProvider).order_by(AiProvider.id.asc()))).all()
+    return {
+        "routes": [serialize_route(route) for route in rows],
+        "providers": [
+            {"id": p.id, "name": p.name, "is_active": p.is_active, "capabilities": list(p.capabilities or [])}
+            for p in providers
+        ],
+        "feature_keys": [
+            {"key": key, "label_fa": label} for key, label in FEATURE_ROUTE_LABELS.items()
+        ],
+    }
+
+
+@protected_router.put("/routes")
+async def upsert_feature_route(
+    body: FeatureRouteBody, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    from app.services.ai_provider_service import ROUTABLE_FEATURE_KEYS, serialize_route
+
+    if body.feature_key not in ROUTABLE_FEATURE_KEYS:
+        raise HTTPException(status_code=422, detail="کلید قابلیت انتخاب‌شده معتبر نیست.")
+    if await session.get(AiProvider, body.provider_id) is None:
+        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ انتخاب‌شده پیدا نشد.")
+    if body.fallback_provider_id is not None and await session.get(AiProvider, body.fallback_provider_id) is None:
+        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ جایگزین پیدا نشد.")
+
+    route = await session.scalar(
+        select(FeatureModelRoute).where(FeatureModelRoute.feature_key == body.feature_key)
+    )
+    if route is None:
+        route = FeatureModelRoute(feature_key=body.feature_key)
+        session.add(route)
+    route.provider_id = body.provider_id
+    route.model_name = body.model_name.strip()
+    route.temperature = body.temperature
+    route.max_tokens = body.max_tokens
+    route.fallback_provider_id = body.fallback_provider_id
+    route.fallback_model_name = (body.fallback_model_name or "").strip() or None
+    route.is_active = body.is_active
+    await session.commit()
+    await session.refresh(route)
+    return {"route": serialize_route(route)}
+
+
+@protected_router.delete("/routes/{feature_key}")
+async def delete_feature_route(
+    feature_key: str, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    route = await session.scalar(
+        select(FeatureModelRoute).where(FeatureModelRoute.feature_key == feature_key)
+    )
+    if route is None:
+        raise HTTPException(status_code=404, detail="مسیر مدل موردنظر پیدا نشد.")
+    await session.delete(route)
+    await session.commit()
+    return {"deleted": True, "feature_key": feature_key}
+
+
+@protected_router.get("/quotas")
+async def get_quota_policy(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    from app.services.quota_service import DEFAULT_QUOTA_POLICY, get_quota_policy as read_policy
+
+    policy = await read_policy(session)
+    return {"policy": policy, "defaults": DEFAULT_QUOTA_POLICY}
+
+
+@protected_router.put("/quotas")
+async def update_quota_policy(
+    body: QuotaPolicyBody, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    """Persist a quota policy override in `billing_settings.system_config["quotas"]`."""
+    from app.services.quota_service import DEFAULT_QUOTA_POLICY, QUOTA_POLICY_KEY
+
+    billing = await get_or_init_billing_settings(session)
+    config = dict(billing.system_config or {})
+    current = dict(DEFAULT_QUOTA_POLICY)
+    stored = config.get(QUOTA_POLICY_KEY)
+    if isinstance(stored, dict):
+        current.update({k: v for k, v in stored.items() if k in current and isinstance(v, int)})
+    for key, value in body.model_dump(exclude_none=True).items():
+        if key in current:
+            current[key] = int(value)
+    config[QUOTA_POLICY_KEY] = current
+    billing.system_config = config
+    from sqlalchemy.orm.attributes import flag_modified
+
+    flag_modified(billing, "system_config")
+    await session.commit()
+    return {"policy": current}
+
+
+@protected_router.get("/users/{user_id}/quota")
+async def get_user_quota(
+    user_id: str, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    from app.services.quota_service import get_quota_snapshot
+
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="کاربر پیدا نشد.")
+    snapshot = await get_quota_snapshot(session, user_id=user_id)
+    await session.commit()
+    return {"user_id": user_id, "quota": snapshot}
+
+
+@protected_router.put("/users/{user_id}/role")
+async def update_user_role(
+    user_id: str, body: AdminUserRoleBody, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    """Admin-only RBAC editing: role, grade level, major, plan, activation."""
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="کاربر پیدا نشد.")
+    if body.role is not None:
+        user.role = body.role
+    if body.grade_level is not None:
+        user.grade_level = body.grade_level
+    if body.major is not None:
+        user.major = body.major.strip() or None
+    if body.plan_id is not None:
+        user.plan_id = body.plan_id
+    if body.is_active is not None:
+        user.is_active = body.is_active
+    await session.commit()
+    await session.refresh(user)
+    return {
+        "user": {
+            "id": user.id,
+            "role": user.role,
+            "grade_level": user.grade_level,
+            "major": user.major,
+            "plan_id": user.plan_id,
+            "is_active": user.is_active,
+        }
+    }
+
+
+@protected_router.get("/audit-logs")
+async def list_audit_logs(
+    session: AsyncSession = Depends(get_session),
+    feature_key: str | None = Query(default=None, max_length=64),
+    status: Literal["success", "error", "blocked", "flagged"] | None = Query(default=None),
+    user_id: str | None = Query(default=None, max_length=36),
+    flagged_only: bool = Query(default=False),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, object]:
+    """Filterable glass-box audit trail (Rule 3)."""
+    stmt = select(AiAuditLog)
+    count_stmt = select(func.count()).select_from(AiAuditLog)
+    conditions = []
+    if feature_key:
+        conditions.append(AiAuditLog.feature_key == feature_key)
+    if status:
+        conditions.append(AiAuditLog.status == status)
+    if user_id:
+        conditions.append(AiAuditLog.user_id == user_id)
+    if flagged_only:
+        conditions.append(AiAuditLog.status == "flagged")
+    if date_from is not None:
+        conditions.append(AiAuditLog.created_at >= date_from)
+    if date_to is not None:
+        conditions.append(AiAuditLog.created_at <= date_to)
+    for condition in conditions:
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
+
+    total = int(await session.scalar(count_stmt) or 0)
+    rows = (
+        await session.scalars(
+            stmt.order_by(AiAuditLog.created_at.desc()).limit(limit).offset(offset)
+        )
+    ).all()
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": [_serialize_audit_summary(row) for row in rows],
+    }
+
+
+@protected_router.get("/audit-logs/summary")
+async def audit_summary(
+    session: AsyncSession = Depends(get_session),
+    days: int = Query(default=7, ge=1, le=90),
+) -> dict[str, object]:
+    """Token & cost summary cards: totals, by day, by feature, by user."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = (
+        await session.execute(
+            select(
+                AiAuditLog.feature_key,
+                AiAuditLog.user_id,
+                AiAuditLog.tokens_in,
+                AiAuditLog.tokens_out,
+                AiAuditLog.estimated_cost_usd,
+                AiAuditLog.status,
+                AiAuditLog.created_at,
+            ).where(AiAuditLog.created_at >= since)
+        )
+    ).all()
+
+    totals = {
+        "calls": len(rows),
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "estimated_cost_usd": 0.0,
+        "errors": 0,
+        "flagged": 0,
+    }
+    by_feature: dict[str, dict[str, float]] = {}
+    by_day: dict[str, dict[str, float]] = {}
+    by_user: dict[str, dict[str, float]] = {}
+    for feature, user, tokens_in, tokens_out, cost, status, created in rows:
+        totals["tokens_in"] += int(tokens_in or 0)
+        totals["tokens_out"] += int(tokens_out or 0)
+        totals["estimated_cost_usd"] = round(
+            float(totals["estimated_cost_usd"]) + float(cost or 0), 6
+        )
+        if status == "error":
+            totals["errors"] += 1
+        if status == "flagged":
+            totals["flagged"] += 1
+        day = created.strftime("%Y-%m-%d") if created else "unknown"
+        for bucket, key in ((by_feature, feature), (by_day, day), (by_user, user or "anonymous")):
+            entry = bucket.setdefault(
+                key, {"calls": 0, "tokens_in": 0, "tokens_out": 0, "estimated_cost_usd": 0.0}
+            )
+            entry["calls"] += 1
+            entry["tokens_in"] += int(tokens_in or 0)
+            entry["tokens_out"] += int(tokens_out or 0)
+            entry["estimated_cost_usd"] = round(
+                entry["estimated_cost_usd"] + float(cost or 0), 6
+            )
+    return {
+        "days": days,
+        "totals": totals,
+        "by_feature": by_feature,
+        "by_day": dict(sorted(by_day.items())),
+        "by_user": by_user,
+    }
+
+
+@protected_router.get("/audit-logs/{audit_id}")
+async def get_audit_log(
+    audit_id: str, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    row = await session.get(AiAuditLog, audit_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="رکورد موردنظر پیدا نشد.")
+    return {"item": _serialize_audit_detail(row)}
+
+
+@protected_router.post("/audit-logs/{audit_id}/flag")
+async def flag_audit_log(
+    audit_id: str,
+    body: AuditFlagBody,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    row = await session.get(AiAuditLog, audit_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="رکورد موردنظر پیدا نشد.")
+    identity = getattr(request.state, "admin_identity", None) or {}
+    row.status = "flagged"
+    row.flag_reason = (body.reason or "admin_review").strip()[:255]
+    row.flagged_by = identity.get("user_id")
+    await session.commit()
+    return {"item": _serialize_audit_summary(row)}
+
+
+def _serialize_audit_summary(row: AiAuditLog) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "user_id": row.user_id,
+        "session_id": row.session_id,
+        "feature_key": row.feature_key,
+        "provider_id": row.provider_id,
+        "model_name": row.model_name,
+        "tokens_in": row.tokens_in,
+        "tokens_out": row.tokens_out,
+        "estimated_cost_usd": row.estimated_cost_usd,
+        "latency_ms": row.latency_ms,
+        "status": row.status,
+        "rag_hit_count": row.rag_hit_count,
+        "flag_reason": row.flag_reason,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "preview": (row.response_text or "")[:160],
+    }
+
+
+def _serialize_audit_detail(row: AiAuditLog) -> dict[str, object]:
+    payload = _serialize_audit_summary(row)
+    payload.update(
+        {
+            "request_messages_json": row.request_messages_json or [],
+            "response_text": row.response_text,
+            "rag_citations_json": row.rag_citations_json or [],
+            "error_message": row.error_message,
+            "skill_id": row.skill_id,
+            "flagged_by": row.flagged_by,
+        }
+    )
+    return payload
 
 
 router.include_router(protected_router)
