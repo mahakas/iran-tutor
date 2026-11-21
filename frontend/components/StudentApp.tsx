@@ -821,6 +821,7 @@ export default function StudentApp() {
     openLoginModal,
     persistConversation,
     refreshAccount,
+    runTextTurn,
     setCurrentUser,
     tutoringMode,
   ]);
@@ -1078,7 +1079,7 @@ export default function StudentApp() {
     [lang]
   );
 
-  const visibleMessages = currentUser ? messages : [];
+  const visibleMessages = useMemo(() => (currentUser ? messages : []), [currentUser, messages]);
   const lastAssistantId = useMemo(() => {
     for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
       if (visibleMessages[i].role === "assistant") return visibleMessages[i].id;

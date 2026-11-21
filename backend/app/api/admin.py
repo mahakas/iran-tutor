@@ -20,7 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, or_, select, text as sql_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.client_ip import client_ip, constant_time_equal
 from app.core.config import get_base_settings, get_settings
+from app.core.signing import derive_session_key
+from app.services.rate_limiter import check_rate_limit
 from app.core.runtime_config import (
     ALL_RUNTIME_FIELDS,
     RESET_SECTION_FIELDS,
@@ -81,16 +84,8 @@ logger = logging.getLogger(__name__)
 
 
 def _admin_signing_key() -> bytes:
-    settings = get_settings()
-    base = get_base_settings()
-    overrides = get_runtime_overrides()
-    stable_llm_key = (
-        base.llm_api_key if "llm_api_key" in overrides else getattr(settings, "llm_api_key", "")
-    )
-    material = (
-        f"iran-tutor-admin-v2:{settings.admin_username}:{settings.admin_password}:{stable_llm_key}"
-    ).encode("utf-8")
-    return hashlib.sha256(material).digest()
+    # Derived from AUTH_SECRET / SECRET_KEY only. Never from the LLM key or admin password.
+    return derive_session_key("iran-tutor-admin-v3")
 
 
 def create_admin_session_token(*, ttl_seconds: int | None = None) -> str:
@@ -107,7 +102,7 @@ def verify_admin_session_token(token: str | None) -> bool:
     if not token or token.count(".") != 2:
         return False
     expires_raw, nonce, signature = token.split(".", 2)
-    if not expires_raw.isdigit() or not nonce or not signature:
+    if not (expires_raw.isascii() and expires_raw.isdigit()) or not nonce or not signature:
         return False
     if int(expires_raw) <= int(time.time()):
         return False
@@ -116,7 +111,7 @@ def verify_admin_session_token(token: str | None) -> bool:
         f"{expires_raw}.{nonce}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    return constant_time_equal(signature, expected)
 
 
 def _is_admin_authenticated(request: Request) -> bool:
@@ -139,8 +134,8 @@ def _is_admin_authenticated(request: Request) -> bool:
     if (
         header_user
         and header_pw
-        and hmac.compare_digest(header_user, settings.admin_username)
-        and hmac.compare_digest(header_pw, settings.admin_password)
+        and constant_time_equal(header_user, settings.admin_username)
+        and constant_time_equal(header_pw, settings.admin_password)
     ):
         return True
 
@@ -214,6 +209,10 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 protected_router = APIRouter(dependencies=[Depends(require_admin)])
 
 
+ADMIN_LOGIN_RATE_LIMIT = 10
+ADMIN_LOGIN_RATE_WINDOW_SECONDS = 900
+
+
 class AdminLoginBody(BaseModel):
     username: str
     password: str
@@ -231,10 +230,22 @@ async def get_admin_session(request: Request) -> dict[str, object]:
 @router.post("/auth/login")
 async def admin_login(body: AdminLoginBody, request: Request, response: Response) -> dict[str, object]:
     settings = get_settings()
-    valid_user = bool(settings.admin_username) and hmac.compare_digest(
+    decision = await check_rate_limit(
+        identity=f"admin_login:{client_ip(request)}",
+        bucket="admin_login",
+        limit=ADMIN_LOGIN_RATE_LIMIT,
+        window_seconds=ADMIN_LOGIN_RATE_WINDOW_SECONDS,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="تعداد تلاش‌های ورود بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.",
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
+    valid_user = bool(settings.admin_username) and constant_time_equal(
         body.username.strip(), settings.admin_username
     )
-    valid_pass = bool(settings.admin_password) and hmac.compare_digest(
+    valid_pass = bool(settings.admin_password) and constant_time_equal(
         body.password, settings.admin_password
     )
     if not (valid_user and valid_pass):

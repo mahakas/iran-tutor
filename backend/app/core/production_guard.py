@@ -5,6 +5,7 @@ secrets still have their development values:
 
 * `ADMIN_PASSWORD` is a known-weak value, shorter than 12 characters, or a placeholder.
 * `SECRET_KEY` is missing, shorter than 32 characters, or a placeholder.
+* `DEMO_MODE` is enabled. Demo mode returns the SMS OTP code in API responses.
 
 Outside production nothing is blocked; the admin password still logs a warning.
 """
@@ -41,6 +42,8 @@ def is_weak_secret_key(value: str | None) -> bool:
 
 def production_violations(settings: Any) -> list[str]:
     problems: list[str] = []
+    if bool(getattr(settings, "demo_mode", False)):
+        problems.append("DEMO_MODE must be false in production (it exposes OTP codes in API responses)")
     if is_weak_admin_password(getattr(settings, "admin_password", None)):
         problems.append(
             f"ADMIN_PASSWORD is weak or default (must be at least {MIN_ADMIN_PASSWORD_LEN} characters and not a placeholder)"

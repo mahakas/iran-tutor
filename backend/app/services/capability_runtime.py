@@ -33,6 +33,7 @@ from app.services.ai_gateway import (
     GatewayResult,
     complete_json_via_gateway,
     complete_text_via_gateway,
+    speech_via_gateway,
 )
 from app.services.learning_blocks import LearningBlock, blocks_from_answer, parse_blocks_json
 from app.services.grounding_guard import check_textbook_grounding

@@ -50,6 +50,25 @@ def _warn_insecure_admin_defaults() -> None:
 app = FastAPI(title="Iran AI Tutor", version="0.1.0", lifespan=lifespan)
 
 
+# Baseline security headers for every API response. The frontend sets the same headers
+# in next.config.ts. Microphone is allowed for same-origin voice input only.
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), geolocation=(), microphone=(self)",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):  # type: ignore[no-untyped-def]
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
+
+
 @app.get("/health")
 async def health(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
     await session.execute(text("SELECT 1"))

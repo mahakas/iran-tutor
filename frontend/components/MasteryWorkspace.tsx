@@ -18,10 +18,7 @@ export default function MasteryWorkspace() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!bookId) {
-      setTree(null);
-      return;
-    }
+    if (!bookId) return;
     let cancelled = false;
     (async () => {
       const res = await authFetch(`/api/v1/mastery/books/${bookId}`);
@@ -39,25 +36,26 @@ export default function MasteryWorkspace() {
       cancelled = true;
     };
   }, [authFetch, bookId]);
-
+  // Derived, not reset in an effect: a cleared book shows no tree.
+  const shownTree = bookId ? tree : null;
   return (
     <div dir="rtl" style={{ display: "grid", gap: 16 }}>
       <BookGradePicker value={bookId} onChange={setBookId} />
       {!bookId ? <div className="glass-panel" style={{ padding: 20 }}>یک کتاب را انتخاب کنید.</div> : null}
       {error ? <div className="glass-panel" style={{ padding: 20 }}>{error}</div> : null}
-      {tree ? (
+      {shownTree ? (
         <>
           <div className="glass-panel" style={{ padding: 16, display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "space-between" }}>
             <span>
-              {tree.book.title} · {toPersianDigits(tree.mastered_count)} از {toPersianDigits(tree.chapters.length)} فصل تسلط یافته
+              {shownTree.book.title} · {toPersianDigits(shownTree.mastered_count)} از {toPersianDigits(shownTree.chapters.length)} فصل تسلط یافته
             </span>
             <span>
-              آستانهٔ تسلط: {toPersianDigits(Math.round(tree.threshold * 100))}٪ · حالت: {tree.unlock_mode === "sequential" ? "ترتیبی" : "باز"}
+              آستانهٔ تسلط: {toPersianDigits(Math.round(shownTree.threshold * 100))}٪ · حالت: {shownTree.unlock_mode === "sequential" ? "ترتیبی" : "باز"}
             </span>
-            <Link href={`/study/${tree.book.id}`}>مطالعهٔ کتاب</Link>
+            <Link href={`/study/${shownTree.book.id}`}>مطالعهٔ کتاب</Link>
           </div>
           <ol style={{ display: "grid", gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
-            {tree.chapters.map((chapter) => {
+            {shownTree.chapters.map((chapter) => {
               const percent = chapter.score === null ? null : Math.round(chapter.score * 100);
               return (
                 <li key={chapter.chapter_number} className="glass-panel" style={{ padding: 14, opacity: chapter.status === "locked" ? 0.6 : 1 }}>
