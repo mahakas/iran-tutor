@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlparse
@@ -102,6 +103,46 @@ def page_embedding_text(markdown: str, visual_elements: Sequence[dict[str, Any]]
     return "\n\n".join(parts)
 
 
+@dataclass(frozen=True)
+class TextbookScope:
+    """One permitted (book, grade, major) slice, optionally limited to some chapters.
+
+    Multi-grade Konkoor retrieval passes several scopes at once; every channel
+    (PostgreSQL lexical, pgvector, Qdrant) applies the OR of these slices.
+    """
+
+    book_id: int
+    grade_number: int
+    major_code: str | None = None
+    chapter_numbers: frozenset[int] | None = None
+
+
+def make_scope_filter(scopes: Sequence[TextbookScope]) -> models.Filter:
+    """Qdrant filter: OR over scopes; each scope = exact grade + major + book (+ chapters)."""
+    if not scopes:
+        raise ValueError("at least one textbook scope is required")
+    options: list[models.Filter] = []
+    for scope in scopes:
+        must: list[models.Condition] = [
+            models.FieldCondition(key="grade_number", match=models.MatchValue(value=scope.grade_number)),
+            models.FieldCondition(
+                key="major_code", match=models.MatchValue(value=scope.major_code or "general")
+            ),
+            models.FieldCondition(key="book_id", match=models.MatchValue(value=scope.book_id)),
+        ]
+        if scope.chapter_numbers:
+            must.append(
+                models.FieldCondition(
+                    key="chapter_number",
+                    match=models.MatchAny(any=sorted(scope.chapter_numbers)),
+                )
+            )
+        options.append(models.Filter(must=must))
+    if len(options) == 1:
+        return options[0]
+    return models.Filter(should=options)
+
+
 def make_textbook_filter(
     *, grade_number: int, major_code: str | None, book_id: int | None = None
 ) -> models.Filter:
@@ -184,6 +225,7 @@ async def ensure_collection() -> None:
         ("grade_number", models.PayloadSchemaType.INTEGER),
         ("major_code", models.PayloadSchemaType.KEYWORD),
         ("book_id", models.PayloadSchemaType.INTEGER),
+        ("chapter_number", models.PayloadSchemaType.INTEGER),
     ):
         await client.create_payload_index(
             collection_name=settings.qdrant_collection,
@@ -322,6 +364,126 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
         "indexed_pages": len(points),
         "skipped_empty_pages": len(pages) - len(documents),
     }
+
+
+def _scope_sql_clause(scopes: Sequence[TextbookScope]):
+    """SQLAlchemy OR-clause for PostgreSQL/demo queries over joined book/grade/major/page."""
+    from sqlalchemy import and_, or_
+
+    clauses = []
+    for scope in scopes:
+        conditions = [
+            Book.id == scope.book_id,
+            Grade.number == scope.grade_number,
+            func.coalesce(Major.code, "general") == (scope.major_code or "general"),
+        ]
+        if scope.chapter_numbers:
+            conditions.append(BookPage.chapter_number.in_(sorted(scope.chapter_numbers)))
+        clauses.append(and_(*conditions))
+    return or_(*clauses)
+
+
+async def _search_postgres_scopes(
+    query: str, *, scopes: Sequence[TextbookScope], limit: int
+) -> list[dict[str, Any]]:
+    """Keyword/full-text channel over approved textbook pages.
+
+    Demo mode uses a small deterministic token-overlap scorer so the project can
+    be explored with SQLite and no PostgreSQL/Qdrant/embedding credentials.
+    """
+    scope_clause = _scope_sql_clause(scopes)
+    if get_settings().demo_mode:
+        def _terms(value: str) -> set[str]:
+            normalized = normalize_persian_text(value).casefold()
+            tokens = re.findall(r"[\w۰-۹]+", normalized)
+            filtered = {t for t in tokens if len(t) > 1 and t not in _PERSIAN_STOPWORDS}
+            return filtered or set(tokens)
+
+        query_terms = _terms(query)
+        async with async_session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(BookPage, Book.title, Grade.number, func.coalesce(Major.code, "general"))
+                    .join(Book, BookPage.book_id == Book.id)
+                    .join(Grade, Book.grade_id == Grade.id)
+                    .outerjoin(Major, Book.major_id == Major.id)
+                    .where(scope_clause, BookPage.status == PageStatus.done)
+                    .order_by(BookPage.pdf_page_index.asc())
+                )
+            ).all()
+        matches: list[dict[str, Any]] = []
+        for page, title, grade, major in rows:
+            full_text = page_embedding_text(page.markdown_content, page.visual_elements)
+            page_terms = _terms(full_text)
+            overlap = len(query_terms & page_terms)
+            if overlap:
+                matches.append(
+                    {
+                        "book_id": page.book_id,
+                        "book_title": title,
+                        "grade_number": grade,
+                        "major_code": major,
+                        "pdf_page_index": page.pdf_page_index,
+                        "printed_page_number": page.printed_page_number,
+                        "chapter_number": page.chapter_number,
+                        "chapter_title": page.chapter_title,
+                        "full_text": full_text,
+                        "markdown_content": page.markdown_content,
+                        "visual_elements": page.visual_elements or [],
+                        "lexical_score": float(overlap),
+                    }
+                )
+        return sorted(matches, key=lambda item: item["lexical_score"], reverse=True)[:limit]
+
+    raw_doc = func.concat(
+        func.coalesce(BookPage.markdown_content, ""),
+        " ",
+        cast(BookPage.visual_elements, Text),
+    )
+    normalized_doc = func.replace(
+        func.replace(func.replace(raw_doc, "ي", "ی"), "ك", "ک"),
+        "\u200c",
+        " ",
+    )
+    ts_document = func.to_tsvector("simple", normalized_doc)
+    lexical_query = build_lexical_query(query)
+    if not lexical_query:
+        return []
+    ts_query = func.websearch_to_tsquery("simple", lexical_query)
+    rank = func.ts_rank_cd(ts_document, ts_query).label("lexical_score")
+
+    async with async_session_factory() as session:
+        statement = (
+            select(BookPage, Book.title, Grade.number, func.coalesce(Major.code, "general"), rank)
+            .join(Book, BookPage.book_id == Book.id)
+            .join(Grade, Book.grade_id == Grade.id)
+            .outerjoin(Major, Book.major_id == Major.id)
+            .where(scope_clause, BookPage.status == PageStatus.done, ts_document.op("@@")(ts_query))
+            .order_by(rank.desc(), BookPage.pdf_page_index.asc())
+            .limit(limit)
+        )
+        rows = (await session.execute(statement)).all()
+
+    matches: list[dict[str, Any]] = []
+    for page, title, grade, major, lexical_score in rows:
+        full_text = page_embedding_text(page.markdown_content, page.visual_elements)
+        matches.append(
+            {
+                "book_id": page.book_id,
+                "book_title": title,
+                "grade_number": grade,
+                "major_code": major,
+                "pdf_page_index": page.pdf_page_index,
+                "printed_page_number": page.printed_page_number,
+                "chapter_number": page.chapter_number,
+                "chapter_title": page.chapter_title,
+                "full_text": full_text,
+                "markdown_content": page.markdown_content,
+                "visual_elements": page.visual_elements or [],
+                "lexical_score": float(lexical_score),
+            }
+        )
+    return matches
 
 
 async def _search_postgres(
@@ -466,6 +628,81 @@ def merge_hybrid_results(
     return sorted(merged.values(), key=lambda item: item["score"], reverse=True)[:top_k]
 
 
+async def _search_pgvector_scopes(
+    query: str, *, scopes: Sequence[TextbookScope], limit: int
+) -> list[dict[str, Any]]:
+    vector = (
+        await embed_via_gateway(
+            ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
+            texts=[query],
+        )
+    ).content[0]
+    params: dict[str, Any] = {"query_vector": json.dumps(vector), "limit": limit}
+    clauses: list[str] = []
+    for index, scope in enumerate(scopes):
+        clause = (
+            f"(e.book_id = :book_id_{index} AND e.grade_number = :grade_{index} "
+            f"AND e.major_code = :major_{index}"
+        )
+        params[f"book_id_{index}"] = scope.book_id
+        params[f"grade_{index}"] = scope.grade_number
+        params[f"major_{index}"] = scope.major_code or "general"
+        if scope.chapter_numbers:
+            clause += f" AND bp.chapter_number = ANY(:chapters_{index})"
+            params[f"chapters_{index}"] = sorted(scope.chapter_numbers)
+        clauses.append(clause + ")")
+    statement = sql_text(
+        """
+        SELECT
+            bp.book_id,
+            b.title AS book_title,
+            e.grade_number,
+            e.major_code,
+            bp.pdf_page_index,
+            bp.printed_page_number,
+            bp.chapter_number,
+            bp.chapter_title,
+            bp.markdown_content,
+            bp.visual_elements,
+            (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) AS score
+        FROM public.book_page_embeddings e
+        JOIN public.book_pages bp ON bp.id = e.book_page_id
+        JOIN public.books b ON b.id = bp.book_id
+        WHERE ("""
+        + " OR ".join(clauses)
+        + """)
+          AND bp.status = 'done'
+          AND (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) >= 0.15
+        ORDER BY e.embedding <=> CAST(:query_vector AS vector) ASC, bp.pdf_page_index ASC
+        LIMIT :limit
+        """
+    )
+    async with async_session_factory() as session:
+        rows = (await session.execute(statement, params)).mappings().all()
+
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        visuals = row["visual_elements"] or []
+        markdown = row["markdown_content"] or ""
+        results.append(
+            {
+                "book_id": row["book_id"],
+                "book_title": row["book_title"],
+                "grade_number": row["grade_number"],
+                "major_code": row["major_code"],
+                "pdf_page_index": row["pdf_page_index"],
+                "printed_page_number": row["printed_page_number"],
+                "chapter_number": row["chapter_number"],
+                "chapter_title": row["chapter_title"],
+                "full_text": page_embedding_text(markdown, visuals),
+                "markdown_content": markdown,
+                "visual_elements": visuals,
+                "score": float(row["score"]),
+            }
+        )
+    return results
+
+
 async def _search_pgvector(
     query: str,
     *,
@@ -544,6 +781,29 @@ async def _search_pgvector(
     return results
 
 
+async def _search_qdrant_scopes(
+    query: str, *, scopes: Sequence[TextbookScope], limit: int
+) -> list[dict[str, Any]]:
+    vector = (
+        await embed_via_gateway(
+            ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
+            texts=[query],
+        )
+    ).content[0]
+    settings = get_settings()
+    response = await _get_qdrant().query_points(
+        collection_name=settings.qdrant_collection,
+        query=vector,
+        query_filter=make_scope_filter(scopes),
+        limit=limit,
+        with_payload=True,
+        score_threshold=0.15,
+    )
+    return [
+        {**(point.payload or {}), "score": float(point.score)} for point in response.points
+    ]
+
+
 async def _search_qdrant(
     query: str,
     *,
@@ -572,6 +832,47 @@ async def _search_qdrant(
     return [
         {**(point.payload or {}), "score": float(point.score)} for point in response.points
     ]
+
+
+async def search_textbook_scopes(
+    query: str,
+    *,
+    scopes: Sequence[TextbookScope],
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """Hybrid search across one or more exact (book, grade, major[, chapters]) scopes.
+
+    PostgreSQL's `simple` full-text search and the vector backend are fused with
+    reciprocal-rank fusion. If the vector provider/backend is unavailable,
+    approved PostgreSQL lexical matches remain usable.
+    """
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    if top_k < 1 or top_k > 20:
+        raise ValueError("top_k must be between 1 and 20")
+    if not scopes:
+        raise ValueError("at least one textbook scope is required")
+
+    candidate_limit = min(max(top_k * 4, 20), 100)
+    lexical_results = await _search_postgres_scopes(query, scopes=scopes, limit=candidate_limit)
+
+    if get_settings().demo_mode:
+        vector_results = []
+    else:
+        try:
+            if get_settings().vector_backend == "pgvector":
+                vector_results = await _search_pgvector_scopes(
+                    query, scopes=scopes, limit=candidate_limit
+                )
+            else:
+                vector_results = await _search_qdrant_scopes(
+                    query, scopes=scopes, limit=candidate_limit
+                )
+        except Exception:  # noqa: BLE001 - lexical fallback is intentional
+            logger.exception("vector search unavailable; using PostgreSQL lexical results")
+            vector_results = []
+
+    return merge_hybrid_results(vector_results, lexical_results, top_k=top_k)
 
 
 async def search_textbook(

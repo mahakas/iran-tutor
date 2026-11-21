@@ -295,6 +295,13 @@ export type ChatMessage = {
   /** Typed Learning Blocks (Phase 2) — see lib/learningBlocks.ts. */
   blocks?: unknown[];
   attachment?: string;
+  /** Phase 4: streaming placeholder while the answer is still arriving. */
+  pending?: boolean;
+  /** Phase 4: stream that produced this answer (used for Regenerate bookkeeping). */
+  streamId?: string;
+  /** Phase 4: mode chosen by the Auto-Mode router (only set in Auto mode). */
+  routedMode?: TutorMode;
+  routerSource?: "llm" | "heuristic";
 };
 
 export type ChatSessionSummary = {

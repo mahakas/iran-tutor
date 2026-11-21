@@ -8,7 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+import asyncio
+import json
+from dataclasses import dataclass
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -34,6 +39,16 @@ from app.services.capability_service import check_capability_access
 from app.services.quota_service import enforce_ai_quota
 from app.services.multimodal_service import answer_audio_question, answer_image_question
 from app.services.tutor_service import TutorMode, answer_from_textbook
+from app.services.chat_stream import (
+    StreamParams,
+    get_stream_store,
+    serialize_stream_event,
+    start_stream,
+    stop_stream,
+)
+from app.services.intent_router import route_intent
+from app.services.multi_grade_rag import ScopeError, build_scopes
+from app.services.tutor_turns import finish_turn_success
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/tutor", tags=["tutor"])
@@ -82,12 +97,21 @@ AUDIO_MIME_BY_SUFFIX = {
 
 class AskRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
-    grade_number: int = Field(ge=1, le=12)
+    # Single-book scope (Phase 1-3). Required unless `grade_numbers` is set.
+    grade_number: int | None = Field(default=None, ge=1, le=12)
     major_code: str | None = Field(default=None, max_length=64)
-    book_id: int = Field(gt=0)
+    book_id: int | None = Field(default=None, gt=0)
     top_k: int = Field(default=5, ge=1, le=20)
     mode: TutorMode = "tutor"
     chat_session_id: str | None = Field(default=None, max_length=64)
+    # Phase 4: multi-grade Konkoor scope and Auto-Mode router.
+    grade_numbers: list[int] | None = Field(default=None, max_length=3)
+    book_ids: list[int] | None = Field(default=None, max_length=12)
+    auto_mode: bool = False
+
+
+class StreamRequest(AskRequest):
+    regenerate_of: str | None = Field(default=None, max_length=64)
 
 
 class ChatMessageItem(BaseModel):
@@ -125,6 +149,7 @@ def _serialize_chat_summary(
     chat: ChatSession, *, book_title: str | None = None
 ) -> dict[str, object]:
     return {
+        "deleted_at": _utc_iso(chat.deleted_at),
         "id": chat.id,
         "title": chat.title,
         "book_id": chat.book_id,
@@ -241,53 +266,108 @@ async def _finalize_usage(
         }
 
 
-@router.post("/ask")
-async def ask_tutor(
-    body: AskRequest,
-    current_user: User = Depends(require_student),
-    session: AsyncSession = Depends(get_session),
-) -> dict[str, object]:
+async def _resolve_request_scope(
+    session: AsyncSession, body: AskRequest
+) -> tuple[Any, int | None, str | None, list[int] | None, list[int] | None]:
+    """Return (book, grade_number, major_code, grade_numbers, book_ids).
+
+    Single-book requests keep the strict Phase 1-3 checks. Multi-grade requests
+    validate the grade/book combination up front so bad input is a 422.
+    """
+    if body.grade_numbers:
+        grades = sorted(set(body.grade_numbers))
+        try:
+            await build_scopes(session, grade_numbers=grades, book_ids=body.book_ids)
+        except ScopeError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return None, None, None, grades, body.book_ids
+    if body.grade_number is None or body.book_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="grade_number and book_id are required unless grade_numbers is set",
+        )
     book, grade, major_code = await resolve_book_scope(
         session,
         book_id=body.book_id,
         grade_number=body.grade_number,
         major_code=body.major_code,
     )
-    await check_capability_access(
-        session, TUTOR_MODE_CAPABILITIES.get(body.mode, "chat"), current_user
+    return book, grade.number, major_code, None, None
+
+
+@router.post("/ask")
+async def ask_tutor(
+    body: AskRequest,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    book, grade_number, major_code, grade_numbers, book_ids = await _resolve_request_scope(
+        session, body
     )
-    await enforce_ai_quota(
-        session,
-        user=current_user,
-        feature_key=TUTOR_MODE_FEATURES.get(body.mode, "chat"),
-    )
+    mode: TutorMode = body.mode
+    decision = None
+    if body.auto_mode:
+        # Gate quota before any router model call, then route, then check the chosen mode.
+        await check_capability_access(session, "chat", current_user)
+        await enforce_ai_quota(session, user=current_user, feature_key="chat")
+        decision = await route_intent(
+            query=body.query,
+            user_id=current_user.id,
+            session_id=body.chat_session_id,
+            db_session=session,
+        )
+        mode = decision.mode  # type: ignore[assignment]
+        await check_capability_access(session, TUTOR_MODE_CAPABILITIES.get(mode, "chat"), current_user)
+    else:
+        await check_capability_access(
+            session, TUTOR_MODE_CAPABILITIES.get(body.mode, "chat"), current_user
+        )
+        await enforce_ai_quota(
+            session,
+            user=current_user,
+            feature_key=TUTOR_MODE_FEATURES.get(body.mode, "chat"),
+        )
     try:
         with track_token_usage() as usage:
             result = await answer_from_textbook(
                 query=body.query,
-                grade_number=grade.number,
+                grade_number=grade_number,
                 major_code=major_code,
-                book_id=book.id,
+                book_id=book.id if book is not None else None,
                 top_k=body.top_k,
-                mode=body.mode,
+                mode=mode,
                 user_id=current_user.id,
                 session_id=body.chat_session_id,
                 db_session=session,
+                grade_numbers=grade_numbers,
+                book_ids=book_ids,
             )
     except Exception as error:  # noqa: BLE001 - do not expose provider details
         raise _provider_failure(error, operation="tutor") from error
 
-    await _finalize_usage(
+    result["mode"] = mode
+    if decision is not None:
+        result["router"] = decision.to_payload()
+    await finish_turn_success(
         session,
-        user=current_user,
-        action="tutor_ask",
-        book_id=book.id,
-        prompt_tokens=usage.prompt_tokens,
-        completion_tokens=usage.completion_tokens,
-        total_tokens=usage.total_tokens,
+        user_id=current_user.id,
+        params=_TurnParams(
+            query=body.query,
+            book_id=book.id if book is not None else None,
+            chat_session_id=body.chat_session_id,
+        ),
+        mode=mode,
         result=result,
+        usage=usage,
     )
     return result
+
+
+@dataclass(frozen=True)
+class _TurnParams:
+    query: str
+    book_id: int | None
+    chat_session_id: str | None
 
 
 @router.post("/ask-image")
@@ -438,6 +518,10 @@ async def ask_tutor_with_audio(
     return result
 
 
+def _active_chat_filter(current_user: User):
+    return (ChatSession.user_id == current_user.id, ChatSession.deleted_at.is_(None))
+
+
 @router.get("/sessions")
 async def list_chat_sessions(
     limit: int = Query(default=30, ge=1, le=100),
@@ -448,9 +532,77 @@ async def list_chat_sessions(
         await session.execute(
             select(ChatSession, Book.title)
             .outerjoin(Book, ChatSession.book_id == Book.id)
-            .where(ChatSession.user_id == current_user.id)
+            .where(*_active_chat_filter(current_user))
             .order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
             .limit(limit)
+        )
+    ).all()
+    return [_serialize_chat_summary(chat, book_title=book_title) for chat, book_title in rows]
+
+
+def _snippet(text: str, needle: str, radius: int = 60) -> str:
+    index = text.casefold().find(needle.casefold())
+    if index < 0:
+        return text[: radius * 2]
+    start = max(0, index - radius)
+    return ("…" if start > 0 else "") + text[start : index + len(needle) + radius] + "…"
+
+
+@router.get("/sessions/search")
+async def search_chat_sessions(
+    q: str = Query(min_length=1, max_length=120),
+    limit: int = Query(default=20, ge=1, le=50),
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Search titles and message bodies of active (not deleted) chats."""
+    needle = q.strip()
+    if not needle:
+        raise HTTPException(status_code=422, detail="q must not be blank")
+    rows = (
+        await session.execute(
+            select(ChatSession, Book.title)
+            .outerjoin(Book, ChatSession.book_id == Book.id)
+            .where(*_active_chat_filter(current_user))
+            .order_by(ChatSession.updated_at.desc())
+            .limit(300)
+        )
+    ).all()
+    results: list[dict[str, object]] = []
+    for chat, book_title in rows:
+        messages = chat.messages or []
+        hit = None
+        if needle.casefold() in (chat.title or "").casefold():
+            hit = {"message_id": None, "role": None, "snippet": chat.title}
+        else:
+            for message in messages:
+                content = str(message.get("content") or "")
+                if needle.casefold() in content.casefold():
+                    hit = {
+                        "message_id": message.get("id"),
+                        "role": message.get("role"),
+                        "snippet": _snippet(content, needle),
+                    }
+                    break
+        if hit is not None:
+            results.append({**_serialize_chat_summary(chat, book_title=book_title), "match": hit})
+        if len(results) >= limit:
+            break
+    return {"query": needle, "count": len(results), "results": results}
+
+
+@router.get("/sessions/trash")
+async def list_trashed_chat_sessions(
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, object]]:
+    rows = (
+        await session.execute(
+            select(ChatSession, Book.title)
+            .outerjoin(Book, ChatSession.book_id == Book.id)
+            .where(ChatSession.user_id == current_user.id, ChatSession.deleted_at.is_not(None))
+            .order_by(ChatSession.deleted_at.desc())
+            .limit(100)
         )
     ).all()
     return [_serialize_chat_summary(chat, book_title=book_title) for chat, book_title in rows]
@@ -486,6 +638,22 @@ async def create_chat_session(
     return {**_serialize_chat_summary(chat, book_title=book.title), "messages": chat.messages}
 
 
+async def _owned_chat(
+    session: AsyncSession, user: User, session_id: str, *, trashed: bool | None
+) -> ChatSession:
+    """Load a chat owned by `user`. trashed=False: active only; True: trash only; None: any."""
+    chat = await session.scalar(
+        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user.id)
+    )
+    if chat is None:
+        raise HTTPException(status_code=404, detail="chat session not found")
+    if trashed is False and chat.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="chat session not found")
+    if trashed is True and chat.deleted_at is None:
+        raise HTTPException(status_code=409, detail="chat session is not in the recycle bin")
+    return chat
+
+
 @router.get("/sessions/{session_id}")
 async def get_chat_session(
     session_id: str,
@@ -496,7 +664,11 @@ async def get_chat_session(
         await session.execute(
             select(ChatSession, Book.title)
             .outerjoin(Book, ChatSession.book_id == Book.id)
-            .where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
+            .where(
+                ChatSession.id == session_id,
+                ChatSession.user_id == current_user.id,
+                ChatSession.deleted_at.is_(None),
+            )
         )
     ).first()
     if row is None:
@@ -512,11 +684,7 @@ async def update_chat_session(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    chat = await session.scalar(
-        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
-    )
-    if chat is None:
-        raise HTTPException(status_code=404, detail="chat session not found")
+    chat = await _owned_chat(session, current_user, session_id, trashed=False)
     if body.title is not None:
         chat.title = body.title.strip()[:255] or chat.title
     if body.mode is not None:
@@ -538,11 +706,144 @@ async def delete_chat_session(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    chat = await session.scalar(
-        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
-    )
-    if chat is None:
-        raise HTTPException(status_code=404, detail="chat session not found")
+    """Soft delete: the chat moves to the Recycle Bin and can be restored."""
+    chat = await _owned_chat(session, current_user, session_id, trashed=False)
+    chat.deleted_at = datetime.now(timezone.utc)
+    await session.commit()
+    return {"deleted": True, "soft": True, "id": session_id}
+
+
+@router.post("/sessions/{session_id}/restore")
+async def restore_chat_session(
+    session_id: str,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    chat = await _owned_chat(session, current_user, session_id, trashed=True)
+    chat.deleted_at = None
+    chat.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(chat)
+    book = await session.get(Book, chat.book_id)
+    return {
+        **_serialize_chat_summary(chat, book_title=book.title if book else None),
+        "messages": chat.messages,
+    }
+
+
+@router.delete("/sessions/{session_id}/permanent")
+async def purge_chat_session(
+    session_id: str,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Hard delete, allowed only for chats already in the Recycle Bin."""
+    chat = await _owned_chat(session, current_user, session_id, trashed=True)
     await session.delete(chat)
     await session.commit()
-    return {"deleted": True, "id": session_id}
+    return {"deleted": True, "soft": False, "id": session_id}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: recoverable streaming (SSE with stream_id + cursor, Stop, Regenerate)
+# ---------------------------------------------------------------------------
+_STREAM_POLL_SECONDS = 0.1
+
+
+@router.post("/stream")
+async def start_tutor_stream(
+    body: StreamRequest,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Start a generation. Regenerate = call again with `regenerate_of` set."""
+    book, grade_number, major_code, grade_numbers, book_ids = await _resolve_request_scope(
+        session, body
+    )
+    if body.auto_mode:
+        await check_capability_access(session, "chat", current_user)
+        await enforce_ai_quota(session, user=current_user, feature_key="chat")
+    else:
+        await check_capability_access(
+            session, TUTOR_MODE_CAPABILITIES.get(body.mode, "chat"), current_user
+        )
+        await enforce_ai_quota(
+            session, user=current_user, feature_key=TUTOR_MODE_FEATURES.get(body.mode, "chat")
+        )
+    # Release the request transaction; the background run owns its own session.
+    await session.commit()
+    stream_id = await start_stream(
+        StreamParams(
+            user_id=current_user.id,
+            query=body.query,
+            mode=body.mode,
+            auto_mode=body.auto_mode,
+            grade_number=grade_number,
+            major_code=major_code,
+            book_id=book.id if book is not None else None,
+            top_k=body.top_k,
+            chat_session_id=body.chat_session_id,
+            grade_numbers=grade_numbers,
+            book_ids=book_ids,
+            regenerate_of=body.regenerate_of,
+        )
+    )
+    return {"stream_id": stream_id, "status": "running", "cursor": 0}
+
+
+async def _owned_stream_meta(stream_id: str, user: User) -> dict[str, Any]:
+    store = await get_stream_store()
+    meta = await store.get_meta(stream_id)
+    if meta is None or meta.get("user_id") != user.id:
+        raise HTTPException(status_code=404, detail="stream not found")
+    return meta
+
+
+@router.get("/stream/{stream_id}")
+async def read_tutor_stream(
+    stream_id: str,
+    cursor: int = Query(default=0, ge=0),
+    current_user: User = Depends(require_student),
+) -> StreamingResponse:
+    """SSE: `chunk` events (id = next cursor) then one `end` event.
+
+    Reconnect with `?cursor=<last id>` to resume without duplicating text.
+    """
+    await _owned_stream_meta(stream_id, current_user)
+    store = await get_stream_store()
+
+    async def events():
+        position = cursor
+        while True:
+            status, meta, chunks = await store.read(stream_id, position)
+            if status is None:
+                yield serialize_stream_event("error", {"detail": "stream expired"})
+                return
+            for text in chunks:
+                position += 1
+                yield serialize_stream_event("chunk", {"index": position - 1, "text": text}, position)
+            if status in ("done", "stopped", "error") and not chunks:
+                payload: dict[str, Any] = {"status": status, "cursor": position}
+                if status == "done":
+                    payload["final"] = meta.get("final")
+                yield serialize_stream_event("end", payload)
+                return
+            await asyncio.sleep(_STREAM_POLL_SECONDS)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/stream/{stream_id}/stop")
+async def stop_tutor_stream(
+    stream_id: str,
+    current_user: User = Depends(require_student),
+) -> dict[str, object]:
+    meta = await _owned_stream_meta(stream_id, current_user)
+    if meta.get("status") != "running":
+        return {"stream_id": stream_id, "status": meta.get("status")}
+    await stop_stream(stream_id)
+    return {"stream_id": stream_id, "status": "stop_requested"}

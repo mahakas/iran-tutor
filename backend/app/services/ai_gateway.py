@@ -769,3 +769,37 @@ async def probe_provider(
         "error": probe["error"],
         "prompt_test": probe["prompt_test"],
     }
+
+
+async def record_decision_audit(
+    *,
+    feature_key: str,
+    user_id: str | None,
+    session_id: str | None,
+    request_text: str,
+    decision: dict[str, Any],
+    flag_reason: str | None = None,
+    session: AsyncSession | None = None,
+) -> str | None:
+    """Audit a non-LLM decision (e.g. router heuristic fallback) in `ai_audit_logs`.
+
+    Phase 4 glass-box rule: every router decision is inspectable in /admin, even
+    when no model call happened. Never raises.
+    """
+    import json
+
+    ctx = CallContext(feature_key=feature_key, user_id=user_id, session_id=session_id)
+    messages = [{"role": "user", "content": request_text}]
+    return await _write_audit(
+        ctx=ctx,
+        route=None,
+        model_name=None,
+        messages=messages,
+        response_text=json.dumps(decision, ensure_ascii=False),
+        tokens_in=0,
+        tokens_out=0,
+        latency_ms=0,
+        status=STATUS_SUCCESS,
+        flag_reason=flag_reason,
+        session=session,
+    )

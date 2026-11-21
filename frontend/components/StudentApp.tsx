@@ -23,11 +23,14 @@ import {
   Paperclip,
   Phone,
   Plus,
+  RefreshCw,
+  Search,
   Send,
   ShieldCheck,
   Sparkles,
   Square,
   Trash2,
+  Wand2,
   X,
   Layers,
 } from "lucide-react";
@@ -40,6 +43,13 @@ import MathContent from "@/components/MathContent";
 import LearningBlockRenderer from "@/components/LearningBlockRenderer";
 import { fetchMyCapabilities } from "@/lib/capabilities";
 import ThemedSelect from "@/components/ThemedSelect";
+import ChatRecycleBin from "@/components/ChatRecycleBin";
+import {
+  consumeTutorStream,
+  startTutorStream,
+  stopTutorStream,
+  type TutorStreamOutcome,
+} from "@/lib/tutorStream";
 import { formatDateTime, formatNumber } from "@/lib/i18n";
 import type {
   BookOption,
@@ -126,6 +136,11 @@ export default function StudentApp() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [recording, setRecording] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Phase 4: Auto-Mode router, multi-grade filter, streaming, chat search / bin.
+  const [autoMode, setAutoMode] = useState(false);
+  const [multiGrades, setMultiGrades] = useState<number[]>([]);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [chatBinTab, setChatBinTab] = useState<"search" | "bin" | null>(null);
   // Capability Registry (Phase 2): null = registry unreachable -> keep the legacy menu.
   const [enabledCapabilities, setEnabledCapabilities] = useState<Set<string> | null>(null);
   const [examSetupOpen, setExamSetupOpen] = useState(false);
@@ -441,6 +456,168 @@ export default function StudentApp() {
     [authFetch, getActiveToken, lang, loadChatHistory, preferences.privacy.save_chat_history]
   );
 
+  /**
+   * Phase 4 text turn: streamed answer with Stop and Regenerate.
+   * Stop/failure restores `snapshot` exactly, so nothing from the turn is persisted.
+   */
+  const runTextTurn = useCallback(
+    async (args: {
+      query: string;
+      snapshot: ChatMessage[];
+      threadBase: ChatMessage[];
+      regenerateOf: string | null;
+      restoreDraft: boolean;
+    }) => {
+      const { query, snapshot, threadBase, regenerateOf, restoreDraft } = args;
+      const placeholderId = crypto.randomUUID();
+      const en = lang === "en";
+      setMessages([...threadBase, { id: placeholderId, role: "assistant", content: "", pending: true }]);
+      setMessageError("");
+      setBusy(true);
+      const useMulti = multiGrades.length > 0;
+      const started = await startTutorStream(authFetch, {
+        query,
+        grade_number: useMulti ? null : gradeNumber,
+        major_code: useMulti ? null : hasMajor ? majorCode : null,
+        book_id: Number(bookId),
+        grade_numbers: useMulti ? multiGrades : null,
+        book_ids: null,
+        mode: tutoringMode,
+        auto_mode: autoMode,
+        chat_session_id: activeChatId,
+        regenerate_of: regenerateOf,
+      });
+      if (!started.ok) {
+        setMessages(snapshot);
+        if (restoreDraft) setDraft(query);
+        if (started.status === 401) {
+          openLoginModal(
+            en ? "Please sign in again." : "لطفاً دوباره وارد حساب خود شوید."
+          );
+        } else if (started.status === 402) {
+          setMessageError(
+            started.detail ||
+              (en
+                ? "Your token quota is depleted. Visit Upgrade Plan to renew."
+                : "اعتبار توکن شما به پایان رسیده است. از بخش ارتقای پلن اعتبار خود را تمدید کنید.")
+          );
+          void refreshAccount();
+        } else {
+          setMessageError(
+            started.detail || (en ? "No response received. Please try again." : "پاسخی دریافت نشد. دوباره تلاش کن.")
+          );
+        }
+        setBusy(false);
+        return;
+      }
+
+      setStreamingId(started.streamId);
+      let outcome: TutorStreamOutcome;
+      try {
+        outcome = await consumeTutorStream(authFetch, started.streamId, (chunk) => {
+          setMessages((prev) =>
+            prev.map((item) => (item.id === placeholderId ? { ...item, content: item.content + chunk } : item))
+          );
+        });
+      } catch {
+        outcome = { status: "error", text: "", final: null };
+      }
+      setStreamingId(null);
+
+      if (outcome.status !== "done" || !outcome.final) {
+        setMessages(snapshot);
+        if (restoreDraft) setDraft(query);
+        if (outcome.status === "error") {
+          setMessageError(en ? "The answer was interrupted. Please try again." : "پاسخ قطع شد. دوباره تلاش کن.");
+        }
+        setBusy(false);
+        window.setTimeout(() => inputRef.current?.focus(), 0);
+        return;
+      }
+
+      const final = outcome.final;
+      const turnMode = (final.mode ?? tutoringMode) as TutorMode;
+      const assistantMessage: ChatMessage = {
+        id: placeholderId,
+        role: "assistant",
+        content: outcome.text,
+        sources: final.sources,
+        blocks: final.blocks,
+        streamId: started.streamId,
+        routedMode: final.router ? turnMode : undefined,
+        routerSource: final.router?.source,
+      };
+      const fullThread = [...threadBase, assistantMessage];
+      setMessages(fullThread);
+      if (final.usage) {
+        const usage = final.usage;
+        setCurrentUser((prev) =>
+          prev
+            ? {
+                ...prev,
+                tokens_remaining: usage.tokens_remaining,
+                tokens_used_total: prev.tokens_used_total + usage.total_tokens,
+                tokens_used_today: prev.tokens_used_today + usage.total_tokens,
+              }
+            : prev
+        );
+      }
+      await persistConversation(
+        activeChatId,
+        fullThread,
+        query,
+        gradeNumber as number,
+        hasMajor ? majorCode : null,
+        Number(bookId),
+        turnMode
+      );
+      setBusy(false);
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    },
+    [
+      activeChatId,
+      authFetch,
+      autoMode,
+      bookId,
+      gradeNumber,
+      hasMajor,
+      lang,
+      majorCode,
+      multiGrades,
+      openLoginModal,
+      persistConversation,
+      refreshAccount,
+      setCurrentUser,
+      tutoringMode,
+    ]
+  );
+
+  const stopCurrentTurn = useCallback(async () => {
+    if (!streamingId) return;
+    await stopTutorStream(authFetch, streamingId);
+  }, [authFetch, streamingId]);
+
+  const regenerateLastAnswer = useCallback(async () => {
+    if (busy) return;
+    let index = -1;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === "assistant") {
+        index = i;
+        break;
+      }
+    }
+    if (index < 1 || messages[index - 1].role !== "user") return;
+    const question = messages[index - 1];
+    if (question.attachment) return; // image/audio turns are not re-sent as text
+    await runTextTurn({
+      query: question.content,
+      snapshot: messages,
+      threadBase: messages.slice(0, index),
+      regenerateOf: messages[index].streamId ?? null,
+      restoreDraft: false,
+    });
+  }, [busy, messages, runTextTurn]);
+
   const sendMessage = useCallback(async () => {
     const query = draft.trim();
     if ((!query && !imageFile && !audioFile) || !bookId || gradeNumber === null || busy) return;
@@ -452,6 +629,19 @@ export default function StudentApp() {
           ? "Sign in with your mobile number to ask the tutor."
           : "برای پرسش از معلم، ابتدا با شماره موبایل خود وارد شوید."
       );
+      return;
+    }
+
+    if (!imageFile && !audioFile) {
+      const questionMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: query };
+      setDraft("");
+      await runTextTurn({
+        query,
+        snapshot: messages,
+        threadBase: [...messages, questionMessage],
+        regenerateOf: null,
+        restoreDraft: true,
+      });
       return;
     }
 
@@ -867,6 +1057,12 @@ export default function StudentApp() {
   );
 
   const visibleMessages = currentUser ? messages : [];
+  const lastAssistantId = useMemo(() => {
+    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+      if (visibleMessages[i].role === "assistant") return visibleMessages[i].id;
+    }
+    return null;
+  }, [visibleMessages]);
   const visibleChatHistory = currentUser ? chatHistory : [];
   const visibleExamHistory = currentUser ? examHistory : [];
   const visibleActiveExam = currentUser ? activeExam : null;
@@ -1092,6 +1288,19 @@ export default function StudentApp() {
           <span dir="ltr">⌘ K</span>
         </button>
 
+        {currentUser && (
+          <>
+            <button type="button" className="sidebar-item" onClick={() => setChatBinTab("search")}>
+              <Search size={17} />
+              <span>{lang === "en" ? "Search chats" : "جستجوی گفت‌وگوها"}</span>
+            </button>
+            <button type="button" className="sidebar-item" onClick={() => setChatBinTab("bin")}>
+              <Trash2 size={17} />
+              <span>{lang === "en" ? "Recycle Bin" : "سطل بازیافت"}</span>
+            </button>
+          </>
+        )}
+
         <div className="sidebar-section-label">
           {lang === "en" ? "Learning Workspace" : "فضای یادگیری"}
         </div>
@@ -1164,7 +1373,7 @@ export default function StudentApp() {
                 <button
                   type="button"
                   className="recent-delete"
-                  aria-label={lang === "en" ? "Delete chat" : "حذف گفت‌وگو"}
+                  aria-label={lang === "en" ? "Move chat to Recycle Bin" : "انتقال گفت‌وگو به سطل بازیافت"}
                   onClick={() => void deleteChatSession(item.id)}
                 >
                   <Trash2 size={13} />
@@ -1194,6 +1403,22 @@ export default function StudentApp() {
 
         <AccountMenu onNavigate={() => setSidebarOpen(false)} />
       </aside>
+      {chatBinTab && currentUser && (
+        <ChatRecycleBin
+          authFetch={authFetch}
+          lang={lang}
+          initialTab={chatBinTab}
+          onOpenChat={(chatId) => {
+            setChatBinTab(null);
+            void openChatSession(chatId);
+          }}
+          onChanged={() => {
+            const token = getActiveToken();
+            if (token) void loadChatHistory(token);
+          }}
+          onClose={() => setChatBinTab(null)}
+        />
+      )}
       {sidebarOpen && (
         <button
           className="sidebar-scrim"
@@ -1400,8 +1625,63 @@ export default function StudentApp() {
           )}
         </section>
 
+        <div className="grade-filter" role="group" aria-label={lang === "en" ? "Grades to search" : "پایه‌های جستجو"}>
+          <span className="grade-filter-label">
+            {lang === "en" ? "Search grades:" : "جستجو در پایه‌ها:"}
+          </span>
+          {[
+            { value: 10, label: "دهم" },
+            { value: 11, label: "یازدهم" },
+            { value: 12, label: "دوازدهم" },
+          ].map((grade) => {
+            const active = multiGrades.includes(grade.value);
+            return (
+              <button
+                key={grade.value}
+                type="button"
+                className={`grade-chip ${active ? "selected" : ""}`}
+                aria-pressed={active}
+                onClick={() =>
+                  setMultiGrades((prev) =>
+                    prev.includes(grade.value)
+                      ? prev.filter((item) => item !== grade.value)
+                      : [...prev, grade.value].sort((a, b) => a - b)
+                  )
+                }
+              >
+                {lang === "en" ? `Grade ${grade.value}` : `پایه ${grade.label}`}
+              </button>
+            );
+          })}
+          {multiGrades.length > 0 && (
+            <button type="button" className="grade-chip clear" onClick={() => setMultiGrades([])}>
+              {lang === "en" ? "Selected grade only" : "فقط پایهٔ انتخابی"}
+            </button>
+          )}
+          <span className="grade-filter-hint">
+            {multiGrades.length > 0
+              ? lang === "en"
+                ? "Citations may come from every selected grade."
+                : "منبع‌ها می‌توانند از همهٔ پایه‌های انتخابی باشند."
+              : ""}
+          </span>
+        </div>
         <div className="mode-toolbar">
           <div className="mode-tabs">
+            <button
+              type="button"
+              className={`mode-tab auto-mode-tab ${autoMode ? "selected" : ""}`}
+              aria-pressed={autoMode}
+              onClick={() => setAutoMode((value) => !value)}
+              title={
+                lang === "en"
+                  ? "Auto: the router picks tutor, solver, or designer for each question"
+                  : "خودکار: مسیریاب برای هر پرسش، حالت مناسب را انتخاب می‌کند"
+              }
+            >
+              <Wand2 size={15} />
+              {lang === "en" ? "Auto" : "خودکار"}
+            </button>
             <button
               className={`mode-tab ${tutoringMode === "tutor" ? "selected" : ""}`}
               onClick={() => setTutoringMode("tutor")}
@@ -1557,8 +1837,32 @@ export default function StudentApp() {
                         {message.attachment}
                       </div>
                     )}
+                    {message.routedMode && (
+                      <div className="routed-chip">
+                        <Wand2 size={12} />{" "}
+                        {lang === "en" ? "Auto mode:" : "حالت خودکار:"}{" "}
+                        {message.routedMode === "problem_solver"
+                          ? lang === "en"
+                            ? "Problem Solver"
+                            : "حل تمرین"
+                          : message.routedMode === "question_designer"
+                          ? lang === "en"
+                            ? "Question Designer"
+                            : "طراحی سؤال"
+                          : lang === "en"
+                          ? "Personal Tutor"
+                          : "معلم خصوصی"}
+                        {message.routerSource === "heuristic" && (
+                          <span className="routed-fallback">{lang === "en" ? " (rule-based)" : " (قاعده‌ای)"}</span>
+                        )}
+                      </div>
+                    )}
                     <div className={`message-bubble ${message.role}`}>
-                      {message.role === "assistant" ? (
+                      {message.pending ? (
+                        <p className="stream-text" aria-live="polite">
+                          {message.content || (lang === "en" ? "…" : "…")}
+                        </p>
+                      ) : message.role === "assistant" ? (
                         message.blocks && message.blocks.length > 0 ? (
                           <LearningBlockRenderer
                             blocks={message.blocks.filter(
@@ -1590,6 +1894,22 @@ export default function StudentApp() {
                         ))}
                       </div>
                     )}
+                    {message.role === "assistant" &&
+                      !message.pending &&
+                      !busy &&
+                      !!message.id &&
+                      message.id === lastAssistantId && (
+                        <div className="regenerate-row">
+                          <button
+                            type="button"
+                            className="regenerate-btn"
+                            onClick={() => void regenerateLastAnswer()}
+                            disabled={!!visibleMessages[visibleMessages.length - 1]?.attachment}
+                          >
+                            <RefreshCw size={13} /> {lang === "en" ? "Regenerate" : "تولید دوباره"}
+                          </button>
+                        </div>
+                      )}
                     {message.role === "assistant" &&
                       !!message.sources?.length &&
                       capabilityMenuEnabled("flashcards") && (
@@ -1624,7 +1944,7 @@ export default function StudentApp() {
                   </div>
                 </article>
               ))}
-              {busy && (
+              {busy && !streamingId && (
                 <div className="typing-row">
                   <div className="assistant-avatar">
                     <Sparkles size={15} />
@@ -1776,14 +2096,26 @@ export default function StudentApp() {
                   </span>
                 )}
               </div>
-              <button
-                className="send-button"
-                disabled={!canAsk || (!draft.trim() && !imageFile && !audioFile)}
-                onClick={() => void sendMessage()}
-                aria-label={lang === "en" ? "Send question" : "ارسال پرسش"}
-              >
-                {busy ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
-              </button>
+              {busy && streamingId ? (
+                <button
+                  type="button"
+                  className="send-button stop-button"
+                  onClick={() => void stopCurrentTurn()}
+                  aria-label={lang === "en" ? "Stop generating" : "توقف تولید پاسخ"}
+                  title={lang === "en" ? "Stop" : "توقف"}
+                >
+                  <Square size={16} />
+                </button>
+              ) : (
+                <button
+                  className="send-button"
+                  disabled={!canAsk || (!draft.trim() && !imageFile && !audioFile)}
+                  onClick={() => void sendMessage()}
+                  aria-label={lang === "en" ? "Send question" : "ارسال پرسش"}
+                >
+                  {busy ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
+                </button>
+              )}
             </div>
           </div>
           <div className="composer-disclaimer">

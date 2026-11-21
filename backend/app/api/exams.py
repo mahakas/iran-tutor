@@ -149,4 +149,39 @@ async def finish_exam(
         raise HTTPException(status_code=409, detail=str(error)) from error
 
     await session.commit()
+    await _record_exam_memory(session, user_id=current_user.id, book_id=exam.book_id, report=report)
     return {"exam_id": exam.id, "status": "submitted", "report_card": report}
+
+
+async def _record_exam_memory(
+    session: AsyncSession, *, user_id: str, book_id: int, report: dict[str, object]
+) -> None:
+    """Phase 4: feed per-chapter exam results into L2/L3 memory (best effort, never blocks grading)."""
+    from app.services.learner_memory_service import record_quiz_outcome
+
+    buckets: dict[int | None, list[int]] = {}
+    for item in report.get("by_question", []) or []:  # type: ignore[union-attr]
+        source = item.get("source") if isinstance(item, dict) else None
+        chapter = source.get("chapter_number") if isinstance(source, dict) else None
+        chapter = chapter if isinstance(chapter, int) else None
+        bucket = buckets.setdefault(chapter, [0, 0])
+        bucket[1] += 1
+        if item.get("correct"):
+            bucket[0] += 1
+    try:
+        for chapter, (correct, total) in buckets.items():
+            topic = f"آزمون فصل {chapter}" if chapter is not None else "آزمون کتاب"
+            await record_quiz_outcome(
+                session,
+                user_id=user_id,
+                book_id=book_id,
+                chapter_number=chapter,
+                topic=topic,
+                correct=correct,
+                total=total,
+                source_type="quiz",
+            )
+        await session.commit()
+    except Exception:  # noqa: BLE001 - memory must never break exam grading
+        await session.rollback()
+        logging.getLogger(__name__).exception("exam memory update failed")

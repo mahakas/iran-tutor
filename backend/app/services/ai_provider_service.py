@@ -38,6 +38,8 @@ ROUTABLE_FEATURE_KEYS: tuple[str, ...] = (
     "embedding",
     "flashcards",
     "ingest_ocr",
+    "memory",
+    "intent_router",
 )
 
 

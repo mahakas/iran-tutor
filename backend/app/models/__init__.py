@@ -13,6 +13,8 @@ from app.models.auth import (  # noqa: F401
 from app.models.chat import ChatSession  # noqa: F401
 from app.models.curriculum import Book, BookPage, Grade, Major  # noqa: F401
 from app.models.exam import ExamSession  # noqa: F401
+from app.models.concepts import ConceptLink  # noqa: F401
+from app.models.learner_memory import LearnerMemory  # noqa: F401
 from app.models.flashcards import (  # noqa: F401
     Flashcard,
     FlashcardDeck,
