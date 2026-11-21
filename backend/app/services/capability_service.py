@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 KNOWN_ROLES = ("admin", "teacher", "student", "guardian")
 
 # Seed catalogue: key -> (title_fa, description_fa, icon, is_enabled,
-# default_route_key, sort_order). `flashcards` ships disabled until Phase 3.
+# default_route_key, sort_order). `flashcards` ships enabled from Phase 3 (admins can disable it).
 SEED_CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "key": "chat",
@@ -69,7 +69,7 @@ SEED_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "title_fa": "فلش‌کارت هوشمند",
         "description_fa": "فلش‌کارت‌های تکرار فاصله‌دار (SM-2) ساخته‌شده از فصل‌های کتاب. در فاز ۳ فعال می‌شود.",
         "icon": "Layers",
-        "is_enabled": False,
+        "is_enabled": True,
         "default_route_key": "flashcards",
         "sort_order": 5,
     },

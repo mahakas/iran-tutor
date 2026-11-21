@@ -13,6 +13,11 @@ from app.models.auth import (  # noqa: F401
 from app.models.chat import ChatSession  # noqa: F401
 from app.models.curriculum import Book, BookPage, Grade, Major  # noqa: F401
 from app.models.exam import ExamSession  # noqa: F401
+from app.models.flashcards import (  # noqa: F401
+    Flashcard,
+    FlashcardDeck,
+    FlashcardReview,
+)
 from app.models.capabilities import (  # noqa: F401
     Capability,
     KbIngestionJob,
@@ -34,6 +39,9 @@ __all__ = [
     "BookPage",
     "ExamSession",
     "ChatSession",
+    "FlashcardDeck",
+    "Flashcard",
+    "FlashcardReview",
     "Plan",
     "BillingSettings",
     "User",

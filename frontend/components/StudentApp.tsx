@@ -29,6 +29,7 @@ import {
   Square,
   Trash2,
   X,
+  Layers,
 } from "lucide-react";
 import AccountAvatar from "@/components/AccountAvatar";
 import AccountMenu from "@/components/AccountMenu";
@@ -339,6 +340,57 @@ export default function StudentApp() {
     if (!messages.length && !busy) return;
     document.getElementById("message-end")?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, busy]);
+
+  const [flashcardBusyId, setFlashcardBusyId] = useState<string | null>(null);
+  const [flashcardNotice, setFlashcardNotice] = useState<{ text: string; deckId: number | null } | null>(null);
+
+  // Server resolves the message text and citations from the saved chat session; the client sends only ids.
+  const convertMessageToFlashcards = useCallback(
+    async (message: ChatMessage) => {
+      if (!activeChatId) return;
+      setFlashcardBusyId(message.id);
+      setFlashcardNotice(null);
+      try {
+        const response = await authFetch("/api/v1/flashcards/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source: "chat",
+            chat_session_id: activeChatId,
+            message_ids: [message.id],
+            count: 5,
+          }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          setFlashcardNotice({
+            text: errorMessage(
+              payload,
+              lang === "en" ? "Could not create flashcards" : "ساخت فلش‌کارت ناموفق بود"
+            ),
+            deckId: null,
+          });
+          return;
+        }
+        const created = payload as { deck_id: number; created_count: number };
+        setFlashcardNotice({
+          text:
+            lang === "en"
+              ? `${created.created_count} flashcards created from this answer.`
+              : `${formatNumber(created.created_count, lang)} فلش‌کارت از این پاسخ ساخته شد.`,
+          deckId: created.deck_id,
+        });
+      } catch {
+        setFlashcardNotice({
+          text: lang === "en" ? "Could not reach the server" : "ارتباط با سرور برقرار نشد",
+          deckId: null,
+        });
+      } finally {
+        setFlashcardBusyId(null);
+      }
+    },
+    [activeChatId, authFetch, lang]
+  );
 
   const persistConversation = useCallback(
     async (
@@ -1059,6 +1111,12 @@ export default function StudentApp() {
             )}
           </button>
         )}
+        {capabilityMenuEnabled("flashcards") && (
+          <Link href="/flashcards" className="sidebar-item" onClick={() => setSidebarOpen(false)}>
+            <Layers size={17} />
+            <span>{lang === "en" ? "Flashcards" : "فلش‌کارت‌ها"}</span>
+          </Link>
+        )}
         <Link
           href="/account/upgrade"
           className="sidebar-item"
@@ -1532,6 +1590,37 @@ export default function StudentApp() {
                         ))}
                       </div>
                     )}
+                    {message.role === "assistant" &&
+                      !!message.sources?.length &&
+                      capabilityMenuEnabled("flashcards") && (
+                        <div className="fc-convert-row">
+                          <button
+                            type="button"
+                            className="fc-convert-btn"
+                            disabled={!activeChatId || flashcardBusyId !== null}
+                            onClick={() => void convertMessageToFlashcards(message)}
+                            title={
+                              activeChatId
+                                ? undefined
+                                : "برای تبدیل به فلش‌کارت، «ذخیرهٔ تاریخچهٔ گفت‌وگو» را در تنظیمات حریم خصوصی روشن کنید."
+                            }
+                          >
+                            <Layers size={13} />{" "}
+                            {flashcardBusyId === message.id
+                              ? lang === "en"
+                                ? "Creating…"
+                                : "در حال ساخت…"
+                              : lang === "en"
+                              ? "Convert to flashcards"
+                              : "تبدیل به فلش‌کارت"}
+                          </button>
+                          {!activeChatId && (
+                            <span className="fc-convert-hint">
+                              برای این کار «ذخیرهٔ تاریخچهٔ گفت‌وگو» را در تنظیمات حریم خصوصی روشن کنید.
+                            </span>
+                          )}
+                        </div>
+                      )}
                   </div>
                 </article>
               ))}
@@ -1554,6 +1643,17 @@ export default function StudentApp() {
             </div>
           )}
         </section>
+
+        {flashcardNotice && (
+          <div className="fc-chat-notice" role="status">
+            <span>{flashcardNotice.text}</span>
+            {flashcardNotice.deckId !== null && (
+              <Link href={`/flashcards`} onClick={() => setFlashcardNotice(null)}>
+                مشاهدهٔ فلش‌کارت‌ها
+              </Link>
+            )}
+          </div>
+        )}
 
         <footer className="composer-area">
           {messageError && (

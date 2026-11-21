@@ -162,14 +162,14 @@ def _client() -> AsyncClient:
 
 
 @pytest.mark.asyncio
-async def test_seed_capabilities_is_idempotent_and_flashcards_disabled(phase2_env):
+async def test_seed_capabilities_is_idempotent_and_flashcards_enabled_phase3(phase2_env):
     async with phase2_env() as session:
         await capability_service.seed_capabilities(session)
         await session.commit()
         rows = list((await session.scalars(select(Capability))).all())
     keys = {row.key: row for row in rows}
     assert {"chat", "solve", "quiz", "multimodal", "flashcards"} <= set(keys)
-    assert keys["flashcards"].is_enabled is False
+    assert keys["flashcards"].is_enabled is True
     assert keys["chat"].is_enabled is True
     assert len(rows) == len(capability_service.SEED_CAPABILITIES)
 
@@ -207,14 +207,14 @@ def test_capability_role_and_plan_allow_list():
 
 
 @pytest.mark.asyncio
-async def test_capabilities_me_hides_disabled_flashcards(phase2_env):
+async def test_capabilities_me_lists_flashcards_when_enabled(phase2_env):
     async with _client() as client:
         resp = await client.get("/api/v1/capabilities/me")
     assert resp.status_code == 200
     body = resp.json()
     keys = {item["key"] for item in body["capabilities"]}
     assert "chat" in keys and "quiz" in keys
-    assert "flashcards" not in keys
+    assert "flashcards" in keys  # enabled by default from Phase 3
     # Serialized payload must describe the menu, not expose internal config.
     for item in body["capabilities"]:
         assert "config" not in item or isinstance(item["config"], dict)
@@ -259,7 +259,7 @@ async def test_seed_skills_reproduce_existing_prompts_verbatim(phase2_env):
         flash = await capability_runtime.get_skill_by_slug(session, "flashcard_generator")
     assert skill is not None and skill.system_prompt == SYSTEM_PROMPT
     assert skill.is_active is True and skill.version == 1
-    assert flash is not None and flash.is_active is False
+    assert flash is not None and flash.is_active is True  # activated in Phase 3
 
 
 @pytest.mark.asyncio
