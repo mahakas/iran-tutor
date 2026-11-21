@@ -49,6 +49,7 @@ import AdminProvidersPanel from "@/components/AdminProvidersPanel";
 import AdminRolesQuotasPanel from "@/components/AdminRolesQuotasPanel";
 import AdminKbPanel from "@/components/AdminKbPanel";
 import AdminFlashcardsPanel from "@/components/AdminFlashcardsPanel";
+import AdminPhase5Panel from "@/components/AdminPhase5Panel";
 import AdminSkillsPanel from "@/components/AdminSkillsPanel";
 import AdminCapabilitiesPanel from "@/components/AdminCapabilitiesPanel";
 import DiffViewer from "@/components/DiffViewer";
@@ -278,6 +279,7 @@ export default function AdminPage() {
     | "skills"
     | "capabilities"
     | "flashcards"
+    | "deep_learning"
   >("books");
   const tokenRef = useRef<string | null>(null);
   const [activeTokenState, setActiveTokenState] = useState<string | null>(null);
@@ -1882,6 +1884,13 @@ export default function AdminPage() {
           </button>
           <button
             type="button"
+            className={`admin-tab ${adminTab === "deep_learning" ? "active" : ""}`}
+            onClick={() => setAdminTab("deep_learning")}
+          >
+            <Layers size={16} /> یادگیری عمیق
+          </button>
+          <button
+            type="button"
             className={`admin-tab ${adminTab === "plans" ? "active" : ""}`}
             onClick={() => {
               setAdminTab("plans");
@@ -1981,6 +1990,10 @@ export default function AdminPage() {
 
         {adminTab === "flashcards" && (
           <AdminFlashcardsPanel authHeaders={authHeadersMemo} onUnauthorized={lockAdminPanel} />
+        )}
+
+        {adminTab === "deep_learning" && (
+          <AdminPhase5Panel authHeaders={authHeadersMemo} onUnauthorized={lockAdminPanel} />
         )}
 
         {adminTab === "appearance" && (

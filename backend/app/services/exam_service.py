@@ -11,7 +11,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.services.ai_gateway import CallContext, complete_json_via_gateway
 from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
 from app.models.exam import ExamSession, ExamStatus
 from app.services.retrieval_service import page_embedding_text, search_textbook
@@ -280,42 +279,66 @@ async def create_exam(
         "\"prompt\":\"...\",\"choices\":{\"A\":\"...\",\"B\":\"...\",\"C\":\"...\",\"D\":\"...\"},"
         "\"correct_option\":\"A|B|C|D\",\"explanation\":\"...\",\"source_index\":0}}]}} برگردان."
     )
-    gateway_result = await complete_json_via_gateway(
-        ctx=CallContext(
-            feature_key="quiz",
-            user_id=user_id,
-            book_id=book_id,
-            textbook_strict=True,
-            citations=sources,
-            rag_hit_count=len(sources),
-        ),
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "\n\n---\n\n".join(context_parts)[:28_000]},
-        ],
-        model=settings.tutor_model,
+    from app.services.capability_runtime import run_capability_json
+    from app.services.quiz_validator import validate_questions as validate_generated_questions
+
+    gateway_result, _skill = await run_capability_json(
         session=session,
+        capability_key="quiz",
+        feature_key="quiz",
+        user_text="\n\n---\n\n".join(context_parts)[:28_000],
+        user_id=user_id,
+        book_id=book_id,
+        textbook_strict=True,
+        citations=sources,
+        rag_hit_count=len(sources),
+        model=settings.tutor_model,
+        # The exam endpoint already enforced capability + quota; avoid charging twice.
+        enforce=False,
+        extra_system=system_prompt,
     )
     generated = gateway_result.content
     parsed_questions = validate_questions(
         generated, expected_count=question_count, source_count=len(sources)
     )
 
-    questions: list[dict[str, Any]] = []
-    for index, question in enumerate(parsed_questions, start=1):
-        questions.append(
-            {
-                "id": f"q{index}",
+    # Stage 2 (Validator Gate): grounding, LaTeX validity, unambiguous key.
+    exam_id = str(uuid4())
+    candidates = [
+        {
+            "question": {
                 "prompt": question.prompt,
                 "choices": question.choices,
                 "correct_option": question.correct_option,
                 "explanation": question.explanation,
-                "points": 1.0,
                 "source": _source_payload(sources[question.source_index]),
+            },
+            "source_text": sources[question.source_index].get("full_text", ""),
+        }
+        for question in parsed_questions
+    ]
+    outcome = await validate_generated_questions(
+        session, items=candidates, user_id=user_id, book_id=book_id, exam_id=exam_id
+    )
+    if not outcome.accepted:
+        raise ValueError("بازبین آزمون هیچ سؤالی را تأیید نکرد؛ آزمون دیگری بسازید.")
+
+    questions: list[dict[str, Any]] = []
+    for index, question in enumerate(outcome.accepted, start=1):
+        questions.append(
+            {
+                "id": f"q{index}",
+                "prompt": question["prompt"],
+                "choices": question["choices"],
+                "correct_option": question["correct_option"],
+                "explanation": question["explanation"],
+                "points": 1.0,
+                "source": question["source"],
             }
         )
     now = datetime.now(timezone.utc)
     exam = ExamSession(
+        id=exam_id,
         book_id=book_id,
         user_id=user_id,
         grade_number=grade_number,
@@ -328,6 +351,22 @@ async def create_exam(
         expires_at=now + timedelta(minutes=time_limit_minutes),
     )
     session.add(exam)
+    from app.models.phase5 import QuizValidationLog
+
+    for decision in outcome.decisions:
+        original = candidates[decision.index]["question"]
+        session.add(
+            QuizValidationLog(
+                user_id=user_id,
+                exam_id=exam_id,
+                book_id=book_id,
+                question_index=decision.index,
+                verdict=decision.verdict,
+                reasons_json=list(decision.reasons),
+                question_json={"original": original, "repaired": decision.question},
+                audit_id=decision.audit_id,
+            )
+        )
     await session.commit()
     await session.refresh(exam)
     return exam

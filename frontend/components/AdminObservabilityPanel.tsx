@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import AdminDeletedChatsSection from "@/components/AdminDeletedChatsSection";
 import {
   AlertTriangle,
   Bot,
@@ -198,6 +199,8 @@ export default function AdminObservabilityPanel({
         </div>
       )}
       {error && <div className="inline-error admin-banner">{error}</div>}
+
+      <AdminDeletedChatsSection authHeaders={authHeaders} onUnauthorized={onUnauthorized} />
 
       <section className="admin-card">
         <div className="card-heading">

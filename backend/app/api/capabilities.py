@@ -151,6 +151,17 @@ async def update_admin_capability(
         cap.config_json = dict(body.config)
     if body.sort_order is not None:
         cap.sort_order = body.sort_order
+    # Phase 5 glass box: every admin capability edit (enable/disable, roles, routes) is logged.
+    from app.models.phase5 import AdminActionLog
+
+    session.add(
+        AdminActionLog(
+            actor="admin",
+            action="capability.update",
+            target=f"capability:{key}",
+            payload_json=body.model_dump(exclude_none=True),
+        )
+    )
     await session.commit()
     await session.refresh(cap)
     return capability_service.serialize_capability(cap)

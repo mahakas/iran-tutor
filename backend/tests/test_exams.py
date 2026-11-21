@@ -272,12 +272,41 @@ async def test_create_exam_falls_back_to_approved_book_pages_when_search_is_empt
         }
 
     async def fake_complete_json_gateway(*, ctx, messages, model=None, session=None, **kwargs):
+        # Phase 5: generation and the Validator Gate both route through capability_runtime -> gateway.
+        if ctx.feature_key == "quiz_validator":
+            return SimpleNamespace(
+                content={
+                    "verdicts": [
+                        {"index": i, "grounded": True, "unambiguous": True, "latex_ok": True,
+                         "confirmed_option": "A", "reasons": [], "fix": None}
+                        for i in range(3)
+                    ]
+                },
+                audit_id="audit-validator",
+            )
         assert ctx.feature_key == "quiz"
         assert ctx.textbook_strict is True
         return SimpleNamespace(content=await fake_complete_json(model, messages), audit_id="audit-quiz")
 
+    from app.services import capability_runtime, quiz_validator
+
+    async def no_skill(*args, **kwargs):
+        return None
+
+    async def fake_validator(**kwargs):
+        verdicts = {
+            "verdicts": [
+                {"index": i, "grounded": True, "unambiguous": True, "latex_ok": True,
+                 "confirmed_option": "A", "reasons": [], "fix": None}
+                for i in range(3)
+            ]
+        }
+        return SimpleNamespace(content=verdicts, audit_id="audit-validator"), None
+
+    monkeypatch.setattr(capability_runtime, "load_active_skill", no_skill)
+    monkeypatch.setattr(quiz_validator, "run_capability_json", fake_validator)
     monkeypatch.setattr(exam_service, "search_textbook", empty_search)
-    monkeypatch.setattr(exam_service, "complete_json_via_gateway", fake_complete_json_gateway)
+    monkeypatch.setattr(capability_runtime, "complete_json_via_gateway", fake_complete_json_gateway)
     monkeypatch.setattr(exam_service, "get_settings", lambda: SimpleNamespace(tutor_model="demo-tutor"))
 
     page = SimpleNamespace(
