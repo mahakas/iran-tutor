@@ -96,6 +96,10 @@ function sourceText(source: Source, lang: "fa" | "en") {
   return [bookLabel, chapterLabel].filter(Boolean).join(lang === "en" ? " · " : "، ");
 }
 
+function uniqueSourceTexts(sources: Source[], lang: "fa" | "en") {
+  return Array.from(new Set(sources.map((source) => sourceText(source, lang))));
+}
+
 function makeChatTitle(text: string, lang: "fa" | "en") {
   const clean = text.replace(/\s+/g, " ").trim();
   if (!clean) return lang === "en" ? "Tutor Conversation" : "گفت‌وگو با معلم";
@@ -1953,12 +1957,9 @@ export default function StudentApp() {
                           <BookOpen size={13} />{" "}
                           {lang === "en" ? "Textbook Sources" : "منابع کتاب"}
                         </span>
-                        {message.sources.map((source, sourceIndex) => (
-                          <div
-                            className="source-pill"
-                            key={`${source.book_id}-${source.pdf_page_index}-${sourceIndex}`}
-                          >
-                            {sourceText(source, lang)}
+                        {uniqueSourceTexts(message.sources, lang).map((text) => (
+                          <div className="source-pill" key={text}>
+                            {text}
                           </div>
                         ))}
                       </div>

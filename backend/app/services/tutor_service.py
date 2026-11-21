@@ -289,7 +289,9 @@ async def answer_grounded(
         if identity in seen:
             continue
         seen.add(identity)
-        source_labels.append(_source_label(page))
+        label = _source_label(page)
+        if label not in source_labels:
+            source_labels.append(label)
         sources.append(
             {
                 "book_id": page.get("book_id"),
