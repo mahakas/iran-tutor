@@ -22,3 +22,8 @@ _TEST_SETTINGS = {
 
 for key, value in _TEST_SETTINGS.items():
     os.environ.setdefault(key, value)
+
+# Tests log in with these exact admin credentials. Force them (not setdefault) so a developer's
+# backend/.env cannot override them; environment variables take priority over .env values.
+os.environ["ADMIN_USERNAME"] = "admin"
+os.environ["ADMIN_PASSWORD"] = "123"

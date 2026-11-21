@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "@/lib/toast";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -187,15 +188,17 @@ export default function AdminProvidersPanel({
         headers: authHeaders,
       });
       if (!handle(response.status)) {
-        setError("تست اتصال ناموفق بود.");
+        toast.error("تست اتصال ناموفق بود.");
         return;
       }
       const payload = await response.json();
-      setMessage(
-        payload.ok
-          ? `اتصال موفق (${payload.latency_ms} میلی‌ثانیه${payload.models_count ? ` · ${payload.models_count} مدل` : ""}).`
-          : `اتصال برقرار نشد: ${payload.error ?? "خطای نامشخص"}`,
-      );
+      if (payload.ok) {
+        toast.success(
+          `اتصال موفق (${payload.latency_ms} میلی‌ثانیه${payload.models_count ? ` · ${payload.models_count} مدل` : ""}).`,
+        );
+      } else {
+        toast.error(`اتصال برقرار نشد: ${payload.error ?? "خطای نامشخص"}`);
+      }
       await load();
     } finally {
       setBusyId(null);

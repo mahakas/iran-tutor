@@ -54,11 +54,11 @@ export default function MasteryWorkspace() {
             </span>
             <Link href={`/study/${shownTree.book.id}`}>مطالعهٔ کتاب</Link>
           </div>
-          <ol style={{ display: "grid", gap: 10, listStyle: "none", padding: 0, margin: 0 }}>
+          <ol className="mastery-timeline" aria-label="مسیر فصل‌های تسلط">
             {shownTree.chapters.map((chapter) => {
               const percent = chapter.score === null ? null : Math.round(chapter.score * 100);
               return (
-                <li key={chapter.chapter_number} className="glass-panel" style={{ padding: 14, opacity: chapter.status === "locked" ? 0.6 : 1 }}>
+                <li key={chapter.chapter_number} className="glass-panel mastery-node" data-status={chapter.status} style={{ padding: 14 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                     <strong>
                       فصل {toPersianDigits(chapter.chapter_number)}: {chapter.chapter_title}

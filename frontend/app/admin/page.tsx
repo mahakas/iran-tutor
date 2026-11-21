@@ -1,5 +1,6 @@
 "use client";
 
+import AdminSideNav, { type AdminNavKey } from "@/components/AdminSideNav";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -1691,6 +1692,16 @@ export default function AdminPage() {
     );
   }
 
+  // Sidebar selection: same side effects the flat tab bar used to run.
+  const handleAdminNavSelect = (key: AdminNavKey) => {
+    setAdminTab(key);
+    if (key === "overview") void fetchOverviewData();
+    if (key === "plans") void fetchBillingData();
+    if (key === "users") {
+      void fetchUsersData();
+      void fetchBillingData();
+    }
+  };
   return (
     <main className="admin-shell" dir="rtl">
       <header className="admin-topbar">
@@ -1762,6 +1773,8 @@ export default function AdminPage() {
           />
         </div>
       </header>
+      <div className="admin-body">
+        <AdminSideNav active={adminTab} onSelect={handleAdminNavSelect} />
       <div className="admin-content">
         <div className="admin-heading">
           <div>
@@ -1810,123 +1823,6 @@ export default function AdminPage() {
           </div>
         </div>
 
-        <nav className="admin-tabs" aria-label="بخش‌های پنل مدیریت">
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "overview" ? "active" : ""}`}
-            onClick={() => {
-              setAdminTab("overview");
-              void fetchOverviewData();
-            }}
-          >
-            <Activity size={16} /> نمای کلی و مانیتورینگ
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "books" ? "active" : ""}`}
-            onClick={() => setAdminTab("books")}
-          >
-            <BookOpen size={16} /> کتاب‌ها و پردازش PDF
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "integrations" ? "active" : ""}`}
-            onClick={() => setAdminTab("integrations")}
-          >
-            <Cpu size={16} /> هوش مصنوعی، API و درگاه‌ها
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "providers" ? "active" : ""}`}
-            onClick={() => setAdminTab("providers")}
-          >
-            <KeyRound size={16} /> ارائه‌دهنده‌ها و مسیر مدل
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "observability" ? "active" : ""}`}
-            onClick={() => setAdminTab("observability")}
-          >
-            <Eye size={16} /> مرکز شفافیت (Observability)
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "roles" ? "active" : ""}`}
-            onClick={() => setAdminTab("roles")}
-          >
-            <ShieldCheck size={16} /> نقش‌ها و سهمیه‌ها
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "kb" ? "active" : ""}`}
-            onClick={() => setAdminTab("kb")}
-          >
-            <Database size={16} /> پایگاه دانش و مدل‌ها
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "skills" ? "active" : ""}`}
-            onClick={() => setAdminTab("skills")}
-          >
-            <Sparkles size={16} /> مهارت‌ها و پرامپت‌ها
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "capabilities" ? "active" : ""}`}
-            onClick={() => setAdminTab("capabilities")}
-          >
-            <ToggleRight size={16} /> قابلیت‌ها و فلگ‌ها
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "flashcards" ? "active" : ""}`}
-            onClick={() => setAdminTab("flashcards")}
-          >
-            <Layers size={16} /> فلش‌کارت‌ها
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "deep_learning" ? "active" : ""}`}
-            onClick={() => setAdminTab("deep_learning")}
-          >
-            <Layers size={16} /> یادگیری عمیق
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "rich_study" ? "active" : ""}`}
-            onClick={() => setAdminTab("rich_study")}
-          >
-            <Layers size={16} /> مطالعهٔ غنی
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "plans" ? "active" : ""}`}
-            onClick={() => {
-              setAdminTab("plans");
-              void fetchBillingData();
-            }}
-          >
-            <Crown size={16} /> پلن‌ها و قیمت توکن
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "users" ? "active" : ""}`}
-            onClick={() => {
-              setAdminTab("users");
-              void fetchUsersData();
-              void fetchBillingData();
-            }}
-          >
-            <Users size={16} /> کاربران و سهمیه‌ها
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === "appearance" ? "active" : ""}`}
-            onClick={() => setAdminTab("appearance")}
-          >
-            <Palette size={16} /> ظاهر و دسترس‌پذیری
-          </button>
-        </nav>
 
         <div className="admin-warning admin-protected-note">
           <ShieldCheck size={18} />
@@ -3390,6 +3286,7 @@ export default function AdminPage() {
         )}
         </>
         )}
+      </div>
       </div>
     </main>
   );

@@ -14,6 +14,7 @@ import {
   type ImmersivePageDetail,
   type SourceFigure,
 } from "@/lib/phase5";
+import FigureThumb from "@/components/FigureThumb";
 
 type ChatTurn = { role: "user" | "assistant"; content: string; sources?: Array<Record<string, unknown>> };
 
@@ -288,6 +289,7 @@ export default function ImmersiveReader({ bookId }: Props) {
                     <button type="button" className="btn-ghost" onClick={() => goToPage(figure.pdf_page_index)}>
                       {figure.figure_label ?? "شکل"}: {figure.caption ?? ""}
                     </button>
+                    <FigureThumb bookId={bookId} figure={figure} />
                   </li>
                 ))}
               </ul>

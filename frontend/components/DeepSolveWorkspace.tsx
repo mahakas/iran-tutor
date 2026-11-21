@@ -13,6 +13,31 @@ const ACTION_LABEL: Record<string, string> = {
   full_solution: "پاسخ کامل",
 };
 
+const STAGE_ORDER = ["hint1", "hint2", "reveal_step", "full_solution"] as const;
+
+/**
+ * Hint 1 -> hint 2 -> show step -> full solution. The server decides which actions are
+ * allowed (`available_actions`); the stepper only shows where the student is in that order.
+ */
+function DeepSolveStepper({ available }: { available: string[] }) {
+  const firstAvailable = STAGE_ORDER.findIndex((stage) => available.includes(stage));
+  return (
+    <ol className="deep-stepper" aria-label="مراحل راهنمایی">
+      {STAGE_ORDER.map((stage, index) => {
+        const isAvailable = available.includes(stage);
+        const state =
+          index === firstAvailable ? "current" : isAvailable ? "open" : firstAvailable === -1 || index < firstAvailable ? "done" : "locked";
+        return (
+          <li key={stage} className={`deep-stepper-item is-${state}`} aria-current={state === "current" ? "step" : undefined}>
+            <span className="deep-stepper-dot">{toPersianDigits(index + 1)}</span>
+            <span>{ACTION_LABEL[stage]}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 export default function DeepSolveWorkspace() {
   const { authFetch } = useAppContext();
   const [problem, setProblem] = useState("");
@@ -110,12 +135,15 @@ export default function DeepSolveWorkspace() {
             ))}
           </ol>
           {session.status === "active" ? (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "grid", gap: 10 }}>
+              <DeepSolveStepper available={session.available_actions} />
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {session.available_actions.map((action) => (
                 <button key={action} type="button" className="btn-ghost" disabled={busy} onClick={() => void act(action)}>
                   {ACTION_LABEL[action] ?? action}
                 </button>
               ))}
+              </div>
             </div>
           ) : (
             <div role="status">
