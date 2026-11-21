@@ -57,6 +57,8 @@ from app.api.capabilities import admin_router as capabilities_admin_router  # no
 from app.api.capabilities import router as capabilities_router  # noqa: E402
 from app.api.curriculum import router as curriculum_router  # noqa: E402
 from app.api.exams import router as exams_router  # noqa: E402
+from app.api.flashcards import admin_router as flashcards_admin_router  # noqa: E402
+from app.api.flashcards import router as flashcards_router  # noqa: E402
 from app.api.feedback import router as feedback_router  # noqa: E402
 from app.api.kb import router as kb_router  # noqa: E402
 from app.api.plans import router as plans_router  # noqa: E402
@@ -75,3 +77,5 @@ app.include_router(capabilities_router)
 app.include_router(capabilities_admin_router)
 app.include_router(skills_router)
 app.include_router(kb_router)
+app.include_router(flashcards_router)
+app.include_router(flashcards_admin_router)

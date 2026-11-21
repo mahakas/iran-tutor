@@ -101,7 +101,7 @@ FLASHCARD_PEDAGOGY = """## روش ساخت فلش‌کارت
 - از کارت‌های تکراری یا بیش از حد طولانی پرهیز کن.
 """
 
-# slug -> spec. `flashcard_generator` ships inactive until Phase 3.
+# slug -> spec. `flashcard_generator` ships active from Phase 3.
 SEED_SKILLS: tuple[dict[str, Any], ...] = (
     {
         "slug": "tutor_core",
@@ -164,7 +164,7 @@ SEED_SKILLS: tuple[dict[str, Any], ...] = (
         "pedagogy_rules_md": FLASHCARD_PEDAGOGY,
         "output_schema_json": {"format": "json", "blocks": ["flashcard_item"]},
         "safety_gate_rules": "textbook_strict: کارت‌ها فقط از منابع بازیابی‌شده؛ هر کارت باید ارجاع صفحه داشته باشد.",
-        "is_active": False,
+        "is_active": True,
     },
 )
 

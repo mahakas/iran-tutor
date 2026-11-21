@@ -39,6 +39,7 @@ import {
   XCircle,
   Zap,
   ToggleRight,
+  Layers,
 } from "lucide-react";
 import AdminAppearancePanel, { type AdminPreferencesPatch } from "@/components/AdminAppearancePanel";
 import AdminIntegrationsPanel, { type AdminSystemSettingsPayload } from "@/components/AdminIntegrationsPanel";
@@ -47,6 +48,7 @@ import AdminOverviewPanel, { type AdminOverviewData } from "@/components/AdminOv
 import AdminProvidersPanel from "@/components/AdminProvidersPanel";
 import AdminRolesQuotasPanel from "@/components/AdminRolesQuotasPanel";
 import AdminKbPanel from "@/components/AdminKbPanel";
+import AdminFlashcardsPanel from "@/components/AdminFlashcardsPanel";
 import AdminSkillsPanel from "@/components/AdminSkillsPanel";
 import AdminCapabilitiesPanel from "@/components/AdminCapabilitiesPanel";
 import DiffViewer from "@/components/DiffViewer";
@@ -275,6 +277,7 @@ export default function AdminPage() {
     | "kb"
     | "skills"
     | "capabilities"
+    | "flashcards"
   >("books");
   const tokenRef = useRef<string | null>(null);
   const [activeTokenState, setActiveTokenState] = useState<string | null>(null);
@@ -1872,6 +1875,13 @@ export default function AdminPage() {
           </button>
           <button
             type="button"
+            className={`admin-tab ${adminTab === "flashcards" ? "active" : ""}`}
+            onClick={() => setAdminTab("flashcards")}
+          >
+            <Layers size={16} /> فلش‌کارت‌ها
+          </button>
+          <button
+            type="button"
             className={`admin-tab ${adminTab === "plans" ? "active" : ""}`}
             onClick={() => {
               setAdminTab("plans");
@@ -1967,6 +1977,10 @@ export default function AdminPage() {
 
         {adminTab === "capabilities" && (
           <AdminCapabilitiesPanel authHeaders={authHeadersMemo} onUnauthorized={lockAdminPanel} />
+        )}
+
+        {adminTab === "flashcards" && (
+          <AdminFlashcardsPanel authHeaders={authHeadersMemo} onUnauthorized={lockAdminPanel} />
         )}
 
         {adminTab === "appearance" && (
