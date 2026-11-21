@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     vision_model_escalation: str | None = None
     tutor_model: str | None = None
     speech_to_text_model: str | None = None
+    speech_synthesis_model: str | None = None
+    speech_default_voice: str | None = None
     audio_base_url: str | None = None
     audio_api_key: str | None = None
     escalate_figures: bool = False

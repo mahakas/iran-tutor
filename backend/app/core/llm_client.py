@@ -489,10 +489,72 @@ async def transcribe_audio(
     return text.strip()
 
 
+_speech_clients: dict[tuple[str, str], AsyncOpenAI] = {}
+
+
+def _demo_wav(seconds: float = 0.5, rate: int = 8000) -> bytes:
+    """A tiny silent WAV used in demo mode (valid audio, no provider call)."""
+    import struct
+
+    samples = int(seconds * rate)
+    data = b"\x00\x00" * samples
+    header = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE"
+    fmt = b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    return header + fmt + b"data" + struct.pack("<I", len(data)) + data
+
+
+async def synthesize_speech(
+    text: str,
+    *,
+    voice: str,
+    model: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> bytes:
+    """Text-to-speech through an OpenAI-compatible audio API (admin-routed provider).
+
+    `base_url` / `api_key` come from the admin's resolved `audio_tts` route; when absent
+    the `.env` audio client is used. Returns raw audio bytes (mp3 from providers).
+    """
+    settings = get_settings()
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise ValueError("speech text is empty")
+    if settings.demo_mode:
+        record_token_usage(fallback_prompt=max(1, len(cleaned) // 4), fallback_completion=0)
+        return _demo_wav()
+    if not model:
+        raise RuntimeError("audio_tts route has no model configured")
+    if base_url:
+        key = (base_url, api_key or "")
+        client = _speech_clients.get(key)
+        if client is None:
+            client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=api_key or settings.llm_api_key,
+                timeout=settings.llm_timeout,
+                max_retries=0,
+            )
+            _speech_clients[key] = client
+    else:
+        client = _get_audio_client()
+    async with _get_semaphore():
+        response = await client.audio.speech.create(
+            model=model, voice=voice, input=cleaned[:4000], response_format="mp3"
+        )
+    audio = getattr(response, "content", b"") or b""
+    if not audio:
+        raise ValueError("speech provider returned no audio")
+    record_token_usage(fallback_prompt=max(1, len(cleaned) // 4), fallback_completion=0)
+    _log(logging.INFO, "llm.synthesize_speech.ok", model=model, bytes=len(audio))
+    return audio
+
+
 async def close_llm_clients() -> None:
     """Dispose provider HTTP clients and reset semaphore/capability caches."""
     global _client, _embedding_client, _audio_client, _semaphore
-    clients = (_client, _embedding_client, _audio_client)
+    clients = (_client, _embedding_client, _audio_client, *_speech_clients.values())
+    _speech_clients.clear()
     _client = None
     _embedding_client = None
     _audio_client = None

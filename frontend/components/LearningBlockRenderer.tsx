@@ -2,11 +2,9 @@
 
 import { useState } from "react";
 import MathContent from "@/components/MathContent";
-import {
-  normalizeLearningBlocks,
-  svgDataUrl,
-  type LearningBlock,
-} from "@/lib/learningBlocks";
+import { normalizeLearningBlocks, type LearningBlock } from "@/lib/learningBlocks";
+import MermaidDiagram from "@/components/MermaidDiagram";
+import SvgDiagram from "@/components/SvgDiagram";
 
 type Props = {
   blocks: unknown;
@@ -47,17 +45,11 @@ function BlockView({ block }: { block: LearningBlock }) {
     case "flashcard_item":
       return <FlashcardBlock block={block} />;
     case "diagram_mermaid":
-      return (
-        <figure className="lb-diagram" dir="ltr">
-          <figcaption className="lb-caption">نمودار (کد Mermaid)</figcaption>
-          <pre className="lb-code">{block.content}</pre>
-        </figure>
-      );
+      return <MermaidDiagram source={block.content} caption={textOf(block.metadata.title) || textOf(block.metadata.caption)} />;
     case "diagram_svg":
       return (
         <figure className="lb-diagram">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={svgDataUrl(block.content)} alt={textOf(block.metadata.alt) || "نمودار"} />
+          <SvgDiagram svg={block.content} />
           {textOf(block.metadata.caption) && (
             <figcaption className="lb-caption">{textOf(block.metadata.caption)}</figcaption>
           )}

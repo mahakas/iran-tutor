@@ -62,6 +62,8 @@ from app.api.flashcards import router as flashcards_router  # noqa: E402
 from app.api.phase4_admin import router as phase4_admin_router  # noqa: E402
 from app.api.phase5 import router as phase5_router  # noqa: E402
 from app.api.phase5_admin import router as phase5_admin_router  # noqa: E402
+from app.api.phase6 import router as phase6_router  # noqa: E402
+from app.api.phase6_admin import router as phase6_admin_router  # noqa: E402
 from app.api.feedback import router as feedback_router  # noqa: E402
 from app.api.kb import router as kb_router  # noqa: E402
 from app.api.plans import router as plans_router  # noqa: E402
@@ -85,3 +87,5 @@ app.include_router(flashcards_admin_router)
 app.include_router(phase4_admin_router)
 app.include_router(phase5_router)
 app.include_router(phase5_admin_router)
+app.include_router(phase6_router)
+app.include_router(phase6_admin_router)

@@ -35,6 +35,7 @@ from app.core.llm_client import (
     complete_json,
     complete_text,
     embed_texts,
+    synthesize_speech,
     transcribe_audio,
     vision_json,
 )
@@ -543,6 +544,78 @@ async def transcribe_audio_via_gateway(
         model_name=effective_model,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        latency_ms=latency,
+    )
+
+
+async def speech_via_gateway(
+    *,
+    ctx: CallContext,
+    text: str,
+    voice: str,
+    session: AsyncSession | None = None,
+    usage_hook: Callable[[int, int], None] | None = None,
+) -> tuple[bytes, GatewayResult]:
+    """Text-to-speech with routing and auditing. Returns `(audio_bytes, result)`.
+
+    The admin's `audio_tts` route supplies provider URL, key and model. The audit row
+    stores the text (truncated) and the voice; audio bytes are never logged.
+    """
+    settings = get_settings()
+    route = await _resolve(ctx.feature_key, session)
+    effective_model = (route.model_name if route and route.configured else None) or getattr(
+        settings, "speech_synthesis_model", None
+    )
+    messages = [{"role": "user", "content": f"[tts] voice={voice} chars={len(text)} text={text[:500]}"}]
+    started = time.perf_counter()
+    try:
+        audio = await synthesize_speech(
+            text,
+            voice=voice,
+            model=effective_model or "",
+            base_url=route.base_url if route and route.configured else None,
+            api_key=route.api_key if route and route.configured else None,
+        )
+    except Exception as error:
+        await _write_audit(
+            ctx=ctx,
+            route=route,
+            model_name=effective_model,
+            messages=messages,
+            response_text=None,
+            tokens_in=0,
+            tokens_out=0,
+            latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
+            status=STATUS_ERROR,
+            error_message=f"{type(error).__name__}: {error}",
+            session=session,
+        )
+        raise
+
+    latency = max(1, int(round((time.perf_counter() - started) * 1000)))
+    tokens_in = max(1, len(text) // 4)
+    if usage_hook is not None:
+        usage_hook(tokens_in, 0)
+    audit_id = await _write_audit(
+        ctx=ctx,
+        route=route,
+        model_name=effective_model,
+        messages=messages,
+        response_text=f"[audio {len(audio)} bytes]",
+        tokens_in=tokens_in,
+        tokens_out=0,
+        latency_ms=latency,
+        status=STATUS_SUCCESS,
+        session=session,
+    )
+    return audio, GatewayResult(
+        content=f"[audio {len(audio)} bytes]",
+        audit_id=audit_id,
+        provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None,
+        model_name=effective_model,
+        tokens_in=tokens_in,
+        tokens_out=0,
         latency_ms=latency,
     )
 

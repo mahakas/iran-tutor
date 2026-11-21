@@ -15,6 +15,12 @@ from app.models.curriculum import Book, BookPage, Grade, Major  # noqa: F401
 from app.models.exam import ExamSession  # noqa: F401
 from app.models.concepts import ConceptLink  # noqa: F401
 from app.models.learner_memory import LearnerMemory  # noqa: F401
+from app.models.phase6 import (  # noqa: F401
+    AudioCacheEntry,
+    LivingBookCache,
+    Notebook,
+    NotebookBlock,
+)
 from app.models.phase5 import (  # noqa: F401
     AdminActionLog,
     DeepSolveSession,

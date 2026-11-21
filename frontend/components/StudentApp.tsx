@@ -34,6 +34,8 @@ import {
   X,
   Layers,
   Calculator,
+  NotebookPen,
+  BookOpenCheck,
   Route,
   XCircle,
 } from "lucide-react";
@@ -1345,6 +1347,18 @@ export default function StudentApp() {
           <Link href="/deep-solve" className="sidebar-item" onClick={() => setSidebarOpen(false)}>
             <Calculator size={17} />
             <span>{lang === "en" ? "Deep solve" : "حل گام‌به‌گام"}</span>
+          </Link>
+        )}
+        {capabilityMenuEnabled("learning_notebook") && (
+          <Link href="/notebook" className="sidebar-item" onClick={() => setSidebarOpen(false)}>
+            <NotebookPen size={17} />
+            <span>{lang === "en" ? "Notebook" : "دفترچهٔ یادداشت"}</span>
+          </Link>
+        )}
+        {capabilityMenuEnabled("living_book") && (
+          <Link href="/living-book" className="sidebar-item" onClick={() => setSidebarOpen(false)}>
+            <BookOpenCheck size={17} />
+            <span>{lang === "en" ? "Living book" : "کتاب زنده فصل"}</span>
           </Link>
         )}
         <Link
