@@ -77,9 +77,14 @@ def normalize_capabilities(raw: list[str] | None) -> list[str]:
     return out
 
 
-def serialize_provider(provider: AiProvider, *, reveal: bool = False) -> dict[str, Any]:
-    """Serialize a provider, always masking (or omitting) the secret."""
-    plaintext = decrypt_secret(provider.encrypted_api_key) if reveal else None
+def serialize_provider(provider: AiProvider) -> dict[str, Any]:
+    """Serialize a provider for the API.
+
+    The stored secret is decrypted only to produce the mask, and is never returned:
+    `api_key` is always `None` and exists solely so the UI can tell "unchanged" apart
+    from "cleared". There is deliberately no `reveal` option — no endpoint may ever
+    echo a plaintext key back to a client.
+    """
     return {
         "id": provider.id,
         "name": provider.name,
@@ -89,7 +94,7 @@ def serialize_provider(provider: AiProvider, *, reveal: bool = False) -> dict[st
         "is_active": provider.is_active,
         "has_api_key": bool(provider.encrypted_api_key),
         "api_key_masked": mask_api_key(decrypt_secret(provider.encrypted_api_key)),
-        "api_key": plaintext if reveal else None,
+        "api_key": None,
         "last_test_status": provider.last_test_status,
         "last_test_latency_ms": provider.last_test_latency_ms,
         "last_test_at": provider.last_test_at.isoformat() if provider.last_test_at else None,

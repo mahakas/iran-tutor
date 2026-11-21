@@ -47,6 +47,24 @@ async def _build_env(tmp_path, monkeypatch):
             yield session
 
     app.dependency_overrides[get_session] = override_get_session
+    # Routes that open their own session (admin settings/books/users) must also hit
+    # the isolated DB instead of the real engine, or they would reach for Postgres.
+    from app.db import session as db_session_mod
+
+    monkeypatch.setattr(db_session_mod, "async_session_factory", factory)
+    for module_name in (
+        "app.api.admin",
+        "app.api.account",
+        "app.api.auth",
+        "app.api.plans",
+        "app.api.tutor",
+        "app.api.exams",
+        "app.api.curriculum",
+        "app.api.feedback",
+    ):
+        module = __import__(module_name, fromlist=["async_session_factory"])
+        if hasattr(module, "async_session_factory"):
+            monkeypatch.setattr(module, "async_session_factory", factory)
 
     settings = SimpleNamespace(
         demo_mode=True,
@@ -985,3 +1003,174 @@ def test_mask_api_key_and_provider_serialization_never_include_secret(monkeypatc
     assert "sk-abcdefghijklmnop" not in str(payload)
     assert payload["api_key"] is None
     assert payload["has_api_key"] is True
+
+
+# ---------------------------------------------------------------------------
+# 11. Structural audit: *every* admin operation is guarded, and no response or
+#     log line can carry a plaintext secret.
+# ---------------------------------------------------------------------------
+
+
+def _admin_operations() -> list[tuple[str, str]]:
+    """Enumerate every operational (method, path) under /api/v1/admin from the live app."""
+    from fastapi.routing import APIRoute
+
+    def prefix_of(route) -> str:
+        ctx = getattr(route, "include_context", None)
+        return (getattr(ctx, "prefix", "") or "") if ctx is not None else ""
+
+    def collect(routes, prefix: str = ""):
+        for route in routes:
+            if isinstance(route, APIRoute):
+                yield prefix + route.path, route
+                continue
+            original = getattr(route, "original_router", None)
+            if original is not None:
+                yield from collect(
+                    getattr(original, "routes", []) or [], prefix + prefix_of(route)
+                )
+                continue
+            inner = getattr(route, "routes", None)
+            if inner:
+                yield from collect(inner, prefix)
+
+    operations = []
+    for path, route in collect(app.routes):
+        if not path.startswith("/api/v1/admin"):
+            continue
+        for method in sorted(set(route.methods or ()) & {"GET", "POST", "PUT", "PATCH", "DELETE"}):
+            operations.append((method, path))
+    return operations
+
+
+def test_every_admin_operation_carries_require_admin():
+    """A structural guard: adding an unguarded admin route fails this test immediately."""
+    from app.api.admin import require_admin
+
+    def declared_dependencies(route) -> set:
+        found: set = set()
+
+        def visit(dep):
+            if dep.call is not None:
+                found.add(dep.call)
+            for child in dep.dependencies or ():
+                visit(child)
+
+        for dep in route.dependant.dependencies:
+            visit(dep)
+        return found
+
+    from fastapi.routing import APIRoute
+
+    def prefix_of(route) -> str:
+        ctx = getattr(route, "include_context", None)
+        return (getattr(ctx, "prefix", "") or "") if ctx is not None else ""
+
+    def collect(routes, prefix: str = ""):
+        for route in routes:
+            if isinstance(route, APIRoute):
+                yield prefix + route.path, route
+                continue
+            original = getattr(route, "original_router", None)
+            if original is not None:
+                yield from collect(
+                    getattr(original, "routes", []) or [], prefix + prefix_of(route)
+                )
+                continue
+            inner = getattr(route, "routes", None)
+            if inner:
+                yield from collect(inner, prefix)
+
+    public_paths = {
+        "/api/v1/admin/auth/login",
+        "/api/v1/admin/auth/logout",
+        "/api/v1/admin/auth/session",
+    }
+    guarded, public, unguarded = 0, 0, []
+    for path, route in collect(app.routes):
+        if not path.startswith("/api/v1/admin"):
+            continue
+        has_guard = require_admin in declared_dependencies(route)
+        if has_guard:
+            guarded += 1
+        elif path in public_paths:
+            public += 1
+        else:
+            unguarded.append(path)
+
+    assert guarded >= 20, f"only {guarded} guarded admin routers — did the guard get dropped?"
+    assert unguarded == [], f"admin routes without require_admin: {sorted(set(unguarded))}"
+    assert public == 3, f"expected exactly 3 public auth routes, got {public}"
+
+
+@pytest.mark.asyncio
+async def test_no_admin_response_ever_contains_a_plaintext_secret(tmp_path, monkeypatch, caplog):
+    """Sweep every admin GET with real secrets configured and scan the payloads + logs."""
+    import logging as _logging
+
+    engine, factory, _settings = await _build_env(tmp_path, monkeypatch)
+
+    provider_secret = "sk-LEAKCANARY-provider-9f8e7d6c5b4a3210"
+    env_secret = "sk-LEAKCANARY-envvalue-1a2b3c4d5e6f"
+    try:
+        async with factory() as session:
+            provider = AiProvider(
+                name="leak-canary",
+                provider_type="openai_compatible",
+                base_url="https://example.invalid/v1",
+                encrypted_api_key=crypto.encrypt_secret(provider_secret),
+                capabilities=["chat", "embedding"],
+                is_active=True,
+            )
+            session.add(provider)
+            billing = await session.get(
+                __import__("app.models.auth", fromlist=["BillingSettings"]).BillingSettings, 1
+            )
+            billing.system_config = {"llm_api_key": env_secret, "sms_api_key": "kavenegar-canary-000"}
+            await session.commit()
+            provider_id = provider.id
+
+        caplog.set_level(_logging.DEBUG)
+        secrets = (
+            provider_secret,
+            env_secret,
+            "kavenegar-canary-000",
+            "LEAKCANARY",
+        )
+
+        # Every parameterless admin GET is a pure read: safe to sweep in-process.
+        # (POST probes make outbound calls and are covered by the diagnostics test.)
+        suspicious = [
+            (m, p)
+            for m, p in _admin_operations()
+            if m == "GET"
+            and not p.startswith("/api/v1/admin/auth")
+            and "{" not in p
+        ]
+
+        checked = 0
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            for method, path in suspicious:
+                response = await client.request(method, path, headers=ADMIN_HEADERS)
+                body = response.text
+                for secret in secrets:
+                    assert secret not in body, f"{method} {path} leaked secret {secret!r}"
+                checked += 1
+
+            # The provider list must still show a mask, so masking is not silently broken.
+            listed = await client.get("/api/v1/admin/providers", headers=ADMIN_HEADERS)
+            payload = listed.json()["providers"]
+            assert payload and payload[0]["api_key"] is None
+            assert payload[0]["api_key_masked"].endswith(provider_secret[-4:])
+            assert payload[0]["has_api_key"] is True
+            assert payload[0]["id"] == provider_id
+
+        assert checked >= 10, f"leak sweep only exercised {checked} endpoints"
+
+        log_text = "\n".join(record.getMessage() for record in caplog.records)
+        for secret in secrets:
+            assert secret not in log_text, f"a secret was written to the logs: {secret!r}"
+    finally:
+        app.dependency_overrides.clear()
+        await rate_limiter.close_rate_limiter()
+        await engine.dispose()

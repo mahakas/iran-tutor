@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import AsyncQdrantClient, models
@@ -627,3 +629,72 @@ async def search_textbook(
     return merge_hybrid_results(
         vector_results, lexical_results, top_k=top_k
     )
+
+
+async def probe_qdrant(url: str | None = None, collection: str | None = None) -> dict[str, Any]:
+    """Live connectivity probe for the Qdrant backend (`POST /admin/settings/test-vector`).
+
+    Owns the only direct Qdrant HTTP call outside the client library, keeping the API
+    layer free of transport code.
+    """
+    import httpx
+
+    settings = get_settings()
+    base = (url or settings.qdrant_url or "").strip().rstrip("/")
+    target = (collection or settings.qdrant_collection or "").strip()
+    started = time.perf_counter()
+
+    def _elapsed() -> int:
+        return max(1, int(round((time.perf_counter() - started) * 1000)))
+
+    parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return {
+            "ok": False,
+            "backend": "qdrant",
+            "latency_ms": _elapsed(),
+            "detail": "آدرس Qdrant معتبر نیست.",
+            "invalid_url": True,
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(f"{base}/collections")
+            latency_ms = _elapsed()
+            if response.status_code >= 400:
+                return {
+                    "ok": False,
+                    "backend": "qdrant",
+                    "latency_ms": latency_ms,
+                    "detail": f"پاسخ غیرموفق از Qdrant (HTTP {response.status_code})",
+                }
+            payload = response.json()
+            collections = [
+                item.get("name")
+                for item in ((payload.get("result") or {}).get("collections") or [])
+                if isinstance(item, dict)
+            ]
+            return {
+                "ok": True,
+                "backend": "qdrant",
+                "latency_ms": latency_ms,
+                "detail": (
+                    f"اتصال به Qdrant برقرار شد؛ مجموعه «{target}» "
+                    + (
+                        "یافت شد."
+                        if target in collections
+                        else "هنوز ایجاد نشده (با اولین ایندکس ساخته می‌شود)."
+                    )
+                ),
+                "collection_info": {
+                    "collections": collections,
+                    "target_exists": target in collections,
+                },
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "backend": "qdrant",
+            "latency_ms": _elapsed(),
+            "detail": f"عدم دسترسی به Qdrant در {base}: {str(exc)[:180]}",
+        }

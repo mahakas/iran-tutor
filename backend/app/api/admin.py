@@ -16,7 +16,6 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, or_, select, text as sql_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1920,7 +1919,14 @@ async def reset_admin_system_settings(
 
 @protected_router.post("/settings/test-ai")
 async def test_ai_connection(body: TestAiConnectionBody) -> dict[str, object]:
-    """Probe an OpenAI-compatible AI API (`/models` + optional tiny completion) safely."""
+    """Probe an OpenAI-compatible AI API (`/models` + optional tiny completion) safely.
+
+    All outbound provider traffic lives in :mod:`app.services.ai_gateway`; this route
+    only validates input and forwards to :func:`ai_gateway.probe_endpoint`, which also
+    scrubs the API key from any upstream error text before it reaches the client.
+    """
+    from app.services.ai_gateway import probe_endpoint
+
     settings = get_settings()
     base_url = (body.llm_base_url or settings.llm_base_url or "").strip().rstrip("/")
     api_key = (body.llm_api_key or settings.llm_api_key or "").strip()
@@ -1930,107 +1936,40 @@ async def test_ai_connection(body: TestAiConnectionBody) -> dict[str, object]:
     if not api_key:
         raise HTTPException(status_code=422, detail="کلید API برای تست اتصال وارد نشده است.")
 
-    headers = {"Authorization": f"Bearer {api_key}"}
-    models_list: list[str] = []
-    status_code: int | None = None
-    error_message: str | None = None
-    models_ok = False
+    probe_model = (
+        body.test_model or settings.tutor_model or settings.vision_model_primary or ""
+    ).strip()
 
-    started = time.perf_counter()
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        try:
-            resp = await client.get(f"{base_url}/models", headers=headers)
-            status_code = resp.status_code
-            if resp.status_code < 400:
-                models_ok = True
-                data = resp.json()
-                raw_items = data.get("data") if isinstance(data, dict) else data
-                if isinstance(raw_items, list):
-                    ids = {
-                        str(item["id"]).strip()
-                        for item in raw_items
-                        if isinstance(item, dict) and item.get("id")
-                    }
-                    models_list = sorted(ids)[:150]
-            else:
-                error_message = _redact_secret(resp.text or f"HTTP {resp.status_code}", api_key)
-        except Exception as exc:  # noqa: BLE001
-            error_message = _redact_secret(str(exc) or type(exc).__name__, api_key)
+    probe = await probe_endpoint(
+        base_url=base_url,
+        api_key=api_key,
+        model=probe_model if body.run_prompt else None,
+        run_prompt=body.run_prompt,
+    )
 
-        latency_ms = round((time.perf_counter() - started) * 1000)
-
-        prompt_result: dict[str, object] | None = None
-        if body.run_prompt:
-            chosen_model = (body.test_model or settings.tutor_model or settings.vision_model_primary or "").strip()
-            if not chosen_model:
-                prompt_result = {"ok": False, "error": "مدلی برای تست پرامپت مشخص نشده است."}
-            else:
-                p_start = time.perf_counter()
-                try:
-                    c_resp = await client.post(
-                        f"{base_url}/chat/completions",
-                        headers=headers,
-                        json={
-                            "model": chosen_model,
-                            "messages": [{"role": "user", "content": "فقط یک کلمه فارسی بنویس: سلام"}],
-                            "max_tokens": 24,
-                            "temperature": 0,
-                        },
-                    )
-                    p_latency = round((time.perf_counter() - p_start) * 1000)
-                    if c_resp.status_code >= 400:
-                        prompt_result = {
-                            "ok": False,
-                            "model": chosen_model,
-                            "status_code": c_resp.status_code,
-                            "latency_ms": p_latency,
-                            "error": _redact_secret(c_resp.text, api_key),
-                        }
-                    else:
-                        c_data = c_resp.json()
-                        reply_text = ""
-                        choices = c_data.get("choices") if isinstance(c_data, dict) else None
-                        if isinstance(choices, list) and choices:
-                            msg = choices[0].get("message") if isinstance(choices[0], dict) else None
-                            if isinstance(msg, dict):
-                                reply_text = str(msg.get("content") or "").strip()
-                        prompt_result = {
-                            "ok": True,
-                            "model": chosen_model,
-                            "status_code": c_resp.status_code,
-                            "latency_ms": p_latency,
-                            "reply": reply_text[:160],
-                            "usage": c_data.get("usage") if isinstance(c_data, dict) else None,
-                        }
-                        if not models_ok and status_code in (404, 405):
-                            models_ok = True
-                            error_message = None
-                except Exception as exc:  # noqa: BLE001
-                    prompt_result = {
-                        "ok": False,
-                        "model": chosen_model,
-                        "latency_ms": round((time.perf_counter() - p_start) * 1000),
-                        "error": _redact_secret(str(exc) or type(exc).__name__, api_key),
-                    }
-
+    prompt_test = probe.get("prompt_test")
     return {
-        "ok": models_ok or bool(prompt_result and prompt_result.get("ok")),
-        "base_url": base_url,
-        "status_code": status_code,
-        "latency_ms": latency_ms,
-        "models": models_list,
-        "models_count": len(models_list),
-        "error": error_message,
-        "prompt_test": prompt_result,
+        "ok": bool(probe.get("ok")) or bool(isinstance(prompt_test, dict) and prompt_test.get("ok")),
+        "base_url": probe.get("base_url"),
+        "status_code": probe.get("status_code"),
+        "latency_ms": probe.get("latency_ms"),
+        "models": list(probe.get("models") or []),
+        "models_count": int(probe.get("models_count") or 0),
+        "error": probe.get("error"),
+        "prompt_test": prompt_test,
     }
 
 
 @protected_router.post("/settings/test-vector")
 async def test_vector_connection(body: TestVectorBody) -> dict[str, object]:
+    """Check the configured vector backend (pgvector extension or Qdrant collections).
+
+    Qdrant transport lives in :func:`app.services.retrieval_service.probe_qdrant`.
+    """
+    from app.services.retrieval_service import probe_qdrant
+
     settings = get_settings()
     backend = body.vector_backend or settings.vector_backend
-    qdrant_url = (body.qdrant_url or settings.qdrant_url or "").strip().rstrip("/")
-    qdrant_collection = (body.qdrant_collection or settings.qdrant_collection or "").strip()
     started = time.perf_counter()
 
     if backend == "pgvector":
@@ -2039,7 +1978,7 @@ async def test_vector_connection(body: TestVectorBody) -> dict[str, object]:
             return {
                 "ok": False,
                 "backend": "pgvector",
-                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "latency_ms": max(1, int(round((time.perf_counter() - started) * 1000))),
                 "detail": "پایگاه‌داده فعلی SQLite است؛ افزونه pgvector نیازمند PostgreSQL/Supabase است (در حالت Demo از جستجوی واژگانی استفاده می‌شود).",
             }
         try:
@@ -2066,7 +2005,7 @@ async def test_vector_connection(body: TestVectorBody) -> dict[str, object]:
             return {
                 "ok": ext_present,
                 "backend": "pgvector",
-                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "latency_ms": max(1, int(round((time.perf_counter() - started) * 1000))),
                 "detail": (
                     f"افزونه pgvector فعال است؛ تعداد {vectors_count} بردار صفحه ذخیره شده."
                     if ext_present
@@ -2082,50 +2021,14 @@ async def test_vector_connection(body: TestVectorBody) -> dict[str, object]:
             return {
                 "ok": False,
                 "backend": "pgvector",
-                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "latency_ms": max(1, int(round((time.perf_counter() - started) * 1000))),
                 "detail": f"خطا در بررسی pgvector: {str(exc)[:220]}",
             }
 
-    parsed = urlparse(qdrant_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    result = await probe_qdrant(body.qdrant_url, body.qdrant_collection)
+    if result.pop("invalid_url", False):
         raise HTTPException(status_code=422, detail="آدرس Qdrant معتبر نیست.")
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        try:
-            resp = await client.get(f"{qdrant_url}/collections")
-            latency_ms = round((time.perf_counter() - started) * 1000)
-            if resp.status_code >= 400:
-                return {
-                    "ok": False,
-                    "backend": "qdrant",
-                    "latency_ms": latency_ms,
-                    "detail": f"پاسخ غیرموفق از Qdrant (HTTP {resp.status_code})",
-                }
-            payload = resp.json()
-            collections = [
-                c.get("name")
-                for c in (payload.get("result", {}).get("collections") or [])
-                if isinstance(c, dict)
-            ]
-            return {
-                "ok": True,
-                "backend": "qdrant",
-                "latency_ms": latency_ms,
-                "detail": (
-                    f"اتصال به Qdrant برقرار شد؛ مجموعه «{qdrant_collection}» "
-                    + ("یافت شد." if qdrant_collection in collections else "هنوز ایجاد نشده (با اولین ایندکس ساخته می‌شود).")
-                ),
-                "collection_info": {
-                    "collections": collections,
-                    "target_exists": qdrant_collection in collections,
-                },
-            }
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "ok": False,
-                "backend": "qdrant",
-                "latency_ms": round((time.perf_counter() - started) * 1000),
-                "detail": f"عدم دسترسی به Qdrant در {qdrant_url}: {str(exc)[:180]}",
-            }
+    return result
 
 
 @protected_router.post("/settings/test-sms")

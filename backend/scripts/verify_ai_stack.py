@@ -1,5 +1,8 @@
 """Step 3 diagnostic: verify real LLM, Vision, Embeddings, DB, and Qdrant connectivity.
 
+Every AI call goes through the Central AI Gateway (`app.services.ai_gateway`), the same
+choke point production traffic uses, so this script also exercises routing + auditing.
+
 Run from `backend/` after setting real provider credentials (`DEMO_MODE=false`):
     .venv/bin/python scripts/verify_ai_stack.py
 """
@@ -19,12 +22,13 @@ from pydantic import ValidationError  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.core.config import get_settings  # noqa: E402
-from app.core.llm_client import (  # noqa: E402
-    close_llm_clients,
-    complete_json,
-    complete_text,
-    embed_texts,
-    vision_json,
+from app.core.llm_client import close_llm_clients  # noqa: E402
+from app.services.ai_gateway import (  # noqa: E402
+    CallContext,
+    complete_json_via_gateway,
+    complete_text_via_gateway,
+    embed_via_gateway,
+    vision_json_via_gateway,
 )
 from app.db.session import async_session_factory, engine  # noqa: E402
 from app.services.retrieval_service import close_qdrant, ensure_collection  # noqa: E402
@@ -55,9 +59,10 @@ async def _check_vector_backend(backend: str) -> bool:
 async def _check_tutor_llm(model: str) -> bool:
     started = time.perf_counter()
     try:
-        reply = await complete_text(
-            model,
-            [
+        result = await complete_text_via_gateway(
+            ctx=CallContext(feature_key="chat", textbook_strict=False),
+            model=model,
+            messages=[
                 {
                     "role": "system",
                     "content": "تو معلم فیزیک هستی. به فارسی پاسخ کوتاه بده و فرمول را با $...$ بنویس.",
@@ -68,6 +73,7 @@ async def _check_tutor_llm(model: str) -> bool:
                 },
             ],
         )
+        reply = result.content
         elapsed = time.perf_counter() - started
         has_persian = any("\u0600" <= ch <= "\u06ff" for ch in reply)
         has_katex = "$" in reply or "\\(" in reply or "\\[" in reply
@@ -84,9 +90,10 @@ async def _check_tutor_llm(model: str) -> bool:
 async def _check_json_llm(model: str) -> bool:
     started = time.perf_counter()
     try:
-        parsed = await complete_json(
-            model,
-            [
+        result = await complete_json_via_gateway(
+            ctx=CallContext(feature_key="quiz", textbook_strict=False),
+            model=model,
+            messages=[
                 {
                     "role": "system",
                     "content": 'Return JSON {"questions":[{"prompt":str,"choices":{"A":str,"B":str,"C":str,"D":str},"correct_option":"A","explanation":str,"source_index":0}]}',
@@ -97,6 +104,7 @@ async def _check_json_llm(model: str) -> bool:
                 },
             ],
         )
+        parsed = result.content
         elapsed = time.perf_counter() - started
         ok = isinstance(parsed.get("questions"), list) and len(parsed["questions"]) >= 1
         print(f"[{'OK' if ok else 'FAIL'}] Exam JSON ({model}) in {elapsed:.2f}s")
@@ -110,13 +118,17 @@ async def _check_vision(model: str, image_path: Path | None) -> bool:
     started = time.perf_counter()
     png = image_path.read_bytes() if image_path else make_test_png()
     try:
-        parsed, usage = await vision_json(
-            model,
-            "You are a Persian textbook OCR engine. Return ONLY JSON with keys 'text' and 'formula'.",
-            "Read the Persian text and formula in this image.",
-            png,
+        result = await vision_json_via_gateway(
+            ctx=CallContext(feature_key="vision_ocr", textbook_strict=False),
+            model=model,
+            system_prompt="You are a Persian textbook OCR engine. Return ONLY JSON with keys 'text' and 'formula'.",
+            user_text="Read the Persian text and formula in this image.",
+            image_bytes=png,
+            image_mime_type="image/png",
         )
+        parsed = result.content
         elapsed = time.perf_counter() - started
+        usage = {"tokens_in": result.tokens_in, "tokens_out": result.tokens_out}
         print(f"[OK] Vision ({model}) in {elapsed:.2f}s | usage={usage} | keys={list(parsed)}")
         return True
     except Exception as exc:  # noqa: BLE001
@@ -127,7 +139,12 @@ async def _check_vision(model: str, image_path: Path | None) -> bool:
 async def _check_embeddings(model: str, expected_dim: int) -> bool:
     started = time.perf_counter()
     try:
-        vectors = await embed_texts(["شیب نمودار مکان زمان سرعت متوسط است."], model=model)
+        result = await embed_via_gateway(
+            ctx=CallContext(feature_key="embedding", textbook_strict=False),
+            texts=["شیب نمودار مکان زمان سرعت متوسط است."],
+            model=model,
+        )
+        vectors = result.content
         elapsed = time.perf_counter() - started
         dim_ok = len(vectors) == 1 and len(vectors[0]) == expected_dim
         print(

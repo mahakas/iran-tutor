@@ -609,78 +609,160 @@ async def embed_via_gateway(
 # ---------------------------------------------------------------------------
 
 
-async def probe_provider(
-    provider: Any, *, provider_model: str | None = None, run_prompt: bool = True
+async def probe_endpoint(
+    *,
+    base_url: str,
+    api_key: str,
+    provider_type: str | None = None,
+    model: str | None = None,
+    run_prompt: bool = True,
+    include_models: bool = True,
 ) -> dict[str, Any]:
-    """Live connectivity check for one stored provider (`POST /admin/providers/{id}/test`)."""
+    """Live connectivity probe for one OpenAI-compatible endpoint.
+
+    This is the *single* place in the codebase that talks to a provider outside a
+    normal gateway call (``/models`` + a tiny ``/chat/completions``). Both admin
+    connection tests go through it:
+
+    * ``POST /admin/providers/{id}/test``  → :func:`probe_provider`
+    * ``POST /admin/settings/test-ai``     → called directly with a raw key
+
+    The API key is accepted, used for the ``Authorization`` header, and scrubbed
+    from every error string before it is returned, so it can never leak to the
+    client or the logs.
+    """
     import httpx
 
-    from app.core.crypto import decrypt_secret
-
-    api_key = decrypt_secret(provider.encrypted_api_key)
-    base_url = (provider.base_url or "").rstrip("/")
+    base = (base_url or "").strip().rstrip("/")
     result: dict[str, Any] = {
         "ok": False,
-        "provider_id": provider.id,
-        "provider_type": provider.provider_type,
-        "base_url": base_url,
+        "provider_type": provider_type,
+        "base_url": base,
+        "models": [],
         "models_count": 0,
         "latency_ms": 0,
         "error": None,
         "prompt_test": None,
     }
-    if provider.provider_type in {"local"} and not base_url:
+    if not base:
         result["error"] = "نشانی پایه برای این ارائه‌دهنده تنظیم نشده است."
         return result
-    if not base_url:
-        result["error"] = "نشانی پایه برای این ارائه‌دهنده تنظیم نشده است."
-        return result
+
+    def _scrub(text: str) -> str:
+        cleaned = str(text or "")
+        if api_key and len(api_key) >= 4:
+            cleaned = cleaned.replace(api_key, "***")
+        return cleaned[:280]
 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     started = time.perf_counter()
     async with httpx.AsyncClient(timeout=20.0) as client:
-        try:
-            response = await client.get(f"{base_url}/models", headers=headers)
-            result["status_code"] = response.status_code
-            if response.status_code < 400:
-                payload = response.json()
-                items = payload.get("data") if isinstance(payload, dict) else payload
-                if isinstance(items, list):
-                    result["models_count"] = len(
-                        [i for i in items if isinstance(i, dict) and i.get("id")]
-                    )
-                result["ok"] = True
-            else:
-                result["error"] = f"HTTP {response.status_code}"
-        except Exception as error:  # noqa: BLE001
-            result["error"] = f"{type(error).__name__}: {error}"
-        result["latency_ms"] = int((time.perf_counter() - started) * 1000)
+        if include_models:
+            try:
+                response = await client.get(f"{base}/models", headers=headers)
+                result["status_code"] = response.status_code
+                if response.status_code < 400:
+                    payload = response.json()
+                    items = payload.get("data") if isinstance(payload, dict) else payload
+                    if isinstance(items, list):
+                        ids = {
+                            str(item["id"]).strip()
+                            for item in items
+                            if isinstance(item, dict) and item.get("id")
+                        }
+                        result["models"] = sorted(ids)[:150]
+                        result["models_count"] = len(result["models"])
+                    result["ok"] = True
+                else:
+                    result["error"] = _scrub(response.text or f"HTTP {response.status_code}")
+            except Exception as error:  # noqa: BLE001
+                result["error"] = _scrub(f"{type(error).__name__}: {error}")
+        else:
+            result["ok"] = True
+        result["latency_ms"] = max(1, int(round((time.perf_counter() - started) * 1000)))
 
-        if run_prompt and result["ok"]:
-            probe_model = provider_model or None
-            if probe_model:
+        prompt_model = (model or "").strip()
+        if run_prompt:
+            if not prompt_model:
+                result["prompt_test"] = {
+                    "ok": False,
+                    "error": "مدلی برای تست پرامپت مشخص نشده است.",
+                }
+            elif result["ok"] or include_models is False:
                 p_started = time.perf_counter()
                 try:
                     completion = await client.post(
-                        f"{base_url}/chat/completions",
+                        f"{base}/chat/completions",
                         headers={**headers, "Content-Type": "application/json"},
                         json={
-                            "model": probe_model,
-                            "messages": [{"role": "user", "content": "فقط یک کلمه فارسی بنویس: سلام"}],
+                            "model": prompt_model,
+                            "messages": [
+                                {"role": "user", "content": "فقط یک کلمه فارسی بنویس: سلام"}
+                            ],
                             "max_tokens": 24,
                             "temperature": 0,
                         },
                     )
-                    result["prompt_test"] = {
-                        "ok": completion.status_code < 400,
-                        "model": probe_model,
-                        "status_code": completion.status_code,
-                        "latency_ms": int((time.perf_counter() - p_started) * 1000),
-                    }
+                    p_latency = max(1, int(round((time.perf_counter() - p_started) * 1000)))
+                    if completion.status_code >= 400:
+                        result["prompt_test"] = {
+                            "ok": False,
+                            "model": prompt_model,
+                            "status_code": completion.status_code,
+                            "latency_ms": p_latency,
+                            "error": _scrub(completion.text),
+                        }
+                    else:
+                        body = completion.json()
+                        reply = ""
+                        choices = body.get("choices") if isinstance(body, dict) else None
+                        if isinstance(choices, list) and choices:
+                            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+                            if isinstance(message, dict):
+                                reply = str(message.get("content") or "").strip()
+                        result["prompt_test"] = {
+                            "ok": True,
+                            "model": prompt_model,
+                            "status_code": completion.status_code,
+                            "latency_ms": p_latency,
+                            "reply": reply[:160],
+                            "usage": body.get("usage") if isinstance(body, dict) else None,
+                        }
+                        # A backend may expose chat but not /models (404/405).
+                        if not result["ok"] and result.get("status_code") in (404, 405):
+                            result["ok"] = True
+                            result["error"] = None
                 except Exception as error:  # noqa: BLE001
                     result["prompt_test"] = {
                         "ok": False,
-                        "model": probe_model,
-                        "error": f"{type(error).__name__}: {error}",
+                        "model": prompt_model,
+                        "error": _scrub(f"{type(error).__name__}: {error}"),
                     }
     return result
+
+
+async def probe_provider(
+    provider: Any, *, provider_model: str | None = None, run_prompt: bool = True
+) -> dict[str, Any]:
+    """Live connectivity check for one stored provider (`POST /admin/providers/{id}/test`)."""
+    from app.core.crypto import decrypt_secret
+
+    api_key = decrypt_secret(provider.encrypted_api_key)
+    probe = await probe_endpoint(
+        base_url=provider.base_url or "",
+        api_key=api_key or "",
+        provider_type=provider.provider_type,
+        model=provider_model,
+        run_prompt=run_prompt,
+    )
+    return {
+        "ok": probe["ok"],
+        "provider_id": provider.id,
+        "provider_type": provider.provider_type,
+        "base_url": probe["base_url"],
+        "status_code": probe.get("status_code"),
+        "models_count": probe["models_count"],
+        "latency_ms": probe["latency_ms"],
+        "error": probe["error"],
+        "prompt_test": probe["prompt_test"],
+    }
