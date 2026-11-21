@@ -36,6 +36,8 @@ import { buildUserAuthHeaders, useAppContext } from "@/components/AppProvider";
 import ExamRunner from "@/components/ExamRunner";
 import GlobalSearch, { type SearchItem } from "@/components/GlobalSearch";
 import MathContent from "@/components/MathContent";
+import LearningBlockRenderer from "@/components/LearningBlockRenderer";
+import { fetchMyCapabilities } from "@/lib/capabilities";
 import ThemedSelect from "@/components/ThemedSelect";
 import { formatDateTime, formatNumber } from "@/lib/i18n";
 import type {
@@ -123,6 +125,8 @@ export default function StudentApp() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [recording, setRecording] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Capability Registry (Phase 2): null = registry unreachable -> keep the legacy menu.
+  const [enabledCapabilities, setEnabledCapabilities] = useState<Set<string> | null>(null);
   const [examSetupOpen, setExamSetupOpen] = useState(false);
   const [examHistoryOpen, setExamHistoryOpen] = useState(false);
   const [examType, setExamType] = useState<"konkoor" | "final">("konkoor");
@@ -490,6 +494,8 @@ export default function StudentApp() {
         role: "assistant",
         content: detail,
         sources: result.sources,
+        // Typed blocks describe the plain answer only; prefixed transcripts stay markdown.
+        blocks: detail === result.answer ? result.blocks : undefined,
       };
       const fullThread = [...withUser, assistantMessage];
       setMessages(fullThread);
@@ -889,6 +895,24 @@ export default function StudentApp() {
     }
   }, [currentUser, lang, openChatSession, openExamHistory, openSavedExam, resetChat, router]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const token = getActiveToken();
+    if (!token && !currentUser) return;
+    void fetchMyCapabilities(buildUserAuthHeaders(token)).then((keys) => {
+      if (!cancelled) setEnabledCapabilities(keys);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, getActiveToken]);
+
+  // Unknown (null) registry state keeps the legacy menu; otherwise honour the flags.
+  const capabilityMenuEnabled = useCallback(
+    (key: string) => enabledCapabilities === null || enabledCapabilities.has(key),
+    [enabledCapabilities]
+  );
+
   const studentQuickCommands = useMemo<SearchItem[]>(
     () => [
       {
@@ -1019,18 +1043,22 @@ export default function StudentApp() {
         <div className="sidebar-section-label">
           {lang === "en" ? "Learning Workspace" : "فضای یادگیری"}
         </div>
-        <button className="sidebar-item active" onClick={() => setSidebarOpen(false)}>
-          <BookOpen size={17} />
-          <span>{lang === "en" ? "Personal Tutor" : "معلم خصوصی"}</span>
-          <span className="side-dot" />
-        </button>
-        <button className="sidebar-item" onClick={() => void openExamHistory()}>
-          <GraduationCap size={17} />
-          <span>{lang === "en" ? "My Exams" : "آزمون‌های من"}</span>
-          {visibleExamHistory.length > 0 && (
-            <span className="side-badge">{formatNumber(visibleExamHistory.length, lang)}</span>
-          )}
-        </button>
+        {capabilityMenuEnabled("chat") && (
+          <button className="sidebar-item active" onClick={() => setSidebarOpen(false)}>
+            <BookOpen size={17} />
+            <span>{lang === "en" ? "Personal Tutor" : "معلم خصوصی"}</span>
+            <span className="side-dot" />
+          </button>
+        )}
+        {capabilityMenuEnabled("quiz") && (
+          <button className="sidebar-item" onClick={() => void openExamHistory()}>
+            <GraduationCap size={17} />
+            <span>{lang === "en" ? "My Exams" : "آزمون‌های من"}</span>
+            {visibleExamHistory.length > 0 && (
+              <span className="side-badge">{formatNumber(visibleExamHistory.length, lang)}</span>
+            )}
+          </button>
+        )}
         <Link
           href="/account/upgrade"
           className="sidebar-item"
@@ -1473,7 +1501,17 @@ export default function StudentApp() {
                     )}
                     <div className={`message-bubble ${message.role}`}>
                       {message.role === "assistant" ? (
-                        <MathContent content={message.content} />
+                        message.blocks && message.blocks.length > 0 ? (
+                          <LearningBlockRenderer
+                            blocks={message.blocks.filter(
+                              (block) =>
+                                !(block && typeof block === "object" && (block as { type?: unknown }).type === "citation_ref")
+                            )}
+                            fallbackMarkdown={message.content}
+                          />
+                        ) : (
+                          <MathContent content={message.content} />
+                        )
                       ) : (
                         <p>{message.content}</p>
                       )}

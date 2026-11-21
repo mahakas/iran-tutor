@@ -38,6 +38,7 @@ import {
   Users,
   XCircle,
   Zap,
+  ToggleRight,
 } from "lucide-react";
 import AdminAppearancePanel, { type AdminPreferencesPatch } from "@/components/AdminAppearancePanel";
 import AdminIntegrationsPanel, { type AdminSystemSettingsPayload } from "@/components/AdminIntegrationsPanel";
@@ -45,6 +46,9 @@ import AdminObservabilityPanel from "@/components/AdminObservabilityPanel";
 import AdminOverviewPanel, { type AdminOverviewData } from "@/components/AdminOverviewPanel";
 import AdminProvidersPanel from "@/components/AdminProvidersPanel";
 import AdminRolesQuotasPanel from "@/components/AdminRolesQuotasPanel";
+import AdminKbPanel from "@/components/AdminKbPanel";
+import AdminSkillsPanel from "@/components/AdminSkillsPanel";
+import AdminCapabilitiesPanel from "@/components/AdminCapabilitiesPanel";
 import DiffViewer from "@/components/DiffViewer";
 import GlobalSearch, { type SearchItem } from "@/components/GlobalSearch";
 import { computeLineDiff } from "@/lib/diff";
@@ -268,6 +272,9 @@ export default function AdminPage() {
     | "providers"
     | "observability"
     | "roles"
+    | "kb"
+    | "skills"
+    | "capabilities"
   >("books");
   const tokenRef = useRef<string | null>(null);
   const [activeTokenState, setActiveTokenState] = useState<string | null>(null);
@@ -1844,6 +1851,27 @@ export default function AdminPage() {
           </button>
           <button
             type="button"
+            className={`admin-tab ${adminTab === "kb" ? "active" : ""}`}
+            onClick={() => setAdminTab("kb")}
+          >
+            <Database size={16} /> پایگاه دانش و مدل‌ها
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "skills" ? "active" : ""}`}
+            onClick={() => setAdminTab("skills")}
+          >
+            <Sparkles size={16} /> مهارت‌ها و پرامپت‌ها
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === "capabilities" ? "active" : ""}`}
+            onClick={() => setAdminTab("capabilities")}
+          >
+            <ToggleRight size={16} /> قابلیت‌ها و فلگ‌ها
+          </button>
+          <button
+            type="button"
             className={`admin-tab ${adminTab === "plans" ? "active" : ""}`}
             onClick={() => {
               setAdminTab("plans");
@@ -1927,6 +1955,18 @@ export default function AdminPage() {
             authHeaders={authHeadersMemo}
             onUnauthorized={lockAdminPanel}
           />
+        )}
+
+        {adminTab === "kb" && (
+          <AdminKbPanel authHeaders={authHeadersMemo} onUnauthorized={lockAdminPanel} />
+        )}
+
+        {adminTab === "skills" && (
+          <AdminSkillsPanel authHeaders={authHeadersMemo} onUnauthorized={lockAdminPanel} />
+        )}
+
+        {adminTab === "capabilities" && (
+          <AdminCapabilitiesPanel authHeaders={authHeadersMemo} onUnauthorized={lockAdminPanel} />
         )}
 
         {adminTab === "appearance" && (

@@ -13,6 +13,13 @@ from app.models.auth import (  # noqa: F401
 from app.models.chat import ChatSession  # noqa: F401
 from app.models.curriculum import Book, BookPage, Grade, Major  # noqa: F401
 from app.models.exam import ExamSession  # noqa: F401
+from app.models.capabilities import (  # noqa: F401
+    Capability,
+    KbIngestionJob,
+    Skill,
+    SkillVersion,
+    SourceFigure,
+)
 from app.models.governance import (  # noqa: F401
     AiAuditLog,
     AiProvider,
@@ -39,4 +46,9 @@ __all__ = [
     "FeatureModelRoute",
     "UserQuota",
     "AiAuditLog",
+    "Capability",
+    "Skill",
+    "SkillVersion",
+    "KbIngestionJob",
+    "SourceFigure",
 ]

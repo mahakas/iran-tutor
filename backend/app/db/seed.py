@@ -268,6 +268,12 @@ async def seed_database() -> None:
         await seed_majors(session)
         await seed_plans(session)
         await seed_billing_settings(session)
+        # Phase 2: capability registry + skills (idempotent, admin-safe).
+        from app.services.capability_service import seed_capabilities
+        from app.services.skill_seed import seed_skills
+
+        await seed_capabilities(session)
+        await seed_skills(session)
         await session.flush()
         if settings.demo_mode:
             grade = await session.scalar(select(Grade).where(Grade.number == 12))

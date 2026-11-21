@@ -17,6 +17,7 @@ from app.models.auth import User
 from app.models.curriculum import Book
 from app.models.exam import ExamSession
 from app.services.auth_billing_service import record_and_deduct_usage
+from app.services.capability_service import check_capability_access
 from app.services.quota_service import enforce_ai_quota
 from app.services.exam_service import create_exam, exam_summary, public_exam, submit_exam
 
@@ -50,6 +51,7 @@ async def start_exam(
         grade_number=body.grade_number,
         major_code=body.major_code,
     )
+    await check_capability_access(session, "quiz", current_user)
     await enforce_ai_quota(session, user=current_user, feature_key="quiz")
     try:
         with track_token_usage() as usage:
