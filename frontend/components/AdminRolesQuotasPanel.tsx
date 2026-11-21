@@ -299,6 +299,9 @@ export default function AdminRolesQuotasPanel({
                       <div className="admin-muted" dir="ltr">
                         {user.phone_number ?? user.id}
                       </div>
+                      <a className="admin-chip-btn" href={`/admin/users/${user.id}`} style={{ marginTop: 6, display: "inline-flex" }}>
+                        پروندهٔ حافظه
+                      </a>
                     </td>
                     <td>
                       <select

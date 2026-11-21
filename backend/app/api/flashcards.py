@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -22,6 +24,7 @@ from app.models.auth import User
 from app.models.curriculum import Book
 from app.models.flashcards import Flashcard, FlashcardDeck, FlashcardReview
 from app.services import flashcard_service as fs
+from app.services.learner_memory_service import record_review_outcome
 from app.services.anki_export import build_apkg_bytes
 from app.services.capability_service import require_capability_enabled
 from app.services.flashcard_sources import (
@@ -30,6 +33,8 @@ from app.services.flashcard_sources import (
     resolve_chat_source,
     resolve_mistake_source,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/flashcards", tags=["flashcards"])
 admin_router = APIRouter(
@@ -297,6 +302,19 @@ async def review_card(
 ) -> dict[str, Any]:
     card, _ = await fs.get_owned_card(session, current_user, card_id)
     review = await fs.apply_review(session, current_user, card, body.rating)
+    # Phase 4: review outcomes feed the learner's L2/L3 memory (same transaction).
+    first = (card.citations_json or [{}])[0] if card.citations_json else {}
+    try:
+        await record_review_outcome(
+            session,
+            user_id=current_user.id,
+            book_id=first.get("book_id"),
+            chapter_number=first.get("chapter_number"),
+            topic=first.get("chapter_title") or card.front_md[:60],
+            correct=body.rating >= 3,
+        )
+    except Exception:  # noqa: BLE001 - memory is best-effort, never blocks a review
+        logger.exception("flashcards.memory_update_failed card=%s", card.id)
     await session.commit()
     return {"card_id": card.id, "review": fs.serialize_review(review)}
 

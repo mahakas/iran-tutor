@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from app.core.config import get_settings
 from app.services.ai_gateway import CallContext, complete_text_via_gateway
+from app.services.multi_grade_rag import search_multi_grade
 from app.services.retrieval_service import search_textbook
 
 SYSTEM_PROMPT = """تو معلم خصوصی فارسیِ دانش‌آموزان ایران هستی.
@@ -85,6 +86,8 @@ def build_tutor_messages(
 
 def _source_reference(page: dict[str, Any]) -> str:
     title = page.get("book_title") or "کتاب درسی"
+    if page.get("grade_number"):
+        title = f"{title} (پایه {page['grade_number']})"
     chapter_number = page.get("chapter_number")
     chapter_title = page.get("chapter_title")
     if chapter_number is not None and chapter_title:
@@ -121,40 +124,92 @@ MODE_CAPABILITY_KEYS: dict[TutorMode, str] = {
 async def answer_from_textbook(
     *,
     query: str,
-    grade_number: int,
+    grade_number: int | None,
     major_code: str | None,
-    book_id: int,
+    book_id: int | None,
     top_k: int = 5,
     mode: TutorMode = "tutor",
     user_id: str | None = None,
     session_id: str | None = None,
     db_session: Any | None = None,
+    grade_numbers: list[int] | None = None,
+    book_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """Retrieve book evidence, answer only from it, and return server-owned citations.
+
+    Single-book mode (`book_id` + `grade_number`) is unchanged. Multi-grade mode
+    (`grade_numbers`, optional `book_ids`) searches every selected grade and
+    follows concept links for cross-grade citations (Konkoor).
 
     Every model call goes through the central AI gateway so it is audited,
     quota-checked, and admin-routable.
     """
-    pages = await search_textbook(
-        query,
-        grade_number=grade_number,
-        major_code=major_code,
-        book_id=book_id,
-        top_k=top_k,
-    )
+    if grade_numbers:
+        if db_session is None:
+            raise RuntimeError("multi-grade retrieval requires a database session")
+        multi = await search_multi_grade(
+            db_session, query, grade_numbers=grade_numbers, book_ids=book_ids, top_k=top_k
+        )
+        pages = multi["results"]
+        scope_count = len(multi["scopes"])
+        expanded_count = multi["expanded"]
+    else:
+        pages = await search_textbook(
+            query,
+            grade_number=grade_number,
+            major_code=major_code,
+            book_id=book_id,
+            top_k=top_k,
+        )
+        scope_count = 1
+        expanded_count = 0
     if not pages:
         return {
             "answer": "در صفحه‌های تأییدشدهٔ این کتاب، منبع کافی برای پاسخ مطمئن پیدا نکردم. لطفاً موضوع یا شمارهٔ صفحه را دقیق‌تر بگو.",
             "sources": [],
             "retrieved_count": 0,
+            "scope_count": scope_count,
+            "expanded_count": expanded_count,
         }
+    return await answer_grounded(
+        query=query,
+        pages=pages,
+        grade_number=grade_number or pages[0].get("grade_number") or 0,
+        book_id=book_id if book_id is not None else pages[0].get("book_id"),
+        mode=mode,
+        user_id=user_id,
+        session_id=session_id,
+        db_session=db_session,
+        scope_count=scope_count,
+        expanded_count=expanded_count,
+    )
 
+
+async def answer_grounded(
+    *,
+    query: str,
+    pages: list[dict[str, Any]],
+    grade_number: int,
+    book_id: int | None,
+    mode: TutorMode = "tutor",
+    user_id: str | None = None,
+    session_id: str | None = None,
+    db_session: Any | None = None,
+    scope_count: int = 1,
+    expanded_count: int = 0,
+) -> dict[str, Any]:
+    """Answer from already-retrieved pages (shared by sync and streaming paths)."""
+    from app.services.learner_memory_service import build_memory_context
+
+    retrieved_count = len(pages)
     context = _format_context(pages)
     if not context:
         return {
             "answer": "صفحه‌های مرتبط پیدا شدند، اما محتوای قابل‌استفاده‌ای برای پاسخ در آن‌ها ثبت نشده است.",
             "sources": [],
-            "retrieved_count": len(pages),
+            "retrieved_count": retrieved_count,
+            "scope_count": scope_count,
+            "expanded_count": expanded_count,
         }
 
     settings = get_settings()
@@ -166,6 +221,7 @@ async def answer_from_textbook(
     # built-in prompt so behaviour is unchanged before skills are seeded.
     system_prompt_override: str | None = None
     skill_slug: str | None = None
+    memory_context = ""
     if db_session is not None:
         try:
             from app.services.capability_runtime import (
@@ -179,6 +235,11 @@ async def answer_from_textbook(
                 skill_slug = skill.slug
         except Exception:  # noqa: BLE001 - skill lookup must never break answering
             system_prompt_override = None
+        # Phase 4: L2/L3 learner memory is personalisation only, never a source.
+        memory_context = await build_memory_context(db_session, user_id, book_id)
+    if memory_context:
+        base = system_prompt_override or SYSTEM_PROMPT
+        system_prompt_override = base + "\n\n" + memory_context
 
     call_ctx = CallContext(
         feature_key=feature_key,
@@ -188,7 +249,7 @@ async def answer_from_textbook(
         book_id=book_id,
         textbook_strict=True,
         citations=pages,
-        rag_hit_count=len(pages),
+        rag_hit_count=retrieved_count,
     )
     gateway_result = await complete_text_via_gateway(
         ctx=call_ctx,
@@ -222,6 +283,7 @@ async def answer_from_textbook(
                 "pdf_page_index": page.get("pdf_page_index"),
                 "printed_page_number": page.get("printed_page_number"),
                 "score": page.get("score"),
+                "via_concept_link": bool(page.get("via_concept_link")),
                 "citation": _source_reference(page),
             }
         )
@@ -233,8 +295,11 @@ async def answer_from_textbook(
     return {
         "answer": answer,
         "sources": sources,
-        "retrieved_count": len(pages),
+        "retrieved_count": retrieved_count,
+        "scope_count": scope_count,
+        "expanded_count": expanded_count,
         "audit_id": gateway_result.audit_id,
         # Phase 2: typed learning blocks (additive; the plain answer stays primary).
         "blocks": blocks_to_payload(blocks_from_answer(answer, sources)),
+        "memory_used": bool(memory_context),
     }

@@ -380,8 +380,12 @@ async def run_capability_json(
     model: str | None = None,
     user: User | None = None,
     enforce: bool = True,
+    extra_system: str | None = None,
 ) -> tuple[GatewayResult, Skill | None]:
-    """JSON variant of :func:`run_capability_text` (structured output skills)."""
+    """JSON variant of :func:`run_capability_text` (structured output skills).
+
+    `extra_system` carries server-built context such as learner memory (Phase 4).
+    """
     skill: Skill | None = None
     system_prompt = "تو یک موتور آموزشی فارسی هستی. فقط JSON برگردان."
     if enforce:
@@ -394,6 +398,8 @@ async def run_capability_json(
         )
         if skill is not None:
             system_prompt = compose_system_prompt(skill)
+    if extra_system:
+        system_prompt = system_prompt + "\n\n" + extra_system
     ctx = CallContext(
         feature_key=feature_key or capability_key,
         user_id=user_id,

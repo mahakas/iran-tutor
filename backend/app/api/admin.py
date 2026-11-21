@@ -2134,6 +2134,8 @@ FEATURE_ROUTE_LABELS: dict[str, str] = {
     "embedding": "بردارسازی (RAG)",
     "flashcards": "فلش‌کارت",
     "ingest_ocr": "پردازش کتاب (OCR)",
+    "memory": "حافظهٔ یادگیرنده (L2/L3)",
+    "intent_router": "مسیریاب هوشمند حالت‌ها",
 }
 
 

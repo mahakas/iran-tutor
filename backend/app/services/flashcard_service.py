@@ -399,8 +399,12 @@ async def generate_cards(
         deck = None
 
     prompt = build_generation_prompt(sources, count)
+    from app.services.learner_memory_service import build_memory_context
+
+    memory_context = await build_memory_context(session, user.id, sources.book_id)
     try:
         result, _ = await capability_runtime.run_capability_json(
+            extra_system=memory_context or None,
             session=session,
             capability_key=CAPABILITY_KEY,
             feature_key=CAPABILITY_KEY,
