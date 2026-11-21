@@ -1,4 +1,7 @@
 import type { Metadata } from "next";
+import "@fontsource/vazirmatn/arabic-400.css";
+import "@fontsource/vazirmatn/arabic-500.css";
+import "@fontsource/vazirmatn/arabic-700.css";
 import "katex/dist/katex.min.css";
 import AppProvider from "@/components/AppProvider";
 import "./globals.css";

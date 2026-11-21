@@ -6,20 +6,28 @@
   --muted: #76828b;
   --line: #e7eceb;
   --line-strong: #d3deda;
-  --canvas: #f7f9f8;
+  --canvas: #f8f6f1;
   --sidebar-bg: #f1f6f4;
   --card: #ffffff;
   --elevated: #fbfcfb;
   --surface-muted: #eff5f3;
   --topbar-bg: rgba(255, 255, 255, .86);
-  --teal: #177e77;
-  --teal-dark: #12645f;
-  --teal-soft: #e9f6f3;
+  --teal: #0f766e;
+  --teal-dark: #0b5d57;
+  --teal-soft: #e6f2f0;
   --mint: #ccece3;
   --accent-ink: #ffffff;
   --coral: #d77260;
   --gold: #d6a64a;
-  --ui-font-family: Tahoma, "Segoe UI", Arial, sans-serif;
+  --indigo: #3730a3;
+  --amber: #d97706;
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #b91c1c;
+  --ui-font-family: "Vazirmatn", Tahoma, "Segoe UI", Arial, sans-serif;
+  --radius-pill: 999px;
+  --touch-min: 44px;
+  --focus-ring: 0 0 0 3px rgba(15, 118, 110, .35);
   --ui-font-size: 14px;
   --code-font-size: 13px;
   --radius-card: 13px;
@@ -2195,3 +2203,163 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .notebook-add textarea, .notebook-create input, .notebook-viz input, .notebook-block textarea { width: 100%; min-height: 64px; }
 .living-book-section { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
 .living-book-item { padding: 8px 0; border-bottom: 1px solid var(--line); }
+
+
+/* ==========================================================================
+   UI polish layer (Persian design system, responsive, accessibility)
+   ========================================================================== */
+
+/* Tabular numerals for KPIs, tables and counters */
+.tabular-nums, td, th, .admin-kpi-grid, .fc-progress, .token-status-pill { font-variant-numeric: tabular-nums; }
+
+/* Keyboard focus: one consistent ring everywhere */
+:where(button, a, input, select, textarea, [role="button"], [tabindex]):focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
+}
+
+/* Code and JSON are always left-to-right */
+pre, code, kbd, samp, .code-block, .json-view {
+  direction: ltr;
+  text-align: left;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: var(--code-font-size);
+}
+pre { max-width: 100%; overflow-x: auto; white-space: pre; }
+
+/* Wide content never widens the page */
+.markdown-body table, .admin-table-wrap, .table-scroll, .svg-diagram, .mermaid-diagram, .lb-diagram {
+  max-width: 100%;
+  overflow-x: auto;
+}
+img, svg, video, canvas { max-width: 100%; }
+
+/* Reusable skeleton and empty-state primitives */
+.skeleton {
+  display: block;
+  border-radius: var(--radius-control);
+  background: linear-gradient(90deg, var(--surface-muted) 25%, var(--elevated) 50%, var(--surface-muted) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  min-height: 14px;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+.empty-state {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 28px 18px;
+  text-align: center;
+  color: var(--ink-secondary);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-card);
+  background: var(--elevated);
+}
+.empty-state b { color: var(--ink); font-size: 15px; }
+
+/* Theme toggle in header */
+.theme-toggle { display: inline-grid; place-items: center; }
+
+/* Admin tabs: horizontal scroll strip on small screens */
+@media (max-width: 767px) {
+  .admin-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin-inline: -4px;
+    padding-inline: 4px;
+  }
+  .admin-tabs::-webkit-scrollbar { display: none; }
+  .admin-tab { flex: 0 0 auto; }
+  .admin-topbar { padding: 8px 14px; }
+  .admin-topbar-actions { gap: 6px; }
+}
+
+/* Mobile student shell */
+@media (max-width: 640px) {
+  .topbar { padding: 0 10px; gap: 6px; }
+  .topbar-actions { gap: 6px; min-width: 0; }
+  .topbar-actions .token-status-pill small { display: none; }
+  .fc-rating-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fc-rate { min-height: var(--touch-min); }
+  .immersive-layout { grid-template-columns: minmax(0, 1fr) !important; }
+  .immersive-pane[data-pane="page"][data-active="false"],
+  .immersive-pane[data-pane="chat"][data-active="false"] { display: none !important; }
+  .immersive-tabs { display: flex !important; }
+}
+@media (min-width: 641px) {
+  .immersive-tabs { display: none; }
+}
+
+/* Mobile tab switcher for the immersive reader */
+.immersive-tabs {
+  gap: 0;
+  padding: 4px;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+}
+.immersive-tabs button {
+  flex: 1 1 0;
+  min-height: var(--touch-min);
+  color: var(--ink-secondary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  font-weight: 700;
+}
+.immersive-tabs button[aria-selected="true"] {
+  color: var(--accent-ink);
+  background: var(--teal);
+}
+
+/* Coarse pointers (touch): 44px minimum targets */
+@media (pointer: coarse) {
+  button, a.sidebar-item, .admin-tab, .icon-button, .btn-ghost, .btn-primary, .fc-btn, .fc-rate, .sidebar-item {
+    min-height: var(--touch-min);
+  }
+  .icon-button { min-width: var(--touch-min); }
+  .sidebar-item { padding-block: 12px; }
+}
+
+/* Respect reduced motion (media query, in addition to the user setting) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .fc-flip-inner { transition: none !important; }
+}
+
+/* Print: notebook and reading content, in RTL */
+@media print {
+  @page { margin: 14mm; }
+  html, body { background: #fff !important; color: #000 !important; }
+  .sidebar, .sidebar-scrim, .topbar, .admin-topbar, .admin-tabs, .mobile-menu,
+  .mobile-close, .topbar-actions, .no-print, .notebook-create, .notebook-add,
+  .notebook-viz, .notebook-block-actions, .notebook-proposal, button, .fc-modal-backdrop {
+    display: none !important;
+  }
+  .app-shell, .main-panel, .admin-content, .notebook-workspace, .living-book {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+    box-shadow: none !important;
+  }
+  .glass-panel, .card-surface, .notebook-block {
+    background: #fff !important;
+    border-color: #999 !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+  a { color: #000 !important; text-decoration: none; }
+}

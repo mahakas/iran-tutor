@@ -18,6 +18,8 @@ import {
   LoaderCircle,
   LogIn,
   Menu,
+  Moon,
+  Sun,
   MessageSquare,
   Mic,
   Paperclip,
@@ -111,9 +113,19 @@ export default function StudentApp() {
     refreshAccount,
     authFetch,
     openLoginModal,
+    updatePreferences,
   } = useAppContext();
 
   const lang = preferences.general.language === "en" ? "en" : "fa";
+  const [isThemeDark, setIsThemeDark] = useState(false);
+  useEffect(() => {
+    const root = document.documentElement;
+    const sync = () => setIsThemeDark(root.getAttribute("data-theme") === "dark");
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
   const tz = preferences.general.timezone || "Asia/Tehran";
 
   const [grades, setGrades] = useState<GradeOption[]>([]);
@@ -1485,6 +1497,27 @@ export default function StudentApp() {
             <ChevronDown size={15} />
           </div>
           <div className="topbar-actions">
+            <button
+              type="button"
+              className="icon-button theme-toggle"
+              aria-label={
+                lang === "en"
+                  ? "Toggle dark mode"
+                  : "تغییر حالت نمایش تیره و روشن"
+              }
+              title={lang === "en" ? "Toggle dark mode" : "حالت تیره / روشن"}
+              onClick={() => {
+                void updatePreferences({
+                  appearance: { color_mode: isThemeDark ? "light" : "dark" },
+                });
+              }}
+            >
+              {isThemeDark ? (
+                <Sun size={18} />
+              ) : (
+                <Moon size={18} />
+              )}
+            </button>
             {demoMode && (
               <span className="private-badge demo-badge">
                 <Sparkles size={14} /> {lang === "en" ? "Demo Mode" : "حالت آزمایشی"}

@@ -23,8 +23,8 @@ export const THEME_PRESETS: ThemePreset[] = [
     nameEn: "Darsyar Classic",
     light: {
       theme: "darsyar",
-      accent: "#177e77",
-      background: "#f7f9f8",
+      accent: "#0f766e",
+      background: "#f8f6f1",
       foreground: "#202b35",
       font_family: "vazir",
     },
