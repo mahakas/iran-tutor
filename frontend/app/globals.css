@@ -2178,3 +2178,5 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .p4-trace li { padding: 6px 8px; background: var(--elevated); border-radius: var(--radius-control); }
 .p4-reset { display: flex; justify-content: flex-end; }
 .p4-links .p4-trace li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.admin-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.admin-card-head h3 { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; }
