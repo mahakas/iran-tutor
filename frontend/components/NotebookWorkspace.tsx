@@ -293,9 +293,13 @@ export default function NotebookWorkspace() {
                   </div>
                 ) : (
                   <>
-                    <LearningBlockRenderer
-                      blocks={[{ type: block.block_type, content: block.content, metadata: block.metadata }]}
-                    />
+                    {block.block_type === "comparison_table" ? (
+                      <ComparisonTableView content={block.content} />
+                    ) : (
+                      <LearningBlockRenderer
+                        blocks={[{ type: block.block_type, content: block.content, metadata: block.metadata }]}
+                      />
+                    )}
                     {typeof block.metadata.citation === "string" && <p className="lb-caption">منبع: {block.metadata.citation}</p>}
                     <div className="notebook-block-actions">
                       <span className="lb-caption">{BLOCK_LABELS[block.block_type]}</span>
@@ -350,6 +354,34 @@ export default function NotebookWorkspace() {
           </div>
         </section>
       )}
+    </div>
+  );
+}
+
+/** Comparison table from validated JSON (`headers`, `rows`). Cells are plain text (React escapes them). */
+function ComparisonTableView({ content }: { content: string }) {
+  let table: { headers?: unknown; rows?: unknown } = {};
+  try {
+    table = JSON.parse(content) as { headers?: unknown; rows?: unknown };
+  } catch {
+    return <p className="lb-caption">جدول نامعتبر است.</p>;
+  }
+  const headers = Array.isArray(table.headers) ? table.headers.map((cell) => String(cell)) : [];
+  const rows = Array.isArray(table.rows)
+    ? table.rows.map((row) => (Array.isArray(row) ? row.map((cell) => String(cell)) : []))
+    : [];
+  return (
+    <div className="lb-table-wrap" dir="rtl">
+      <table className="admin-table">
+        <thead>
+          <tr>{headers.map((header, i) => <th key={i}>{header}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, r) => (
+            <tr key={r}>{row.map((cell, c) => <td key={c}>{cell}</td>)}</tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

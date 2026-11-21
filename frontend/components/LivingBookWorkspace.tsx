@@ -6,7 +6,7 @@ import { useAppContext } from "@/components/AppProvider";
 import BookGradePicker from "@/components/BookGradePicker";
 import LearningBlockRenderer from "@/components/LearningBlockRenderer";
 import AudioButton from "@/components/AudioButton";
-import { phase6ErrorMessage, toFaDigits, type LivingBookPayload } from "@/lib/phase6";
+import { phase6ErrorMessage, toFaDigits, type LivingBookBlock, type LivingBookPayload } from "@/lib/phase6";
 
 const SECTION_LABELS: Record<string, string> = {
   text_markdown: "مفاهیم کلیدی",
@@ -15,6 +15,22 @@ const SECTION_LABELS: Record<string, string> = {
   quiz_item: "آزمون کوتاه",
   flashcard_item: "فلش‌کارت‌ها",
 };
+
+const CHOICE_KEYS = ["A", "B", "C", "D"];
+
+/** Adapt backend quiz metadata (`choices`, `correct_option`) to the typed QuizBlock contract. */
+function toRenderable(block: LivingBookBlock): LivingBookBlock {
+  if (block.type !== "quiz_item") return block;
+  const choices = (block.metadata.choices ?? {}) as Record<string, unknown>;
+  return {
+    ...block,
+    metadata: {
+      ...block.metadata,
+      options: CHOICE_KEYS.map((key) => String(choices[key] ?? "")),
+      answer_index: CHOICE_KEYS.indexOf(String(block.metadata.correct_option ?? "")),
+    },
+  };
+}
 
 /**
  * One chapter compiled into an interactive study view. Only validated, page-grounded
@@ -81,7 +97,7 @@ export default function LivingBookWorkspace() {
               <h3>{SECTION_LABELS[key] ?? "بخش"}</h3>
               {blocks.map((block, index) => (
                 <div key={`${key}-${index}`} className="living-book-item">
-                  <LearningBlockRenderer blocks={[block]} />
+                  <LearningBlockRenderer blocks={[toRenderable(block)]} />
                   {typeof block.metadata.citation === "string" && (
                     <p className="lb-caption">منبع: {block.metadata.citation}</p>
                   )}
