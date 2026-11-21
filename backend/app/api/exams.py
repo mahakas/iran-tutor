@@ -149,14 +149,20 @@ async def finish_exam(
         raise HTTPException(status_code=409, detail=str(error)) from error
 
     await session.commit()
-    await _record_exam_memory(session, user_id=current_user.id, book_id=exam.book_id, report=report)
+    await _record_exam_memory(
+        session, user_id=current_user.id, book_id=exam.book_id, report=report, exam=exam
+    )
     return {"exam_id": exam.id, "status": "submitted", "report_card": report}
 
 
 async def _record_exam_memory(
-    session: AsyncSession, *, user_id: str, book_id: int, report: dict[str, object]
+    session: AsyncSession, *, user_id: str, book_id: int, report: dict[str, object], exam: object | None = None
 ) -> None:
-    """Phase 4: feed per-chapter exam results into L2/L3 memory (best effort, never blocks grading)."""
+    """Phase 4/5: per-chapter results feed L2/L3 memory, chapter mastery, and the mistake bank.
+
+    Best effort: a failure here is logged and rolled back, and never blocks grading.
+    """
+    from app.services import mastery_service, mistake_bank_service
     from app.services.learner_memory_service import record_quiz_outcome
 
     buckets: dict[int | None, list[int]] = {}
@@ -180,6 +186,20 @@ async def _record_exam_memory(
                 correct=correct,
                 total=total,
                 source_type="quiz",
+            )
+            if chapter is not None:
+                await mastery_service.record_component(
+                    session,
+                    user_id=user_id,
+                    book_id=book_id,
+                    chapter_number=chapter,
+                    component="exam",
+                    correct=correct,
+                    total=total,
+                )
+        if exam is not None:
+            await mistake_bank_service.record_exam_mistakes(
+                session, user_id=user_id, exam=exam, report=dict(report)  # type: ignore[arg-type]
             )
         await session.commit()
     except Exception:  # noqa: BLE001 - memory must never break exam grading

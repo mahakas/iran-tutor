@@ -33,6 +33,9 @@ import {
   Wand2,
   X,
   Layers,
+  Calculator,
+  Route,
+  XCircle,
 } from "lucide-react";
 import AccountAvatar from "@/components/AccountAvatar";
 import AccountMenu from "@/components/AccountMenu";
@@ -1324,6 +1327,24 @@ export default function StudentApp() {
           <Link href="/flashcards" className="sidebar-item" onClick={() => setSidebarOpen(false)}>
             <Layers size={17} />
             <span>{lang === "en" ? "Flashcards" : "فلش‌کارت‌ها"}</span>
+          </Link>
+        )}
+        {capabilityMenuEnabled("mistake_bank") && (
+          <Link href="/mistakes" className="sidebar-item" onClick={() => setSidebarOpen(false)}>
+            <XCircle size={17} />
+            <span>{lang === "en" ? "Mistake bank" : "بانک اشتباهات"}</span>
+          </Link>
+        )}
+        {capabilityMenuEnabled("mastery_path") && (
+          <Link href="/mastery" className="sidebar-item" onClick={() => setSidebarOpen(false)}>
+            <Route size={17} />
+            <span>{lang === "en" ? "Mastery path" : "مسیر تسلط"}</span>
+          </Link>
+        )}
+        {capabilityMenuEnabled("deep_solve") && (
+          <Link href="/deep-solve" className="sidebar-item" onClick={() => setSidebarOpen(false)}>
+            <Calculator size={17} />
+            <span>{lang === "en" ? "Deep solve" : "حل گام‌به‌گام"}</span>
           </Link>
         )}
         <Link

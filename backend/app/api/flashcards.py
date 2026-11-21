@@ -315,6 +315,22 @@ async def review_card(
         )
     except Exception:  # noqa: BLE001 - memory is best-effort, never blocks a review
         logger.exception("flashcards.memory_update_failed card=%s", card.id)
+    # Phase 5: flashcard reviews feed the chapter mastery score (flash component).
+    try:
+        from app.services import mastery_service
+
+        if first.get("book_id") is not None:
+            await mastery_service.record_component(
+                session,
+                user_id=current_user.id,
+                book_id=int(first["book_id"]),
+                chapter_number=first.get("chapter_number"),
+                component="flash",
+                correct=1 if body.rating >= 3 else 0,
+                total=1,
+            )
+    except Exception:  # noqa: BLE001 - mastery is best-effort, never blocks a review
+        logger.exception("flashcards.mastery_update_failed card=%s", card.id)
     await session.commit()
     return {"card_id": card.id, "review": fs.serialize_review(review)}
 

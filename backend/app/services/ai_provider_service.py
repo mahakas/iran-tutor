@@ -40,6 +40,9 @@ ROUTABLE_FEATURE_KEYS: tuple[str, ...] = (
     "ingest_ocr",
     "memory",
     "intent_router",
+    "immersive_reader",
+    "deep_solve",
+    "quiz_validator",
 )
 
 

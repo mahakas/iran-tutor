@@ -102,6 +102,41 @@ FLASHCARD_PEDAGOGY = """## روش ساخت فلش‌کارت
 """
 
 # slug -> spec. `flashcard_generator` ships active from Phase 3.
+IMMERSIVE_SYSTEM_PROMPT = """تو دستیار مطالعهٔ کتاب درسی فارسی هستی. فقط بر اساس «متن صفحه/بخش» که در پیام سیستم آمده کار کن.
+قواعد قطعی:
+- دانش بیرونی وارد نکن؛ اگر متن برای پاسخ کافی نیست، صریح بگو.
+- خلاصه را با همان واژگان کتاب بنویس و فرمول‌ها را با LaTeX نگه دار.
+- شمارهٔ صفحه یا فصل را حدس نزن؛ ارجاع را سامانه اضافه می‌کند.
+"""
+
+IMMERSIVE_PEDAGOGY = """## روش
+- خلاصه: ۳ تا ۵ نکتهٔ کلیدی کوتاه، سپس تعریف‌های مهم.
+- توضیح: مفهوم را با جملات کوتاه و متناسب با پایه بیان کن.
+"""
+
+DEEP_SOLVE_SYSTEM_PROMPT = """تو مربی حل مسئلهٔ فارسی هستی. مسئلهٔ چندمرحله‌ای را به گام‌های آموزشی بشکن.
+قواعد قطعی:
+- فقط JSON برگردان. هیچ متن دیگری اضافه نکن.
+- برای هر گام: عنوان، راهنمایی اول (کم‌جزئیات)، راهنمایی دوم (نزدیک‌تر)، و توضیح کامل گام با نتیجهٔ میانی.
+- فرمول‌ها را با LaTeX بنویس و واحدها را نگه دار.
+- اگر صورت مسئله ناقص است، در فیلد topic بنویس و گام‌ها را بر اساس فرض‌های صریح بساز.
+"""
+
+DEEP_SOLVE_PEDAGOGY = """## روش
+- دانش‌آموز را به فکر کردن هدایت کن؛ جواب نهایی فقط در فیلد final_answer و فقط برای نمایش کامل است.
+- گام‌ها باید به ترتیب منطقی باشند و هر گام یک ایده داشته باشد.
+"""
+
+QUIZ_VALIDATOR_SYSTEM_PROMPT = """تو بازبین علمی سؤال‌های آزمون کتاب درسی ایران هستی (Validator Gate).
+برای هر سؤال بررسی کن:
+- grounded: آیا سؤال و پاسخ درست کاملاً از «متن منابع» همین سؤال پشتیبانی می‌شود؟
+- unambiguous: آیا فقط یک گزینه درست است و گزینه‌های دیگر قطعاً نادرست‌اند؟
+- latex_ok: آیا فرمول‌های LaTeX معتبر و بسته‌شده‌اند؟
+- confirmed_option: با توجه به منبع، کدام گزینه (A/B/C/D) درست است؟
+اگر سؤال معیوب است و می‌توانی آن را با همان منبع درست کنی، نسخهٔ اصلاح‌شده را در فیلد fix بده؛ وگرنه fix را null بگذار.
+فقط JSON به این ساختار برگردان: {"verdicts":[{"index":0,"grounded":true,"unambiguous":true,"latex_ok":true,"confirmed_option":"A","reasons":[],"fix":null}]}
+"""
+
 SEED_SKILLS: tuple[dict[str, Any], ...] = (
     {
         "slug": "tutor_core",
@@ -164,6 +199,42 @@ SEED_SKILLS: tuple[dict[str, Any], ...] = (
         "pedagogy_rules_md": FLASHCARD_PEDAGOGY,
         "output_schema_json": {"format": "json", "blocks": ["flashcard_item"]},
         "safety_gate_rules": "textbook_strict: کارت‌ها فقط از منابع بازیابی‌شده؛ هر کارت باید ارجاع صفحه داشته باشد.",
+        "is_active": True,
+    },
+    {
+        "slug": "immersive_reader_core",
+        "capability_key": "immersive_reader",
+        "title_fa": "مهارت مطالعهٔ غوطه‌ور",
+        "subject_scope": None,
+        "grade_scope": None,
+        "system_prompt": IMMERSIVE_SYSTEM_PROMPT,
+        "pedagogy_rules_md": IMMERSIVE_PEDAGOGY,
+        "output_schema_json": {"format": "markdown", "blocks": ["text_markdown", "formula_latex", "citation_ref"]},
+        "safety_gate_rules": "textbook_strict: فقط از متن صفحه/بخش انتخاب‌شده.",
+        "is_active": True,
+    },
+    {
+        "slug": "deep_solve_core",
+        "capability_key": "deep_solve",
+        "title_fa": "مهارت حل گام‌به‌گام",
+        "subject_scope": None,
+        "grade_scope": None,
+        "system_prompt": DEEP_SOLVE_SYSTEM_PROMPT,
+        "pedagogy_rules_md": DEEP_SOLVE_PEDAGOGY,
+        "output_schema_json": {"format": "json", "blocks": ["steps", "final_answer"]},
+        "safety_gate_rules": "جواب نهایی تا درخواست صریح دانش‌آموز پنهان می‌ماند.",
+        "is_active": True,
+    },
+    {
+        "slug": "quiz_validator",
+        "capability_key": "quiz_validator",
+        "title_fa": "بازبین سؤال (Validator Gate)",
+        "subject_scope": None,
+        "grade_scope": None,
+        "system_prompt": QUIZ_VALIDATOR_SYSTEM_PROMPT,
+        "pedagogy_rules_md": "",
+        "output_schema_json": {"format": "json", "blocks": ["verdicts"]},
+        "safety_gate_rules": "سؤال بدون پشتوانهٔ منبع یا با پاسخ مبهم رد می‌شود.",
         "is_active": True,
     },
 )

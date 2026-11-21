@@ -1,0 +1,563 @@
+"""Phase 5 tests: Validator Gate, mistake bank, mastery path, Deep Solve, immersive reader, admin oversight."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.api.dependencies import require_student
+from app.db.base import Base
+from app.db.seed import seed_billing_settings, seed_grades, seed_majors, seed_plans
+from app.db.session import get_session
+from app.main import app
+from app.models.auth import User
+from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.exam import ExamSession, ExamStatus
+from app.models.flashcards import Flashcard, FlashcardDeck
+from app.models.governance import AiAuditLog
+from app.models.phase5 import (
+    AdminActionLog,
+    DeepSolveSession,
+    MasteryBookSettings,
+    MasteryChapterProgress,
+    MistakeBankItem,
+    QuizValidationLog,
+)
+from app.services import (
+    ai_gateway,
+    capability_runtime,
+    capability_service,
+    chat_stream,
+    deep_solve_service,
+    intent_router,
+    learner_memory_service as lms,
+    mastery_service,
+    quiz_validator,
+    retrieval_service,
+    skill_seed,
+    tutor_turns,
+)
+from app.services import ai_gateway as _gw  # noqa: F401  (ensures gateway import order)
+
+ADMIN_HEADERS = {"X-Admin-Username": "admin", "X-Admin-Password": "123"}
+NOW = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+
+GOOD_QUESTION = {
+    "prompt": "کدام کمیت برداری است؟",
+    "choices": {"A": "جرم", "B": "سرعت", "C": "نیرو", "D": "زمان"},
+    "correct_option": "C",
+    "explanation": "نیرو کمیت برداری است.",
+    "source": {"book_id": 1, "pdf_page_index": 2, "printed_page_number": 14, "chapter_number": 2,
+               "chapter_title": "نیرو"},
+}
+
+
+def _verdict(index, **overrides):
+    row = {"index": index, "grounded": True, "unambiguous": True, "latex_ok": True,
+           "confirmed_option": "C", "reasons": [], "fix": None}
+    row.update(overrides)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+@pytest.fixture
+async def env(tmp_path, monkeypatch):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'phase5.sqlite3'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    ids: dict[str, object] = {}
+
+    async with factory() as session:
+        await seed_grades(session)
+        await seed_majors(session)
+        await seed_plans(session)
+        await seed_billing_settings(session)
+        await capability_service.seed_capabilities(session)
+        await skill_seed.seed_skills(session)
+        major = await session.scalar(select(Major).where(Major.code == "math_physics"))
+        grade = await session.scalar(select(Grade).where(Grade.number == 10))
+        book = Book(title="فیزیک دهم", grade_id=grade.id, major_id=major.id, pdf_file_path="/tmp/none.pdf",
+                    total_pdf_pages=5, status=BookStatus.ready)
+        session.add(book)
+        await session.flush()
+        for index, chapter, printed, text in (
+            (1, 1, 10, "حرکت بر خط راست و سرعت متوسط"),
+            (2, 2, 14, "نیرو کمیت برداری است و با کشش یا هل دادن ایجاد می‌شود"),
+            (3, 2, 15, "قانون دوم نیوتون: نیروی خالص برابر جرم ضربدر شتاب است"),
+        ):
+            session.add(BookPage(book_id=book.id, pdf_page_index=index, printed_page_number=printed,
+                                 chapter_number=chapter, chapter_title=f"فصل {chapter}",
+                                 markdown_content=text, page_image_path="/tmp/none.png",
+                                 status=PageStatus.done))
+        student = User(phone_number="09121000001", full_name="دانش‌آموز", role="student",
+                       tokens_remaining=1_000_000, plan_expires_at=NOW + timedelta(days=30), is_active=True)
+        session.add(student)
+        await session.flush()
+        ids.update(student_id=student.id, book_id=book.id)
+        await session.commit()
+
+    async def override_get_session():
+        async with factory() as session:
+            yield session
+
+    async def override_student():
+        async with factory() as session:
+            return await session.get(User, ids["student_id"])
+
+    app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[require_student] = override_student
+    from app.db import session as db_session_mod
+
+    monkeypatch.setattr(db_session_mod, "async_session_factory", factory)
+    monkeypatch.setattr(ai_gateway, "async_session_factory", factory)
+    monkeypatch.setattr(chat_stream, "async_session_factory", factory)
+    monkeypatch.setattr(lms, "async_session_factory", factory)
+    monkeypatch.setattr(retrieval_service, "async_session_factory", factory)
+    monkeypatch.setattr(
+        ai_gateway, "get_settings", lambda: SimpleNamespace(tutor_model="test-model", llm_timeout=5)
+    )
+
+    fake = SimpleNamespace(json_calls=[], text_calls=[], json_reply=None, text_reply="خلاصه: نیرو کمیت برداری است.")
+
+    async def fake_complete_json(model, messages):
+        fake.json_calls.append(messages)
+        if callable(fake.json_reply):
+            return fake.json_reply(messages)
+        return fake.json_reply or {}
+
+    async def fake_complete_text(model, messages):
+        fake.text_calls.append(messages)
+        return fake.text_reply
+
+    monkeypatch.setattr(ai_gateway, "complete_json", fake_complete_json)
+    monkeypatch.setattr(ai_gateway, "complete_text", fake_complete_text)
+
+    yield SimpleNamespace(factory=factory, ids=ids, fake=fake)
+
+    app.dependency_overrides.pop(get_session, None)
+    app.dependency_overrides.pop(require_student, None)
+    await engine.dispose()
+
+
+def _client() -> AsyncClient:
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def _count(factory, model, *where) -> int:
+    async with factory() as session:
+        return int(await session.scalar(select(func.count()).select_from(model).where(*where)) or 0)
+
+
+async def _insert_exam(env, questions, *, exam_id="exam-1") -> str:
+    async with env.factory() as session:
+        session.add(ExamSession(
+            id=exam_id, book_id=env.ids["book_id"], user_id=env.ids["student_id"], grade_number=10,
+            major_code="math_physics", title="آزمون", exam_type="final", time_limit_seconds=3600,
+            status=ExamStatus.active, questions=questions, expires_at=NOW + timedelta(days=1),
+        ))
+        await session.commit()
+    return exam_id
+
+
+def _question(qid, chapter=2, answer="A"):
+    return {
+        "id": qid, "prompt": f"سؤال {qid}", "choices": {"A": "الف", "B": "ب", "C": "پ", "D": "ت"},
+        "correct_option": answer, "explanation": f"توضیح {qid}", "points": 1.0,
+        "source": {"book_id": 1, "pdf_page_index": 2, "printed_page_number": 14,
+                   "chapter_number": chapter, "chapter_title": f"فصل {chapter}"},
+    }
+
+
+# ---------------------------------------------------------------------------
+# 1. Validator Gate (unit level, through the real capability runtime)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_validator_rejects_ungrounded_and_logs_audit(env, monkeypatch):
+    env.fake.json_reply = lambda messages: {"verdicts": [_verdict(0, grounded=False, reasons=["not in text"])]}
+    async with env.factory() as session:
+        outcome = await quiz_validator.validate_questions(
+            session,
+            items=[{"question": dict(GOOD_QUESTION), "source_text": "متن"}],
+            user_id=env.ids["student_id"], book_id=env.ids["book_id"], exam_id="e1",
+        )
+        await session.commit()
+    assert outcome.accepted == []
+    assert outcome.decisions[0].verdict == "rejected"
+    assert "ungrounded" in outcome.decisions[0].reasons
+    assert await _count(env.factory, AiAuditLog, AiAuditLog.flag_reason == "validator_rejected") == 1
+
+
+@pytest.mark.asyncio
+async def test_validator_repairs_defective_question_with_single_fix(env):
+    broken = dict(GOOD_QUESTION, prompt="$x^2 + 1", correct_option="C")  # unbalanced LaTeX delimiter
+    fix = {"prompt": "$x^2+1$ کدام است؟", "choices": GOOD_QUESTION["choices"], "correct_option": "C",
+           "explanation": "نیرو کمیت برداری است."}
+    env.fake.json_reply = lambda messages: {"verdicts": [_verdict(0, fix=fix)]}
+    async with env.factory() as session:
+        outcome = await quiz_validator.validate_questions(
+            session, items=[{"question": broken, "source_text": "متن"}],
+            user_id=env.ids["student_id"], book_id=env.ids["book_id"],
+        )
+        await session.commit()
+    assert outcome.decisions[0].verdict == "fixed"
+    assert outcome.accepted[0]["prompt"] == "$x^2+1$ کدام است؟"
+    assert await _count(env.factory, AiAuditLog, AiAuditLog.flag_reason == "validator_fixed") == 1
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_bad_fix_and_answer_key_mismatch(env):
+    # Defective question (ungrounded). The repair flips the key to A, but the model confirms C:
+    # the repair must not be accepted, so the question is rejected.
+    bad_fix = {"correct_option": "A"}
+    env.fake.json_reply = lambda messages: {"verdicts": [
+        _verdict(0, grounded=False, confirmed_option="C", fix=bad_fix)]}
+    async with env.factory() as session:
+        outcome = await quiz_validator.validate_questions(
+            session, items=[{"question": dict(GOOD_QUESTION), "source_text": "متن"}],
+            user_id=env.ids["student_id"], book_id=env.ids["book_id"],
+        )
+    assert outcome.accepted == []
+    assert outcome.decisions[0].verdict == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_validator_fails_closed_when_model_omits_verdict(env):
+    env.fake.json_reply = lambda messages: {"verdicts": []}
+    async with env.factory() as session:
+        outcome = await quiz_validator.validate_questions(
+            session, items=[{"question": dict(GOOD_QUESTION), "source_text": "متن"}],
+            user_id=env.ids["student_id"], book_id=env.ids["book_id"],
+        )
+    assert outcome.accepted == []
+    assert "validator_missing_verdict" in outcome.decisions[0].reasons
+
+
+@pytest.mark.asyncio
+async def test_validator_disabled_by_admin_runs_deterministic_checks_and_logs(env):
+    # Disable the validator capability: model stage is skipped, structural checks still apply.
+    async with env.factory() as session:
+        cap = await capability_service.get_capability(session, "quiz_validator")
+        cap.is_enabled = False
+        await session.commit()
+    async with env.factory() as session:
+        outcome = await quiz_validator.validate_questions(
+            session,
+            items=[
+                {"question": dict(GOOD_QUESTION), "source_text": "متن"},
+                {"question": dict(GOOD_QUESTION, choices={"A": "x", "B": "x", "C": "y", "D": "z"}),
+                 "source_text": "متن"},
+            ],
+            user_id=env.ids["student_id"], book_id=env.ids["book_id"],
+        )
+        await session.commit()
+    assert [d.verdict for d in outcome.decisions] == ["approved", "rejected"]
+    assert await _count(env.factory, AiAuditLog, AiAuditLog.flag_reason == "validator_model_disabled") == 1
+
+
+def test_latex_and_structure_checks():
+    assert quiz_validator.latex_problems(r"$x^2$ و $$\frac{a}{b}$$") == []
+    assert "delimiter_unbalanced" in quiz_validator.latex_problems("$x^2")
+    assert "braces_unbalanced" in quiz_validator.latex_problems(r"\frac{a}{b")
+    assert "choices_not_distinct" in quiz_validator.structural_problems(
+        dict(GOOD_QUESTION, choices={"A": "x", "B": "x", "C": "y", "D": "z"}))
+    assert quiz_validator.structural_problems(GOOD_QUESTION) == []
+
+
+# ---------------------------------------------------------------------------
+# 2. Automatic mistake capture on exam submit
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_exam_submit_records_wrong_and_skipped_mistakes_idempotently(env):
+    questions = [_question("q1", chapter=2, answer="A"), _question("q2", chapter=2, answer="B"),
+                 _question("q3", chapter=1, answer="C")]
+    exam_id = await _insert_exam(env, questions)
+    payload = {"answers": {"q1": "B", "q2": "B"}}  # q1 wrong, q2 correct, q3 skipped
+    async with _client() as client:
+        first = await client.post(f"/api/v1/exams/{exam_id}/submit", json=payload)
+    assert first.status_code == 200, first.text
+    async with env.factory() as session:
+        rows = (await session.scalars(select(MistakeBankItem).where(MistakeBankItem.exam_id == exam_id))).all()
+    by_q = {row.question_id: row for row in rows}
+    assert set(by_q) == {"q1", "q3"}
+    assert by_q["q1"].error_tag == "wrong" and by_q["q3"].error_tag == "skipped"
+    assert by_q["q1"].topic_tag == "فصل 2" and by_q["q1"].printed_page_number == 14
+    assert by_q["q1"].status == "unresolved"
+    # Chapter mastery received the exam evidence (2 chapter-2 questions: 1 correct).
+    async with env.factory() as session:
+        progress = await session.scalar(select(MasteryChapterProgress).where(
+            MasteryChapterProgress.user_id == env.ids["student_id"], MasteryChapterProgress.chapter_number == 2))
+    assert progress.exam_total == 2 and progress.exam_correct == 1
+    # Re-running the memory hook for the same exam must not duplicate rows (idempotent).
+    from app.api import exams as exams_api
+    async with env.factory() as session:
+        exam = await session.get(ExamSession, exam_id)
+        report = {"by_question": [{"id": "q1", "correct": False, "answer": "B"}]}
+        added = await __import__("app.services.mistake_bank_service", fromlist=["x"]).record_exam_mistakes(
+            session, user_id=env.ids["student_id"], exam=exam, report=report)
+        await session.commit()
+    assert added == 0
+    assert await _count(env.factory, MistakeBankItem, MistakeBankItem.exam_id == exam_id) == 2
+
+
+# ---------------------------------------------------------------------------
+# 3. Mistake practice and conversion to flashcards
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mistake_practice_lifecycle_and_flashcard_conversion(env):
+    exam_id = await _insert_exam(env, [_question("q1", chapter=2, answer="C")])
+    async with _client() as client:
+        await client.post(f"/api/v1/exams/{exam_id}/submit", json={"answers": {"q1": "A"}})
+        listing = await client.get("/api/v1/mistakes")
+        item_id = listing.json()["items"][0]["id"]
+        # The practice set must not leak the answer key.
+        practice = await client.get("/api/v1/mistakes/practice-set")
+        assert "correct_option" not in practice.json()["items"][0]
+        wrong = await client.post(f"/api/v1/mistakes/{item_id}/answer", json={"choice": "A"})
+        assert wrong.json()["correct"] is False and wrong.json()["status"] == "unresolved"
+        right1 = await client.post(f"/api/v1/mistakes/{item_id}/answer", json={"choice": "C"})
+        assert right1.json()["status"] == "practiced"
+        right2 = await client.post(f"/api/v1/mistakes/{item_id}/answer", json={"choice": "C"})
+        assert right2.json()["status"] == "mastered"
+        card1 = await client.post(f"/api/v1/mistakes/{item_id}/flashcard")
+        card2 = await client.post(f"/api/v1/mistakes/{item_id}/flashcard")
+    assert card1.status_code == 201 and card1.json()["created"] is True
+    assert card2.json()["created"] is False and card2.json()["card_id"] == card1.json()["card_id"]
+    async with env.factory() as session:
+        card = await session.get(Flashcard, card1.json()["card_id"])
+        deck = await session.get(FlashcardDeck, card.deck_id)
+    assert deck.title == "اشتباهات من"
+    assert card.citations_json[0]["printed_page_number"] == 14
+    assert "نیرو" in card.back_md or "C)" in card.back_md
+
+
+# ---------------------------------------------------------------------------
+# 4. Mastery path: scores, thresholds, sequential unlock, admin overrides
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mastery_score_weighting_threshold_and_unlock(env):
+    book_id = env.ids["book_id"]
+    student = env.ids["student_id"]
+    async with env.factory() as session:
+        # Chapter 1: exam 2/2 (weight .5) + flash 0/2 (weight .3) => (0.5*1 + 0.3*0)/0.8 = 0.625 (< 0.7)
+        await mastery_service.record_component(session, user_id=student, book_id=book_id, chapter_number=1,
+                                               component="exam", correct=2, total=2)
+        await mastery_service.record_component(session, user_id=student, book_id=book_id, chapter_number=1,
+                                               component="flash", correct=0, total=2)
+        await session.commit()
+        row = await session.scalar(select(MasteryChapterProgress).where(MasteryChapterProgress.chapter_number == 1))
+        assert mastery_service.chapter_score(row) == pytest.approx(0.625, abs=1e-3)
+        tree = await mastery_service.book_tree(session, user_id=student, book_id=book_id)
+    chapters = {c["chapter_number"]: c for c in tree["chapters"]}
+    assert chapters[1]["status"] == "in_progress"
+    assert chapters[2]["status"] == "locked" and chapters[2]["locked_reason"] == "previous_chapter_not_mastered"
+
+    # Raise chapter 1 above threshold with solve evidence (weight .2): all three components => mastered.
+    async with env.factory() as session:
+        await mastery_service.record_component(session, user_id=student, book_id=book_id, chapter_number=1,
+                                               component="solve", correct=5, total=5)
+        await session.commit()
+        tree = await mastery_service.book_tree(session, user_id=student, book_id=book_id)
+    chapters = {c["chapter_number"]: c for c in tree["chapters"]}
+    assert chapters[1]["status"] == "mastered"
+    assert chapters[2]["status"] == "not_started"  # unlocked after chapter 1 is mastered
+
+
+@pytest.mark.asyncio
+async def test_admin_mastery_threshold_override_and_action_log(env):
+    book_id = env.ids["book_id"]
+    student = env.ids["student_id"]
+    async with _client() as client:
+        bad = await client.put(f"/api/v1/admin/mastery/books/{book_id}/settings",
+                               json={"threshold": 0.1}, headers=ADMIN_HEADERS)
+        assert bad.status_code == 422  # pydantic bound
+        ok = await client.put(f"/api/v1/admin/mastery/books/{book_id}/settings",
+                              json={"threshold": 0.5, "unlock_mode": "open"}, headers=ADMIN_HEADERS)
+        assert ok.status_code == 200 and ok.json()["threshold"] == 0.5
+        lock = await client.put(f"/api/v1/admin/mastery/books/{book_id}/chapters/2/override",
+                                json={"override": "locked"}, headers=ADMIN_HEADERS)
+        assert lock.status_code == 200
+        async with env.factory() as session:
+            tree = await mastery_service.book_tree(session, user_id=student, book_id=book_id)
+        chapters = {c["chapter_number"]: c for c in tree["chapters"]}
+        assert chapters[2]["status"] == "locked" and chapters[2]["locked_reason"] == "admin_locked"
+        # Open mode: chapter 2 is unlocked when no override exists.
+        await client.put(f"/api/v1/admin/mastery/books/{book_id}/chapters/2/override",
+                         json={"override": None}, headers=ADMIN_HEADERS)
+        async with env.factory() as session:
+            tree = await mastery_service.book_tree(session, user_id=student, book_id=book_id)
+        assert {c["chapter_number"]: c for c in tree["chapters"]}[2]["status"] == "not_started"
+        logs = await client.get("/api/v1/admin/action-logs", params={"target": f"book:{book_id}"},
+                                headers=ADMIN_HEADERS)
+    actions = [item["action"] for item in logs.json()["items"]]
+    assert "mastery.settings_update" in actions and "mastery.chapter_override" in actions
+
+
+# ---------------------------------------------------------------------------
+# 5. Deep Solve: hint ladder, no early answer leak, no orphan rows
+# ---------------------------------------------------------------------------
+PLAN = {
+    "topic": "نیرو و شتاب",
+    "subject": "physics",
+    "steps": [
+        {"title": "داده‌ها", "hint1": "کمیت‌های داده‌شده را بنویس", "hint2": "جرم و نیروی خالص را جدا کن",
+         "explanation": "جرم ۲ کیلوگرم و نیروی ۱۰ نیوتون است.", "result": "m=2, F=10"},
+        {"title": "رابطه", "hint1": "قانون دوم نیوتون را یادآوری کن", "hint2": "F = m a",
+         "explanation": "a = F/m = 5 m/s².", "result": "a=5"},
+    ],
+    "final_answer": "۵ متر بر مجذور ثانیه",
+}
+
+
+@pytest.mark.asyncio
+async def test_deep_solve_ladder_hides_answer_until_full_and_records_mastery(env):
+    env.fake.json_reply = lambda messages: PLAN if "مربی حل مسئله" in messages[0]["content"] else {}
+    book_id = env.ids["book_id"]
+    async with _client() as client:
+        created = await client.post("/api/v1/deep-solve/sessions", json={
+            "problem_text": "جسمی ۲ کیلوگرمی با نیروی ۱۰ نیوتون", "book_id": book_id, "chapter_number": 2})
+        assert created.status_code == 201, created.text
+        body = created.json()
+        sid = body["id"]
+        assert body["final_answer"] is None and body["total_steps"] == 2
+        assert "explanation" not in body["steps"][0]  # current step explanation hidden
+        blocked = await client.post(f"/api/v1/deep-solve/sessions/{sid}/actions", json={"action": "hint2"})
+        assert blocked.status_code == 409  # ladder order: hint1 first
+        h1 = await client.post(f"/api/v1/deep-solve/sessions/{sid}/actions", json={"action": "hint1"})
+        assert h1.json()["steps"][0]["hint1"]
+        h2 = await client.post(f"/api/v1/deep-solve/sessions/{sid}/actions", json={"action": "hint2"})
+        assert h2.json()["steps"][0]["hint2"]
+        step = await client.post(f"/api/v1/deep-solve/sessions/{sid}/actions", json={"action": "reveal_step"})
+        assert step.json()["current_step"] == 1 and step.json()["final_answer"] is None
+        full = await client.post(f"/api/v1/deep-solve/sessions/{sid}/actions", json={"action": "full_solution"})
+    final = full.json()
+    assert final["status"] == "completed" and final["final_answer"] == PLAN["final_answer"]
+    assert all("explanation" in step for step in final["steps"])
+    async with env.factory() as session:
+        row = await session.get(DeepSolveSession, sid)
+        progress = await session.scalar(select(MasteryChapterProgress).where(
+            MasteryChapterProgress.user_id == env.ids["student_id"], MasteryChapterProgress.chapter_number == 2))
+    assert row.mastery_recorded is True
+    # Step 1 used hints (not independent), step 2 was tutor-revealed: 0 independent of 2.
+    assert progress.solve_total == 2 and progress.solve_correct == 0
+
+
+@pytest.mark.asyncio
+async def test_deep_solve_invalid_model_plan_creates_no_orphan_row(env):
+    env.fake.json_reply = lambda messages: {"steps": "not a list"}
+    async with _client() as client:
+        response = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
+    assert response.status_code == 502
+    assert await _count(env.factory, DeepSolveSession) == 0
+
+
+# ---------------------------------------------------------------------------
+# 6. Capability lock: admin disables a feature => student blocked; edit is logged
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_disabled_capability_blocks_student_and_admin_edit_is_logged(env):
+    async with _client() as client:
+        off = await client.put("/api/v1/admin/capabilities/deep_solve",
+                               json={"is_enabled": False}, headers=ADMIN_HEADERS)
+        assert off.status_code == 200
+        blocked = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
+        assert blocked.status_code == 403
+        logs = await client.get("/api/v1/admin/action-logs", params={"target": "capability:deep_solve"},
+                                headers=ADMIN_HEADERS)
+    assert any(item["action"] == "capability.update" for item in logs.json()["items"])
+    assert await _count(env.factory, AdminActionLog, AdminActionLog.target == "capability:deep_solve") >= 1
+
+
+# ---------------------------------------------------------------------------
+# 7. Immersive reader: TOC, page detail, grounded assist with page citation
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_immersive_overview_page_and_assist_cite_exact_page(env):
+    book_id = env.ids["book_id"]
+    async with _client() as client:
+        overview = await client.get(f"/api/v1/immersive/books/{book_id}")
+        page = await client.get(f"/api/v1/immersive/books/{book_id}/pages/2")
+        assist = await client.post(f"/api/v1/immersive/books/{book_id}/assist",
+                                   json={"action": "summarize", "pdf_page_index": 2})
+    assert overview.status_code == 200
+    chapters = {c["chapter_number"]: c for c in overview.json()["chapters"]}
+    assert chapters[2]["page_start"] == 2 and chapters[2]["page_end"] == 3
+    assert overview.json()["grade_number"] == 10 and overview.json()["major_code"] == "math_physics"
+    assert page.json()["printed_page_number"] == 14
+    assert assist.status_code == 200, assist.text
+    assert assist.json()["citation"]["printed_page_number"] == 14
+    assert env.fake.text_calls, "assist must call the gateway"
+    assert await _count(env.factory, AiAuditLog, AiAuditLog.feature_key == "immersive_reader") >= 1
+
+
+@pytest.mark.asyncio
+async def test_immersive_assist_rejects_unknown_action_and_missing_page(env):
+    book_id = env.ids["book_id"]
+    async with _client() as client:
+        bad_page = await client.post(f"/api/v1/immersive/books/{book_id}/assist",
+                                     json={"action": "summarize", "pdf_page_index": 99})
+        bad_action = await client.post(f"/api/v1/immersive/books/{book_id}/assist",
+                                       json={"action": "delete", "pdf_page_index": 2})
+    assert bad_page.status_code == 404
+    assert bad_action.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# 8. Admin oversight of a student's Phase 5 state
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_admin_sees_student_mistakes_sessions_and_validator_rejections(env):
+    exam_id = await _insert_exam(env, [_question("q1", chapter=2, answer="A")])
+    student = env.ids["student_id"]
+    env.fake.json_reply = lambda messages: (
+        {"verdicts": [_verdict(0, grounded=False)]} if "بازبین علمی" in messages[0]["content"]
+        else PLAN if "مربی حل مسئله" in messages[0]["content"] else {})
+    async with env.factory() as session:
+        outcome = await quiz_validator.validate_questions(
+            session, items=[{"question": dict(GOOD_QUESTION), "source_text": "متن"}],
+            user_id=student, book_id=env.ids["book_id"], exam_id=exam_id)
+        session.add(QuizValidationLog(user_id=student, exam_id=exam_id, book_id=env.ids["book_id"],
+                                      question_index=0, verdict="rejected",
+                                      reasons_json=outcome.decisions[0].reasons, question_json={}))
+        await session.commit()
+    async with _client() as client:
+        await client.post(f"/api/v1/exams/{exam_id}/submit", json={"answers": {"q1": "B"}})
+        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
+        mistakes = await client.get(f"/api/v1/admin/users/{student}/mistakes", headers=ADMIN_HEADERS)
+        sessions = await client.get(f"/api/v1/admin/users/{student}/deep-solve-sessions", headers=ADMIN_HEADERS)
+        rejected = await client.get(f"/api/v1/admin/users/{student}/quiz-validation",
+                                    params={"verdict": "rejected"}, headers=ADMIN_HEADERS)
+        mastery = await client.get(f"/api/v1/admin/users/{student}/mastery", headers=ADMIN_HEADERS)
+        denied = await client.get(f"/api/v1/admin/users/{student}/mistakes")
+    assert mistakes.status_code == 200 and mistakes.json()["total"] == 1
+    assert sessions.json()["items"][0]["steps"] and sessions.json()["items"][0]["final_answer"]
+    assert rejected.json()["items"][0]["reasons"] == ["ungrounded"]
+    assert mastery.status_code == 200
+    assert denied.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# 9. Routing guarantee: Phase 5 AI calls go through capability_runtime -> ai_gateway
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_phase5_ai_calls_route_through_runtime_and_gateway(env, monkeypatch):
+    seen: list[str] = []
+    real = capability_runtime.run_capability_json
+
+    async def spy(**kwargs):
+        seen.append(kwargs["capability_key"])
+        return await real(**kwargs)
+
+    monkeypatch.setattr(deep_solve_service, "run_capability_json", spy)
+    env.fake.json_reply = lambda messages: PLAN
+    async with _client() as client:
+        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
+    assert seen == ["deep_solve"]
+    assert await _count(env.factory, AiAuditLog, AiAuditLog.feature_key == "deep_solve") >= 1
