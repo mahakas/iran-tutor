@@ -286,7 +286,15 @@ async def _run_ingest_background(
     model_primary: str,
     model_escalation: str | None,
     escalate_figures: bool,
+    job_id: str | None = None,
 ) -> None:
+    # Phase 2: when a tracked KB job exists, the job runner owns execution,
+    # progress counters and book status (see kb_ingestion_service).
+    if job_id is not None:
+        from app.services import kb_ingestion_service
+
+        await kb_ingestion_service.run_ingestion_job(job_id)
+        return
     try:
         await ingest_book_pages(
             pdf_path=pdf_path,
@@ -391,6 +399,11 @@ async def upload_and_ingest(
             await session.refresh(book)
             book_id = book.id
 
+            from app.services import kb_ingestion_service
+
+            job = await kb_ingestion_service.create_ingestion_job(
+                session, book_id=book_id, start_page=start_page, end_page=end_page
+            )
             background_tasks.add_task(
                 _run_ingest_background,
                 book_id=book_id,
@@ -403,12 +416,14 @@ async def upload_and_ingest(
                 model_primary=settings.vision_model_primary,
                 model_escalation=settings.vision_model_escalation,
                 escalate_figures=settings.escalate_figures,
+                job_id=job.id,
             )
             return {
                 "book_id": book_id,
                 "status": "ingesting",
                 "format": "pdf",
                 "total_pages": end_page - start_page + 1,
+                "job_id": job.id,
             }
 
         # Structured text/document upload (.md, .json, .html)
@@ -1680,6 +1695,11 @@ async def reprocess_admin_book(
         book.status = BookStatus.ingesting
         await session.commit()
 
+        from app.services import kb_ingestion_service
+
+        job = await kb_ingestion_service.create_ingestion_job(
+            session, book_id=book.id, start_page=start_page, end_page=end_page
+        )
         background_tasks.add_task(
             _run_ingest_background,
             book_id=book.id,
@@ -1692,12 +1712,14 @@ async def reprocess_admin_book(
             model_primary=settings.vision_model_primary,
             model_escalation=settings.vision_model_escalation,
             escalate_figures=settings.escalate_figures,
+            job_id=job.id,
         )
         return {
             "book_id": book.id,
             "status": "ingesting",
             "start_page": start_page,
             "end_page": end_page,
+            "job_id": job.id,
             "total_pages": end_page - start_page + 1,
         }
 

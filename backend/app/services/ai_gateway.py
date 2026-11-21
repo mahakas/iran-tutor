@@ -9,7 +9,10 @@ For every call the gateway:
 1. resolves the admin-configured provider + model for the feature
    (`feature_model_routes` -> `ai_providers`, with fallback), falling back to the
    legacy `.env` settings when no route is configured;
-2. enforces the quota / rate-limit engine (`app.services.quota_service`);
+2. records quota usage (`quota_service.record_ai_usage`). Pre-call quota and
+   rate-limit checks (`quota_service.enforce_ai_quota`) are performed by the
+   calling layer — API routes and `capability_runtime.enforce_capability_call` —
+   so that a single request is never counted twice;
 3. performs the call through `app.core.llm_client`;
 4. writes one complete `ai_audit_logs` row (prompt, response, citations, tokens,
    cost, latency, status) and increments quota counters.

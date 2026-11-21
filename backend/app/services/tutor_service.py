@@ -50,12 +50,25 @@ MODE_INSTRUCTIONS: dict[TutorMode, str] = {
 
 
 def build_tutor_messages(
-    *, query: str, grade_number: int, context: str, mode: TutorMode = "tutor"
+    *,
+    query: str,
+    grade_number: int,
+    context: str,
+    mode: TutorMode = "tutor",
+    system_prompt_override: str | None = None,
 ) -> list[dict[str, str]]:
-    """Build deterministic prompts for a user request and retrieved context."""
+    """Build deterministic prompts for a user request and retrieved context.
+
+    ``system_prompt_override`` carries the active skill's composed prompt from
+    the Shared Capability Runtime (Phase 2); when absent, the built-in
+    ``SYSTEM_PROMPT`` + mode instruction is used (identical behaviour).
+    """
     if mode not in MODE_INSTRUCTIONS:
         raise ValueError("unsupported tutor mode")
-    system_prompt = SYSTEM_PROMPT + "\n\nحالت پاسخ: " + MODE_INSTRUCTIONS[mode]
+    if system_prompt_override:
+        system_prompt = system_prompt_override + "\n\nحالت پاسخ: " + MODE_INSTRUCTIONS[mode]
+    else:
+        system_prompt = SYSTEM_PROMPT + "\n\nحالت پاسخ: " + MODE_INSTRUCTIONS[mode]
     return [
         {"role": "system", "content": system_prompt},
         {
@@ -92,6 +105,13 @@ def _source_reference(page: dict[str, Any]) -> str:
 
 # `mode` -> gateway `feature_key`, so admins can route a different model per feature.
 MODE_FEATURE_KEYS: dict[TutorMode, str] = {
+    "tutor": "chat",
+    "problem_solver": "solve",
+    "question_designer": "quiz",
+}
+
+# `mode` -> capability registry key (Phase 2), so skills resolve per mode.
+MODE_CAPABILITY_KEYS: dict[TutorMode, str] = {
     "tutor": "chat",
     "problem_solver": "solve",
     "question_designer": "quiz",
@@ -139,10 +159,32 @@ async def answer_from_textbook(
 
     settings = get_settings()
     feature_key = MODE_FEATURE_KEYS.get(mode, "chat")
+    capability_key = MODE_CAPABILITY_KEYS.get(mode, "chat")
+
+    # Phase 2: resolve the active skill's prompt pack through the Shared
+    # Capability Runtime when a DB session is available. Falls back to the
+    # built-in prompt so behaviour is unchanged before skills are seeded.
+    system_prompt_override: str | None = None
+    skill_slug: str | None = None
+    if db_session is not None:
+        try:
+            from app.services.capability_runtime import (
+                compose_system_prompt,
+                load_active_skill,
+            )
+
+            skill = await load_active_skill(db_session, capability_key)
+            if skill is not None:
+                system_prompt_override = compose_system_prompt(skill)
+                skill_slug = skill.slug
+        except Exception:  # noqa: BLE001 - skill lookup must never break answering
+            system_prompt_override = None
+
     call_ctx = CallContext(
         feature_key=feature_key,
         user_id=user_id,
         session_id=session_id,
+        skill_id=skill_slug,
         book_id=book_id,
         textbook_strict=True,
         citations=pages,
@@ -151,7 +193,11 @@ async def answer_from_textbook(
     gateway_result = await complete_text_via_gateway(
         ctx=call_ctx,
         messages=build_tutor_messages(
-            query=query, grade_number=grade_number, context=context, mode=mode
+            query=query,
+            grade_number=grade_number,
+            context=context,
+            mode=mode,
+            system_prompt_override=system_prompt_override,
         ),
         model=settings.tutor_model,
         session=db_session,
@@ -182,9 +228,13 @@ async def answer_from_textbook(
     answer += "\n\n**منابع:**\n" + "\n".join(
         f"- {source['citation']}" for source in sources
     )
+    from app.services.learning_blocks import blocks_from_answer, blocks_to_payload
+
     return {
         "answer": answer,
         "sources": sources,
         "retrieved_count": len(pages),
         "audit_id": gateway_result.audit_id,
+        # Phase 2: typed learning blocks (additive; the plain answer stays primary).
+        "blocks": blocks_to_payload(blocks_from_answer(answer, sources)),
     }

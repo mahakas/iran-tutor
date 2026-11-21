@@ -231,6 +231,7 @@ export type UserSessionItem = {
 export type TutorResponse = {
   answer: string;
   sources: Source[];
+  blocks?: unknown[];
   recognized_question?: string;
   transcript?: string;
   uncertain_parts?: string[];
@@ -291,6 +292,8 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
+  /** Typed Learning Blocks (Phase 2) — see lib/learningBlocks.ts. */
+  blocks?: unknown[];
   attachment?: string;
 };
 
