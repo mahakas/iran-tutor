@@ -81,18 +81,19 @@ function errorMessage(payload: unknown, fallback: string) {
 }
 
 function sourceText(source: Source, lang: "fa" | "en") {
-  if (source.citation) return source.citation;
-  return [
-    source.book_title,
-    source.chapter_number
-      ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}`
-      : source.chapter_title,
-    source.printed_page_number
-      ? `${lang === "en" ? "Page" : "صفحهٔ"} ${source.printed_page_number}`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  // Chat sources show book and chapter only; printed pages stay in the structured
+  // fields and are used by the immersive reader for click-through.
+  const title = source.book_title ?? (lang === "en" ? "Textbook" : "کتاب درسی");
+  const bookLabel = source.grade_number
+    ? `${title} (${lang === "en" ? "Grade" : "پایه"} ${source.grade_number})`
+    : title;
+  const chapterLabel =
+    source.chapter_number != null && source.chapter_title
+      ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}: ${source.chapter_title}`
+      : source.chapter_number != null
+        ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}`
+        : source.chapter_title ?? null;
+  return [bookLabel, chapterLabel].filter(Boolean).join(lang === "en" ? " · " : "، ");
 }
 
 function makeChatTitle(text: string, lang: "fa" | "en") {
