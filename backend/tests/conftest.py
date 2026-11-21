@@ -15,6 +15,9 @@ _TEST_SETTINGS = {
     "VISION_MODEL_B": "unit-test-model-b",
     "VISION_MODEL_PRIMARY": "unit-test-model-a",
     "DATABASE_URL": "postgresql+asyncpg://test:test@127.0.0.1:5432/test",
+    # Shared IP counters would throttle admin logins across the whole suite. Rate-limit
+    # behavior is covered explicitly in test_bugfix_hardening.py and test_phase1_governance.py.
+    "RATE_LIMIT_ENABLED": "false",
 }
 
 for key, value in _TEST_SETTINGS.items():

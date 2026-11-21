@@ -30,6 +30,8 @@ from app.services.auth_billing_service import (
     verify_otp_hash,
 )
 from app.services.sms_provider import get_sms_provider
+from app.core.client_ip import client_ip
+from app.services.rate_limiter import check_rate_limit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -60,11 +62,40 @@ def _utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+OTP_REQUEST_IP_LIMIT = 20
+OTP_REQUEST_IP_WINDOW_SECONDS = 3600
+OTP_VERIFY_IP_LIMIT = 30
+OTP_VERIFY_IP_WINDOW_SECONDS = 900
+
+
+def _is_ascii_digits(value: str, length: int) -> bool:
+    return len(value) == length and value.isascii() and value.isdigit()
+
+
+async def _enforce_ip_limit(request: Request, *, bucket: str, limit: int, window: int) -> None:
+    decision = await check_rate_limit(
+        identity=f"{bucket}:{client_ip(request)}",
+        bucket=bucket,
+        limit=limit,
+        window_seconds=window,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="تعداد درخواست‌ها بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.",
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
+
+
 @router.post("/request-otp")
 async def request_otp(
     body: RequestOtpBody,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
+    await _enforce_ip_limit(
+        request, bucket="otp_request", limit=OTP_REQUEST_IP_LIMIT, window=OTP_REQUEST_IP_WINDOW_SECONDS
+    )
     try:
         phone = normalize_iranian_phone(body.phone_number)
     except ValueError as error:
@@ -143,16 +174,22 @@ async def verify_otp(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
+    await _enforce_ip_limit(
+        request, bucket="otp_verify", limit=OTP_VERIFY_IP_LIMIT, window=OTP_VERIFY_IP_WINDOW_SECONDS
+    )
     code_clean = body.code.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
-    if not code_clean.isdigit() or len(code_clean) != 6:
+    if not _is_ascii_digits(code_clean, 6):
         raise HTTPException(status_code=422, detail="کد تأیید باید ۶ رقم باشد.")
 
     now = datetime.now(timezone.utc)
+    # Lock the active OTP row so parallel verify requests cannot each read the same
+    # attempt counter and bypass max_attempts (SELECT ... FOR UPDATE on PostgreSQL).
     otp = await session.scalar(
         select(OtpCode)
         .where(OtpCode.phone_number == phone, OtpCode.consumed_at.is_(None))
         .order_by(OtpCode.created_at.desc())
         .limit(1)
+        .with_for_update()
     )
     if otp is None:
         raise HTTPException(status_code=401, detail="کد فعالی برای این شماره یافت نشد. ابتدا درخواست کد بدهید.")

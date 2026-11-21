@@ -12,11 +12,12 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_base_settings, get_settings
-from app.core.runtime_config import get_runtime_overrides
+from app.core.config import get_settings
 from app.db.seed import seed_billing_settings, seed_plans
 from app.models.auth import BillingSettings, Plan, TokenUsageLog, User, UserSession
 from app.services.account_service import compose_full_name, normalize_preferences
+from app.core.client_ip import constant_time_equal
+from app.core.signing import derive_session_key
 
 USER_COOKIE_NAME = "iran_tutor_user"
 
@@ -48,14 +49,8 @@ def mask_phone_number(phone: str) -> str:
 
 
 def _user_signing_key() -> bytes:
-    settings = get_settings()
-    base = get_base_settings()
-    overrides = get_runtime_overrides()
-    stable_llm_key = (
-        base.llm_api_key if "llm_api_key" in overrides else getattr(settings, "llm_api_key", "")
-    )
-    secret = getattr(settings, "auth_secret", None) or f"{stable_llm_key}:{settings.admin_password}"
-    return hashlib.sha256(f"iran-tutor-user-v1:{secret}".encode("utf-8")).digest()
+    # Derived from AUTH_SECRET / SECRET_KEY only (never the LLM key or admin password).
+    return derive_session_key("iran-tutor-user-v2")
 
 
 def create_user_session_token(
@@ -77,7 +72,7 @@ def parse_user_session_token(token: str | None) -> tuple[str, str, int] | None:
     if not token or token.count(".") != 3:
         return None
     user_id, expires_raw, nonce, signature = token.split(".", 3)
-    if not user_id or not expires_raw.isdigit() or not nonce or not signature:
+    if not user_id or not (expires_raw.isascii() and expires_raw.isdigit()) or not nonce or not signature:
         return None
     expires_ts = int(expires_raw)
     if expires_ts <= int(datetime.now(timezone.utc).timestamp()):
@@ -87,7 +82,7 @@ def parse_user_session_token(token: str | None) -> tuple[str, str, int] | None:
         f"{user_id}.{expires_raw}.{nonce}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    if not hmac.compare_digest(signature, expected):
+    if not constant_time_equal(signature, expected):
         return None
     return user_id, nonce, expires_ts
 
@@ -104,7 +99,7 @@ def hash_otp_code(otp_id: str, phone_number: str, code: str) -> str:
 
 def verify_otp_hash(otp_id: str, phone_number: str, code: str, expected_hash: str) -> bool:
     actual = hash_otp_code(otp_id, phone_number, code)
-    return hmac.compare_digest(actual, expected_hash)
+    return constant_time_equal(actual, expected_hash)
 
 
 def _utc(value: datetime | None) -> datetime | None:

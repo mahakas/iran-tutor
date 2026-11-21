@@ -84,7 +84,7 @@ export default function ImmersiveReader({ bookId }: Props) {
     };
   }, [authFetch, bookId, overview, pageIndex]);
 
-  const pages = overview?.pages ?? [];
+  const pages = useMemo(() => overview?.pages ?? [], [overview]);
   const pageCount = overview?.page_count ?? 0;
 
   const goToPage = useCallback(

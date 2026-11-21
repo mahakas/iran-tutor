@@ -359,7 +359,7 @@ async def verify_phone_change(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     code_clean = body.code.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
-    if not code_clean.isdigit() or len(code_clean) != 6:
+    if not (code_clean.isascii() and code_clean.isdigit()) or len(code_clean) != 6:
         raise HTTPException(status_code=422, detail="کد تأیید باید ۶ رقم باشد.")
 
     existing = await session.scalar(select(User).where(User.phone_number == new_phone))

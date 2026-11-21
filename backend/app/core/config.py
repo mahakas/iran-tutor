@@ -65,6 +65,8 @@ class Settings(BaseSettings):
 
     # Phase 6: Student SMS OTP authentication, plans, and payment providers
     auth_secret: str | None = None
+    # Number of reverse proxies in front of the API (0 = ignore X-Forwarded-For).
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=10)
     user_session_ttl_seconds: int = Field(default=2592000, gt=0)
     otp_ttl_seconds: int = Field(default=180, gt=0)
     otp_resend_seconds: int = Field(default=60, ge=0)

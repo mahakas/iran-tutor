@@ -18,7 +18,9 @@ const ADMIN_TOKEN_STORAGE_KEY = "iran_tutor_admin_token";
 function readStoredAdminToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
-    return window.localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY);
+    // Older builds stored the admin token in localStorage; drop that copy.
+    window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    return window.sessionStorage.getItem(ADMIN_TOKEN_STORAGE_KEY);
   } catch {
     return null;
   }
@@ -62,7 +64,7 @@ export default function AdminGate({
 
   const lockPanel = useCallback(() => {
     try {
-      window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+      window.sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
     } catch {
       // ignore storage errors
     }
@@ -110,7 +112,7 @@ export default function AdminGate({
       const payload = await response.json();
       const nextToken = typeof payload.token === "string" ? payload.token : null;
       try {
-        if (nextToken) window.localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, nextToken);
+        if (nextToken) window.sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, nextToken);
       } catch {
         // ignore storage errors
       }
