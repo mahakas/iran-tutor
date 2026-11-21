@@ -236,7 +236,12 @@ export default function NotebookWorkspace() {
               </button>
             </li>
           ))}
-          {list.length === 0 && <li className="lb-caption">هنوز دفترچه‌ای ندارید.</li>}
+          {list.length === 0 && (
+            <li className="empty-state">
+              <b>هنوز دفترچه‌ای ندارید</b>
+              <span>با ساخت یک دفترچه، یادداشت‌ها و نمودارهای درسی‌تان را جمع کنید.</span>
+            </li>
+          )}
         </ul>
       </section>
 

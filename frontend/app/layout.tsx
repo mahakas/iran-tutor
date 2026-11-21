@@ -4,6 +4,7 @@ import "@fontsource/vazirmatn/arabic-500.css";
 import "@fontsource/vazirmatn/arabic-700.css";
 import "katex/dist/katex.min.css";
 import AppProvider from "@/components/AppProvider";
+import ToastHost from "@/components/ToastHost";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -15,7 +16,10 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="fa" dir="rtl">
       <body>
-        <AppProvider>{children}</AppProvider>
+        <AppProvider>
+          {children}
+          <ToastHost />
+        </AppProvider>
       </body>
     </html>
   );

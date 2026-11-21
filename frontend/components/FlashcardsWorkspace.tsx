@@ -382,7 +382,12 @@ export default function FlashcardsWorkspace() {
           <div className="fc-progress wide">
             <span style={{ width: `${activeDeck.stats.progress_percent}%` }} />
           </div>
-          {deckCards.length === 0 && <div className="fc-empty">این دسته هنوز کارتی ندارد.</div>}
+          {deckCards.length === 0 && (
+            <div className="empty-state">
+              <b>این دسته هنوز کارتی ندارد</b>
+              <span>کارت تازه بسازید یا از یک فصل کتاب کارت تولید کنید.</span>
+            </div>
+          )}
           <ul className="fc-card-list">
             {deckCards.map((card) => (
               <li key={card.id} className="fc-card-row">

@@ -296,7 +296,7 @@ export default function AdminUserDetailPanel({
 
       {tab === "memory" ? (
         <div className="p4-memory">
-          <section className="p4-layer">
+          <section className="p4-layer" data-layer="L3">
             <h3>L3 · پروفایل بلندمدت</h3>
             {l3.length === 0 && <p className="admin-muted">هنوز پروفایلی ساخته نشده است.</p>}
             {l3.map((item) => (
@@ -337,7 +337,7 @@ export default function AdminUserDetailPanel({
             ))}
           </section>
 
-          <section className="p4-layer">
+          <section className="p4-layer" data-layer="L2">
             <h3>L2 · واقعیت‌های هر کتاب و فصل</h3>
             {l2.length === 0 && <p className="admin-muted">هنوز واقعیتی ثبت نشده است.</p>}
             {l2.map((item) => (
@@ -426,7 +426,7 @@ export default function AdminUserDetailPanel({
             </div>
           </section>
 
-          <section className="p4-layer">
+          <section className="p4-layer" data-layer="L1">
             <h3>L1 · ردپای نشست‌ها (فقط خواندنی)</h3>
             {l1.length === 0 && <p className="admin-muted">ردپای نشستی ثبت نشده است.</p>}
             <details>

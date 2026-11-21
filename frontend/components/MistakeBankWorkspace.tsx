@@ -171,7 +171,14 @@ export default function MistakeBankWorkspace() {
           بانک اشتباهات (
           {toPersianDigits(list.total)})
         </h3>
-        {list.items.length === 0 ? <div>هنوز اشتباهی ثبت نشده است.</div> : list.items.map((item) => renderItem(item, false))}
+        {list.items.length === 0 ? (
+          <div className="empty-state">
+            <b>هنوز اشتباهی ثبت نشده است</b>
+            <span>هر پاسخ اشتباه در آزمون، همین‌جا با توضیح و راهنما ذخیره می‌شود.</span>
+          </div>
+        ) : (
+          list.items.map((item) => renderItem(item, false))
+        )}
       </section>
     </div>
   );
