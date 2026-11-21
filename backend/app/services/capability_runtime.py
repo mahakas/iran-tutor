@@ -436,3 +436,32 @@ __all__ = [
     "test_skill",
     "update_skill",
 ]
+
+
+async def run_capability_speech(
+    *,
+    session: AsyncSession,
+    capability_key: str,
+    text: str,
+    voice: str,
+    feature_key: str | None = None,
+    user_id: str | None = None,
+    book_id: int | None = None,
+    user: User | None = None,
+    enforce: bool = True,
+) -> tuple[bytes, GatewayResult]:
+    """Text-to-speech through the runtime: capability/quota gate -> gateway -> audit.
+
+    Speech has no prompt skill, but it still passes the same gates as every other
+    capability call, so admin toggles, plan access and `user_quotas` apply.
+    """
+    key = feature_key or capability_key
+    if enforce:
+        await enforce_capability_call(session, capability_key, user=user, feature_key=key)
+    ctx = CallContext(
+        feature_key=key,
+        user_id=user_id,
+        book_id=book_id,
+        textbook_strict=False,
+    )
+    return await speech_via_gateway(ctx=ctx, text=text, voice=voice, session=session)

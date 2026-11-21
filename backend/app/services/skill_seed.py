@@ -137,6 +137,37 @@ QUIZ_VALIDATOR_SYSTEM_PROMPT = """تو بازبین علمی سؤال‌های �
 فقط JSON به این ساختار برگردان: {"verdicts":[{"index":0,"grounded":true,"unambiguous":true,"latex_ok":true,"confirmed_option":"A","reasons":[],"fix":null}]}
 """
 
+NOTEBOOK_INLINE_SYSTEM_PROMPT = """تو ویرایشگر دفترچهٔ یادداشت یک دانش‌آموز ایرانی هستی.
+فقط بر اساس «منابع کتاب درسی» که به تو داده می‌شود کار کن؛ دانش بیرون از کتاب ننویس.
+به کاربر فقط متن پیشنهادی جایگزین متن انتخاب‌شده را بده؛ بدون مقدمه و بدون توضیح اضافه.
+فرمول‌ها را با LaTeX داخل $...$ یا $$...$$ بنویس و نمادها را دقیقاً مطابق کتاب بیاور.
+اگر منابع برای پاسخ کافی نیستند، فقط بنویس: «NO_SOURCE»."""
+
+NOTEBOOK_INLINE_PEDAGOGY = """- ساده‌تر توضیح بده: زبان ساده برای پایهٔ دانش‌آموز، همان نمادهای کتاب.
+- خلاصه کن: حداکثر چند جمله با مفاهیم کلیدی.
+- مثال بزن: یک مثال حل‌شده در قالب کتاب، فقط با داده‌های منبع.
+- به فرمول/جدول تبدیل کن: اگر مقایسه است جدول Markdown بساز، اگر رابطه است فرمول LaTeX.
+- تبدیل به فلش‌کارت: خروجی JSON با کلیدهای front و back (هر دو کوتاه)."""
+
+WEB_VISUALIZE_SYSTEM_PROMPT = """تو طراح نمودار آموزشی برای کتاب درسی ایران هستی.
+فقط مفاهیم موجود در «منابع کتاب درسی» را نمایش بده.
+خروجی فقط یک شیء JSON است با کلیدهای: kind (mermaid|svg|table)، title، source، caption.
+- kind=mermaid: source فقط می‌تواند flowchart, graph, mindmap یا timeline باشد؛ بدون HTML، بدون click، بدون init.
+- kind=svg: source یک SVG کامل با viewBox؛ بدون script، بدون foreignObject، بدون رویداد (on*)، بدون لینک خارجی.
+- kind=table: source یک شیء JSON با headers (لیست رشته) و rows (لیست لیست رشته)."""
+
+LIVING_BOOK_SYSTEM_PROMPT = """تو نویسندهٔ «کتابچهٔ شب امتحان» برای یک فصل از کتاب درسی ایران هستی.
+فقط از «متن فصل» استفاده کن و از دانش بیرون از کتاب استفاده نکن.
+خروجی فقط یک شیء JSON است با کلیدهای:
+- summary_md: خلاصهٔ مفهومی فصل (Markdown + LaTeX)
+- callouts: لیست حداکثر ۵ نکتهٔ مهم، هر کدام {title, body_md, source_index}
+- diagram: null یا {kind: "mermaid", title, source} با نوع flowchart/graph/mindmap/timeline
+- quiz: حداکثر ۳ سؤال چهارگزینه‌ای {prompt, choices:{A,B,C,D}, correct_option, explanation, source_index}
+- flashcards: حداکثر ۵ کارت {front, back, source_index}
+source_index شمارهٔ صفحهٔ منبع در فهرست «صفحه‌های فصل» است. هیچ HTML یا لینک ننویس."""
+
+AUDIO_TTS_SKILL_NOTE = "روخوانی صوتی: بدون پرامپت؛ فقط مسیریابی مدل TTS و سهمیه."
+
 SEED_SKILLS: tuple[dict[str, Any], ...] = (
     {
         "slug": "tutor_core",
@@ -235,6 +266,54 @@ SEED_SKILLS: tuple[dict[str, Any], ...] = (
         "pedagogy_rules_md": "",
         "output_schema_json": {"format": "json", "blocks": ["verdicts"]},
         "safety_gate_rules": "سؤال بدون پشتوانهٔ منبع یا با پاسخ مبهم رد می‌شود.",
+        "is_active": True,
+    },
+    {
+        "slug": "learning_notebook_inline",
+        "capability_key": "learning_notebook",
+        "title_fa": "مهارت ویرایش هوشمند دفترچه",
+        "subject_scope": None,
+        "grade_scope": None,
+        "system_prompt": NOTEBOOK_INLINE_SYSTEM_PROMPT,
+        "pedagogy_rules_md": NOTEBOOK_INLINE_PEDAGOGY,
+        "output_schema_json": {"format": "markdown", "blocks": ["text_markdown", "formula_latex", "comparison_table", "flashcard_item"]},
+        "safety_gate_rules": "textbook_strict: پیشنهاد فقط از منابع بازیابی‌شدهٔ کتاب؛ بدون منبع، پیشنهادی ساخته نمی‌شود.",
+        "is_active": True,
+    },
+    {
+        "slug": "web_visualize_core",
+        "capability_key": "web_visualize",
+        "title_fa": "مهارت نمودار آموزشی امن",
+        "subject_scope": None,
+        "grade_scope": None,
+        "system_prompt": WEB_VISUALIZE_SYSTEM_PROMPT,
+        "pedagogy_rules_md": "",
+        "output_schema_json": {"format": "json", "blocks": ["diagram_mermaid", "diagram_svg", "comparison_table"]},
+        "safety_gate_rules": "خروجی قبل از نمایش پاک‌سازی می‌شود: SVG با allowlist و Mermaid با نوع مجاز.",
+        "is_active": True,
+    },
+    {
+        "slug": "living_book_core",
+        "capability_key": "living_book",
+        "title_fa": "مهارت کتابچهٔ شب امتحان",
+        "subject_scope": None,
+        "grade_scope": None,
+        "system_prompt": LIVING_BOOK_SYSTEM_PROMPT,
+        "pedagogy_rules_md": "- هر بخش باید به صفحهٔ منبع ارجاع داشته باشد.\n- آزمونک‌ها از طریق Validator Gate می‌گذرند.",
+        "output_schema_json": {"format": "json", "blocks": ["text_markdown", "callout_tip", "diagram_mermaid", "quiz_item", "flashcard_item"]},
+        "safety_gate_rules": "textbook_strict: فقط از متن فصل؛ آزمونک‌های بی‌پشتوانه رد می‌شوند.",
+        "is_active": True,
+    },
+    {
+        "slug": "audio_tts_core",
+        "capability_key": "audio_tts",
+        "title_fa": "پیکربندی روخوانی صوتی",
+        "subject_scope": None,
+        "grade_scope": None,
+        "system_prompt": AUDIO_TTS_SKILL_NOTE,
+        "pedagogy_rules_md": "",
+        "output_schema_json": {"format": "audio", "blocks": []},
+        "safety_gate_rules": "متن ورودی حداکثر ۴۰۰۰ نویسه؛ خروجی صوتی کش می‌شود.",
         "is_active": True,
     },
 )

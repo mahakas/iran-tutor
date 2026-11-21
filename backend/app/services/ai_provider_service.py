@@ -43,6 +43,10 @@ ROUTABLE_FEATURE_KEYS: tuple[str, ...] = (
     "immersive_reader",
     "deep_solve",
     "quiz_validator",
+    "learning_notebook",
+    "web_visualize",
+    "living_book",
+    "audio_tts",
 )
 
 

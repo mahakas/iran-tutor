@@ -118,6 +118,42 @@ SEED_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "default_route_key": None,
         "sort_order": 9,
     },
+    {
+        "key": "learning_notebook",
+        "title_fa": "دفترچه یادداشت هوشمند",
+        "description_fa": "یادداشت Markdown و فرمول با ویرایش هوشمند متن انتخاب‌شده؛ پیشنهاد AI فقط با تأیید شما اعمال می‌شود.",
+        "icon": "NotebookPen",
+        "is_enabled": True,
+        "default_route_key": "learning_notebook",
+        "sort_order": 11,
+    },
+    {
+        "key": "web_visualize",
+        "title_fa": "نمودار و تصویر تعاملی",
+        "description_fa": "نقشهٔ مفاهیم، فلوچارت، خط زمانی، جدول مقایسه و SVG امن؛ همه پاک‌سازی‌شده قبل از نمایش.",
+        "icon": "Network",
+        "is_enabled": True,
+        "default_route_key": "web_visualize",
+        "sort_order": 12,
+    },
+    {
+        "key": "living_book",
+        "title_fa": "کتابچهٔ شب امتحان",
+        "description_fa": "مرور یکپارچهٔ هر فصل: خلاصه، نکات کلیدی، نمودار، آزمونک اعتبارسنجی‌شده و فلش‌کارت.",
+        "icon": "BookMarked",
+        "is_enabled": True,
+        "default_route_key": "living_book",
+        "sort_order": 13,
+    },
+    {
+        "key": "audio_tts",
+        "title_fa": "روخوانی صوتی",
+        "description_fa": "پخش صوتی متن انتخاب‌شده و خلاصهٔ صوتی فصل؛ هر متن یک‌بار ساخته و کش می‌شود.",
+        "icon": "Volume2",
+        "is_enabled": True,
+        "default_route_key": "audio_tts",
+        "sort_order": 14,
+    },
 )
 
 

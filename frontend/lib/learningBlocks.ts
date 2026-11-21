@@ -43,22 +43,3 @@ export function normalizeLearningBlocks(raw: unknown): LearningBlock[] {
         : {},
   }));
 }
-
-/**
- * Strip active content from an SVG string before it is embedded.
- * Defence in depth: the SVG is only ever rendered through an <img> data URL
- * (which cannot execute scripts), but we also drop obvious hazards.
- */
-export function sanitizeSvgMarkup(svg: string): string {
-  return svg
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, "")
-    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
-    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "")
-    .replace(/(href|xlink:href)\s*=\s*"\s*javascript:[^"]*"/gi, "")
-    .replace(/(href|xlink:href)\s*=\s*'\s*javascript:[^']*'/gi, "");
-}
-
-export function svgDataUrl(svg: string): string {
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(sanitizeSvgMarkup(svg))}`;
-}
