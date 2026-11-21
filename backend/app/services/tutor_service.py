@@ -84,6 +84,22 @@ def build_tutor_messages(
     ]
 
 
+def _source_label(page: dict[str, Any]) -> str:
+    """Book and chapter only (no page). Used for the chat sources list; pages stay in structured fields."""
+    title = page.get("book_title") or "کتاب درسی"
+    if page.get("grade_number"):
+        title = f"{title} (پایه {page['grade_number']})"
+    chapter_number = page.get("chapter_number")
+    chapter_title = page.get("chapter_title")
+    if chapter_number is not None and chapter_title:
+        return f"{title}، فصل {chapter_number}: {chapter_title}"
+    if chapter_title:
+        return f"{title}، {chapter_title}"
+    if chapter_number is not None:
+        return f"{title}، فصل {chapter_number}"
+    return f"{title}، فصل نامشخص"
+
+
 def _source_reference(page: dict[str, Any]) -> str:
     title = page.get("book_title") or "کتاب درسی"
     if page.get("grade_number"):
@@ -266,12 +282,16 @@ async def answer_grounded(
     answer = gateway_result.content
 
     sources: list[dict[str, Any]] = []
+    source_labels: list[str] = []
     seen: set[tuple[Any, Any]] = set()
     for page in pages:
         identity = (page.get("book_id"), page.get("pdf_page_index"))
         if identity in seen:
             continue
         seen.add(identity)
+        label = _source_label(page)
+        if label not in source_labels:
+            source_labels.append(label)
         sources.append(
             {
                 "book_id": page.get("book_id"),
@@ -288,7 +308,7 @@ async def answer_grounded(
             }
         )
     answer += "\n\n**منابع:**\n" + "\n".join(
-        f"- {source['citation']}" for source in sources
+        f"- {label}" for label in source_labels
     )
     from app.services.learning_blocks import blocks_from_answer, blocks_to_payload
 

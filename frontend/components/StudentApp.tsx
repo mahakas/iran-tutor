@@ -18,6 +18,8 @@ import {
   LoaderCircle,
   LogIn,
   Menu,
+  Moon,
+  Sun,
   MessageSquare,
   Mic,
   Paperclip,
@@ -79,18 +81,23 @@ function errorMessage(payload: unknown, fallback: string) {
 }
 
 function sourceText(source: Source, lang: "fa" | "en") {
-  if (source.citation) return source.citation;
-  return [
-    source.book_title,
-    source.chapter_number
-      ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}`
-      : source.chapter_title,
-    source.printed_page_number
-      ? `${lang === "en" ? "Page" : "صفحهٔ"} ${source.printed_page_number}`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  // Chat sources show book and chapter only; printed pages stay in the structured
+  // fields and are used by the immersive reader for click-through.
+  const title = source.book_title ?? (lang === "en" ? "Textbook" : "کتاب درسی");
+  const bookLabel = source.grade_number
+    ? `${title} (${lang === "en" ? "Grade" : "پایه"} ${source.grade_number})`
+    : title;
+  const chapterLabel =
+    source.chapter_number != null && source.chapter_title
+      ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}: ${source.chapter_title}`
+      : source.chapter_number != null
+        ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}`
+        : source.chapter_title ?? null;
+  return [bookLabel, chapterLabel].filter(Boolean).join(lang === "en" ? " · " : "، ");
+}
+
+function uniqueSourceTexts(sources: Source[], lang: "fa" | "en") {
+  return Array.from(new Set(sources.map((source) => sourceText(source, lang))));
 }
 
 function makeChatTitle(text: string, lang: "fa" | "en") {
@@ -111,9 +118,19 @@ export default function StudentApp() {
     refreshAccount,
     authFetch,
     openLoginModal,
+    updatePreferences,
   } = useAppContext();
 
   const lang = preferences.general.language === "en" ? "en" : "fa";
+  const [isThemeDark, setIsThemeDark] = useState(false);
+  useEffect(() => {
+    const root = document.documentElement;
+    const sync = () => setIsThemeDark(root.getAttribute("data-theme") === "dark");
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
   const tz = preferences.general.timezone || "Asia/Tehran";
 
   const [grades, setGrades] = useState<GradeOption[]>([]);
@@ -1485,6 +1502,27 @@ export default function StudentApp() {
             <ChevronDown size={15} />
           </div>
           <div className="topbar-actions">
+            <button
+              type="button"
+              className="icon-button theme-toggle"
+              aria-label={
+                lang === "en"
+                  ? "Toggle dark mode"
+                  : "تغییر حالت نمایش تیره و روشن"
+              }
+              title={lang === "en" ? "Toggle dark mode" : "حالت تیره / روشن"}
+              onClick={() => {
+                void updatePreferences({
+                  appearance: { color_mode: isThemeDark ? "light" : "dark" },
+                });
+              }}
+            >
+              {isThemeDark ? (
+                <Sun size={18} />
+              ) : (
+                <Moon size={18} />
+              )}
+            </button>
             {demoMode && (
               <span className="private-badge demo-badge">
                 <Sparkles size={14} /> {lang === "en" ? "Demo Mode" : "حالت آزمایشی"}
@@ -1919,12 +1957,9 @@ export default function StudentApp() {
                           <BookOpen size={13} />{" "}
                           {lang === "en" ? "Textbook Sources" : "منابع کتاب"}
                         </span>
-                        {message.sources.map((source, sourceIndex) => (
-                          <div
-                            className="source-pill"
-                            key={`${source.book_id}-${source.pdf_page_index}-${sourceIndex}`}
-                          >
-                            {sourceText(source, lang)}
+                        {uniqueSourceTexts(message.sources, lang).map((text) => (
+                          <div className="source-pill" key={text}>
+                            {text}
                           </div>
                         ))}
                       </div>

@@ -73,6 +73,7 @@ export type BookOption = {
 export type Source = {
   book_id?: number;
   book_title?: string;
+  grade_number?: number | null;
   chapter_number?: number | null;
   chapter_title?: string | null;
   pdf_page_index?: number | null;

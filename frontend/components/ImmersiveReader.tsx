@@ -38,6 +38,7 @@ export default function ImmersiveReader({ bookId }: Props) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<"toc" | "figures">("toc");
+  const [mobilePane, setMobilePane] = useState<"page" | "chat">("page");
   const contentRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -229,8 +230,17 @@ export default function ImmersiveReader({ bookId }: Props) {
 
   return (
     <div dir="rtl" className="immersive-layout" style={{ display: "grid", gridTemplateColumns: "minmax(0,1.2fr) minmax(0,1fr)", gap: 16, alignItems: "start" }}>
+      {/* Mobile-only pane switcher (hidden on tablet and desktop by CSS) */}
+      <div className="immersive-tabs" role="tablist" aria-label="نمای مطالعه" style={{ display: "none", gridColumn: "1 / -1" }}>
+        <button type="button" role="tab" aria-selected={mobilePane === "page"} onClick={() => setMobilePane("page")}>
+          صفحه کتاب
+        </button>
+        <button type="button" role="tab" aria-selected={mobilePane === "chat"} onClick={() => setMobilePane("chat")}>
+          گفت‌وگو با معلم
+        </button>
+      </div>
       {/* Viewer side (right in RTL): TOC, page image, page text, figures */}
-      <section className="glass-panel" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+      <section className="glass-panel immersive-pane" data-pane="page" data-active={mobilePane === "page" ? "true" : "false"} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
         <header style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between", flexWrap: "wrap" }}>
           <strong>{overview.title}</strong>
           <span style={{ fontSize: 13, opacity: 0.8 }}>
@@ -308,7 +318,7 @@ export default function ImmersiveReader({ bookId }: Props) {
       </section>
 
       {/* Chat side (left in RTL): grounded tutor */}
-      <section className="glass-panel" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+      <section className="glass-panel immersive-pane" data-pane="chat" data-active={mobilePane === "chat" ? "true" : "false"} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {ACTIONS.map((action) => {
             const Icon = action.icon;
