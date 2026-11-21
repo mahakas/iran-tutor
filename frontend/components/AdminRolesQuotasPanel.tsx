@@ -29,6 +29,8 @@ type QuotaPolicy = {
   requests_per_minute: number;
 };
 
+type FeatureOverrides = Record<string, Partial<QuotaPolicy>>;
+
 const ROLE_LABELS: Record<string, string> = {
   admin: "مدیر",
   teacher: "معلم",
@@ -43,8 +45,8 @@ const MAJOR_LABELS: Record<string, string> = {
 };
 
 const POLICY_FIELDS: { key: keyof QuotaPolicy; label: string; hint: string }[] = [
-  { key: "daily_tokens", label: "سقف توکن روزانه", hint: "برای هر کاربر در هر روز" },
-  { key: "monthly_tokens", label: "سقف توکن ماهانه", hint: "برای هر کاربر در هر ماه" },
+  { key: "daily_tokens", label: "سقف توکن روزانه", hint: "برای هر کاربر و هر قابلیت در هر روز" },
+  { key: "monthly_tokens", label: "سقف توکن ماهانه", hint: "برای هر کاربر و هر قابلیت در هر ماه" },
   { key: "daily_requests", label: "سقف درخواست روزانه", hint: "قبل از هر فراخوانی بررسی می‌شود" },
   { key: "requests_per_minute", label: "سقف درخواست در دقیقه", hint: "پنجرهٔ لغزان Redis" },
 ];
@@ -58,6 +60,10 @@ export default function AdminRolesQuotasPanel({
 }) {
   const [policy, setPolicy] = useState<QuotaPolicy | null>(null);
   const [defaults, setDefaults] = useState<QuotaPolicy | null>(null);
+  const [overrides, setOverrides] = useState<FeatureOverrides>({});
+  const [overrideKey, setOverrideKey] = useState("");
+  const [overrideDraft, setOverrideDraft] = useState<Record<string, string>>({});
+  const [savingOverride, setSavingOverride] = useState(false);
   const [users, setUsers] = useState<AdminRoleUser[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
@@ -92,6 +98,7 @@ export default function AdminRolesQuotasPanel({
       const policyPayload = await policyRes.json();
       setPolicy(policyPayload.policy as QuotaPolicy);
       setDefaults(policyPayload.defaults as QuotaPolicy);
+      setOverrides((policyPayload.feature_overrides ?? {}) as FeatureOverrides);
       const usersPayload = await usersRes.json();
       const rows = Array.isArray(usersPayload)
         ? usersPayload
@@ -110,6 +117,57 @@ export default function AdminRolesQuotasPanel({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [load]);
+
+  async function saveOverride(event: React.FormEvent) {
+    event.preventDefault();
+    const key = overrideKey.trim();
+    const fields: Record<string, number> = {};
+    for (const field of POLICY_FIELDS) {
+      const raw = (overrideDraft[field.key] ?? "").trim();
+      if (raw !== "") fields[field.key] = Math.max(0, Math.floor(Number(raw)) || 0);
+    }
+    if (!key || Object.keys(fields).length === 0) {
+      setError("کلید قابلیت و حداقل یک سقف را وارد کنید (خالی = ارث‌بری از سقف کلی).");
+      return;
+    }
+    setSavingOverride(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(`/api/v1/admin/quotas/features/${encodeURIComponent(key)}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify(fields),
+      });
+      if (!handle(response.status) || !response.ok) {
+        setError("ذخیرهٔ سقف اختصاصی قابلیت ناموفق بود (کلید را بررسی کنید).");
+        return;
+      }
+      setMessage(`سقف اختصاصی «${key}» ذخیره شد.`);
+      setOverrideDraft({});
+      setOverrideKey("");
+      await load();
+    } finally {
+      setSavingOverride(false);
+    }
+  }
+
+  async function removeOverride(key: string) {
+    setError("");
+    setMessage("");
+    const response = await fetch(`/api/v1/admin/quotas/features/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: authHeaders,
+    });
+    if (!handle(response.status) || !response.ok) {
+      setError("حذف سقف اختصاصی ناموفق بود.");
+      return;
+    }
+    setMessage(`سقف اختصاصی «${key}» حذف شد و به سقف کلی برمی‌گردد.`);
+    await load();
+  }
 
   async function savePolicy(event: React.FormEvent) {
     event.preventDefault();
@@ -248,6 +306,73 @@ export default function AdminRolesQuotasPanel({
             </button>
           </form>
         )}
+      </section>
+
+      <section className="admin-card">
+        <div className="card-heading">
+          <div>
+            <h2>سقف مصرف به‌تفکیک قابلیت</h2>
+            <p>
+              برای هر قابلیت (کلید مثل <code dir="ltr">quiz</code> یا <code dir="ltr">chat</code>) می‌توانید
+              سقف اختصاصی تعیین کنید. فیلد خالی یعنی همان مقدار سقف کلی. شمارنده‌ها جدا از هم هستند.
+            </p>
+          </div>
+        </div>
+
+        {Object.keys(overrides).length === 0 ? (
+          <p className="admin-muted">هنوز سقف اختصاصی‌ای ثبت نشده است.</p>
+        ) : (
+          <ul className="admin-list">
+            {Object.entries(overrides).map(([key, values]) => (
+              <li key={key} className="admin-row">
+                <strong dir="ltr">{key}</strong>
+                <span dir="ltr">
+                  {Object.entries(values)
+                    .map(([name, value]) => `${name}=${value}`)
+                    .join("  ")}
+                </span>
+                <button type="button" className="admin-theme-chip" onClick={() => void removeOverride(key)}>
+                  حذف
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <form className="admin-form" onSubmit={saveOverride}>
+          <div className="admin-grid">
+            <label className="form-field">
+              <span>کلید قابلیت</span>
+              <input
+                dir="ltr"
+                type="text"
+                placeholder="quiz"
+                value={overrideKey}
+                onChange={(event) => setOverrideKey(event.target.value)}
+              />
+            </label>
+            {POLICY_FIELDS.map((field) => (
+              <label key={field.key} className="form-field">
+                <span>
+                  {field.label} <small className="admin-muted">(خالی = کلی)</small>
+                </span>
+                <input
+                  dir="ltr"
+                  type="number"
+                  min={0}
+                  value={overrideDraft[field.key] ?? ""}
+                  onChange={(event) =>
+                    setOverrideDraft({ ...overrideDraft, [field.key]: event.target.value })
+                  }
+                />
+              </label>
+            ))}
+          </div>
+          <button className="primary-button admin-submit" type="submit" disabled={savingOverride}>
+            {savingOverride ? <LoaderCircle size={17} className="spin" /> : <Save size={17} />}
+            ذخیرهٔ سقف اختصاصی
+          </button>
+        </form>
       </section>
 
       <section className="admin-card">

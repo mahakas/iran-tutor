@@ -16,6 +16,11 @@ from app.services.retrieval_service import close_qdrant
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    from app.core.config import get_settings
+    from app.core.production_guard import enforce_production_settings
+
+    enforce_production_settings(get_settings())  # raises in production with weak secrets
+    _warn_insecure_admin_defaults()
     await seed_database()
     await load_runtime_overrides_from_db()
     try:
@@ -24,6 +29,22 @@ async def lifespan(_: FastAPI):
         await close_qdrant()
         await close_llm_clients()
         await engine.dispose()
+
+
+_INSECURE_ADMIN_PASSWORDS = {"", "123", "admin", "password", "change_me", "changeme"}
+
+
+def _warn_insecure_admin_defaults() -> None:
+    """Log loudly when the admin login still uses a known-weak default (never blocks startup)."""
+    import logging
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if (settings.admin_password or "").strip().lower() in _INSECURE_ADMIN_PASSWORDS:
+        logging.getLogger("app.security").warning(
+            "ADMIN_PASSWORD is a known-weak default; set a strong value in .env before any real use."
+        )
 
 
 app = FastAPI(title="Iran AI Tutor", version="0.1.0", lifespan=lifespan)

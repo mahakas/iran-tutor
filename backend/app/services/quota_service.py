@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -33,6 +34,11 @@ DEFAULT_QUOTA_POLICY: dict[str, int] = {
 }
 
 QUOTA_POLICY_KEY = "quotas"
+# Per-capability overrides live under `quotas.per_feature[feature_key]`. Missing fields
+# inherit the global policy, so an override can tighten one limit and leave the rest.
+PER_FEATURE_KEY = "per_feature"
+OVERRIDABLE_LIMITS = tuple(DEFAULT_QUOTA_POLICY.keys())
+FEATURE_KEY_PATTERN = r"^[a-z][a-z0-9_]{1,63}$"
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,44 @@ async def get_quota_policy(session: AsyncSession) -> dict[str, int]:
                 if key in policy and isinstance(value, int) and value >= 0:
                     policy[key] = value
     return policy
+
+
+def _clean_override(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: int(value)
+        for key, value in raw.items()
+        if key in OVERRIDABLE_LIMITS and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    }
+
+
+async def get_feature_overrides(session: AsyncSession) -> dict[str, dict[str, int]]:
+    """Per-capability overrides, keyed by feature_key (empty when none are configured)."""
+    from app.models.auth import BillingSettings
+
+    try:
+        billing = await session.get(BillingSettings, 1)
+    except Exception:  # noqa: BLE001 - never block an AI call on policy lookup
+        return {}
+    raw = getattr(billing, "system_config", None) if billing is not None else None
+    if not isinstance(raw, dict) or not isinstance(raw.get(QUOTA_POLICY_KEY), dict):
+        return {}
+    per_feature = raw[QUOTA_POLICY_KEY].get(PER_FEATURE_KEY)
+    if not isinstance(per_feature, dict):
+        return {}
+    return {
+        str(key): cleaned
+        for key, value in per_feature.items()
+        if (cleaned := _clean_override(value))
+    }
+
+
+async def get_feature_limits(session: AsyncSession, feature_key: str) -> dict[str, int]:
+    """Effective limits for one capability: global policy overlaid with its override."""
+    policy = await get_quota_policy(session)
+    overrides = await get_feature_overrides(session)
+    return {**policy, **overrides.get(feature_key, {})}
 
 
 async def get_or_create_quota(
@@ -112,7 +156,7 @@ async def enforce_ai_quota(
     """Raise HTTP 402/429 when this user may not spend an AI call right now."""
     # Existing plan/token gate (raises 402/403 with Persian messages).
     ensure_user_can_consume(user, now=now)
-    policy = await get_quota_policy(session)
+    policy = await get_feature_limits(session, feature_key)
 
     rate = await check_rate_limit(
         identity=user.id,
@@ -203,7 +247,7 @@ async def record_ai_usage(
 async def get_quota_snapshot(
     session: AsyncSession, *, user_id: str, feature_key: str = "*"
 ) -> dict[str, int]:
-    policy = await get_quota_policy(session)
+    policy = await get_feature_limits(session, feature_key)
     quota = await get_or_create_quota(session, user_id=user_id, feature_key=feature_key)
     return {
         "daily_tokens_used": quota.daily_tokens_used,

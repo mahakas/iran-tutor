@@ -814,7 +814,39 @@ async def probe_endpoint(
                         "model": prompt_model,
                         "error": _scrub(f"{type(error).__name__}: {error}"),
                     }
+    await _audit_provider_probe(base=base, model=(model or None), result=result)
     return result
+
+
+async def _audit_provider_probe(*, base: str, model: str | None, result: dict[str, Any]) -> None:
+    """Glass-box record of an admin connectivity probe (never stores the key or raw error body)."""
+    prompt = result.get("prompt_test") or None
+    prompt_ok = bool(prompt and prompt.get("ok"))
+    summary = {
+        "base_url": base,
+        "ok": bool(result.get("ok")),
+        "status_code": result.get("status_code"),
+        "models_count": int(result.get("models_count") or 0),
+        "prompt_ok": prompt_ok if prompt is not None else None,
+    }
+    try:
+        import json
+
+        await _write_audit(
+            ctx=CallContext(feature_key="provider_probe", user_id=None, session_id=None),
+            route=None,
+            model_name=model,
+            messages=[{"role": "system", "content": "admin provider connectivity probe"}],
+            response_text=json.dumps(summary, ensure_ascii=False),
+            tokens_in=0,
+            tokens_out=0,
+            latency_ms=int(result.get("latency_ms") or 0),
+            status=STATUS_SUCCESS if summary["ok"] else STATUS_ERROR,
+            error_message=None if summary["ok"] else str(result.get("error") or "probe failed")[:500],
+            flag_reason="provider_probe",
+        )
+    except Exception:  # noqa: BLE001 - observability must not break admin tests
+        logger.exception("ai_gateway.provider_probe_audit_failed")
 
 
 async def probe_provider(
@@ -853,6 +885,7 @@ async def record_decision_audit(
     decision: dict[str, Any],
     flag_reason: str | None = None,
     session: AsyncSession | None = None,
+    status: str = STATUS_SUCCESS,
 ) -> str | None:
     """Audit a non-LLM decision (e.g. router heuristic fallback) in `ai_audit_logs`.
 
@@ -872,7 +905,7 @@ async def record_decision_audit(
         tokens_in=0,
         tokens_out=0,
         latency_ms=0,
-        status=STATUS_SUCCESS,
+        status=status,
         flag_reason=flag_reason,
         session=session,
     )

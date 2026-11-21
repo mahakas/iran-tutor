@@ -35,6 +35,7 @@ from app.services.ai_gateway import (
     complete_text_via_gateway,
 )
 from app.services.learning_blocks import LearningBlock, blocks_from_answer, parse_blocks_json
+from app.services.grounding_guard import check_textbook_grounding
 from app.services.quota_service import enforce_ai_quota
 
 logger = logging.getLogger(__name__)
@@ -324,6 +325,15 @@ async def run_capability_text(
     )
     answer = result.content if isinstance(result.content, str) else str(result.content)
     blocks = blocks_from_answer(answer, citations)
+    await check_textbook_grounding(
+        session,
+        capability_key=capability_key,
+        feature_key=feature_key or capability_key,
+        book_id=book_id,
+        citations=citations,
+        user_id=user_id,
+        session_id=session_id,
+    )
     return result, blocks, skill
 
 
@@ -417,6 +427,14 @@ async def run_capability_json(
         ],
         model=model,
         session=session,
+    )
+    await check_textbook_grounding(
+        session,
+        capability_key=capability_key,
+        feature_key=feature_key or capability_key,
+        book_id=book_id,
+        citations=citations,
+        user_id=user_id,
     )
     return result, skill
 

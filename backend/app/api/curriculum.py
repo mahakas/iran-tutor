@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import require_student
 from app.db.session import get_session
+from app.models.capabilities import SourceFigure
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.auth import User
+from app.services.capability_service import check_capability_access
+from app.services.kb_ingestion_service import figures_dir
+from app.services.search_normalize import search_key, sql_search_key
 from app.services.validation import validate_major_code
 
 router = APIRouter(prefix="/api/v1/curriculum", tags=["curriculum"])
@@ -78,7 +87,7 @@ async def search_curriculum(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     term = q.strip()
-    pattern = f"%{term}%" if term else None
+    pattern = f"%{search_key(term)}%" if term else None
 
     book_stmt = (
         select(Book, Grade.number, Grade.title, Major.code, Major.title)
@@ -88,7 +97,7 @@ async def search_curriculum(
     )
     if pattern is not None:
         book_stmt = book_stmt.where(
-            or_(Book.title.ilike(pattern), Grade.title.ilike(pattern), Major.title.ilike(pattern))
+            or_(sql_search_key(Book.title).like(pattern), sql_search_key(Grade.title).like(pattern), sql_search_key(Major.title).like(pattern))
         )
     book_rows = (await session.execute(book_stmt.order_by(Book.title).limit(limit))).all()
 
@@ -102,9 +111,9 @@ async def search_curriculum(
     if pattern is not None:
         topic_stmt = topic_stmt.where(
             or_(
-                BookPage.chapter_title.ilike(pattern),
-                BookPage.markdown_content.ilike(pattern),
-                Book.title.ilike(pattern),
+                sql_search_key(BookPage.chapter_title).like(pattern),
+                sql_search_key(BookPage.markdown_content).like(pattern),
+                sql_search_key(Book.title).like(pattern),
             )
         )
     topic_rows = (
@@ -138,3 +147,33 @@ async def search_curriculum(
             for page, book_title, grade_num, major_code in topic_rows
         ],
     }
+
+
+@router.get("/books/{book_id}/figures/{figure_id}/image")
+async def student_figure_image(
+    book_id: int,
+    figure_id: int,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    """Read-only figure image for students. Only for books with status=ready.
+
+    The admin image route (`/api/v1/admin/kb/figures/{id}/image`) stays admin-only.
+    The figure must belong to `book_id`, and its file must live under that book's figures folder.
+    """
+    await check_capability_access(session, "immersive_reader", current_user)
+    book = await session.get(Book, book_id)
+    if book is None or book.status != BookStatus.ready:
+        raise HTTPException(status_code=404, detail="کتاب آماده‌ای با این شناسه یافت نشد.")
+    figure = await session.get(SourceFigure, figure_id)
+    if figure is None or figure.book_id != book_id:
+        raise HTTPException(status_code=404, detail="شکل یافت نشد.")
+    root = figures_dir(book_id).resolve()
+    path = Path(figure.image_path).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="فایل تصویر شکل در دسترس نیست.")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"},
+    )
