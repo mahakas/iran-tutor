@@ -83,7 +83,7 @@ class Skill(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    slug: Mapped[str] = mapped_column(String(96), unique=True, nullable=False)
+    slug: Mapped[str] = mapped_column(String(96), nullable=False)
     capability_key: Mapped[str] = mapped_column(
         ForeignKey("capabilities.key"), nullable=False
     )

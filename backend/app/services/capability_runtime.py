@@ -25,7 +25,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.auth import User
 from app.models.capabilities import Skill, SkillVersion
+from app.services.capability_service import require_capability_enabled
 from app.services.ai_gateway import (
     CallContext,
     GatewayResult,
@@ -33,6 +35,7 @@ from app.services.ai_gateway import (
     complete_text_via_gateway,
 )
 from app.services.learning_blocks import LearningBlock, blocks_from_answer, parse_blocks_json
+from app.services.quota_service import enforce_ai_quota
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +239,30 @@ async def rollback_skill(
     return skill
 
 
+async def enforce_capability_call(
+    session: AsyncSession | None,
+    capability_key: str,
+    *,
+    user: User | None,
+    feature_key: str,
+) -> None:
+    """Pre-call gate used by every runtime execution (Phase 2 hardening).
+
+    1. The capability must exist and be enabled for the user's role/plan
+       (`require_capability_enabled`: 404 unknown, 403 disabled/not allowed).
+    2. When a user is known, the AI quota / rate limit is consumed first
+       (`enforce_ai_quota`: 402/403/429). The gateway itself does not gate quota.
+
+    Without a DB session no gate can be evaluated, so callers must pass one
+    unless they explicitly run in a non-enforcing mode (admin skill test).
+    """
+    if session is None:
+        raise RuntimeError("capability calls require a database session for enforcement")
+    await require_capability_enabled(session, capability_key, user)
+    if user is not None:
+        await enforce_ai_quota(session, user=user, feature_key=feature_key)
+
+
 async def run_capability_text(
     *,
     session: AsyncSession | None,
@@ -252,6 +279,8 @@ async def run_capability_text(
     grade_scope: str | None = None,
     extra_system: str | None = None,
     model: str | None = None,
+    user: User | None = None,
+    enforce: bool = True,
 ) -> tuple[GatewayResult, list[LearningBlock], Skill | None]:
     """Execute one capability call: skill prompt -> gateway -> typed blocks.
 
@@ -261,6 +290,10 @@ async def run_capability_text(
     """
     skill: Skill | None = None
     system_prompt = extra_system or "تو معلم خصوصی فارسیِ دانش‌آموزان ایران هستی."
+    if enforce:
+        await enforce_capability_call(
+            session, capability_key, user=user, feature_key=feature_key or capability_key
+        )
     if session is not None:
         skill = await load_active_skill(
             session, capability_key, subject_scope=subject_scope, grade_scope=grade_scope
@@ -305,12 +338,15 @@ async def test_skill(
     skill = await get_skill_by_slug(session, slug)
     if skill is None:
         raise HTTPException(status_code=404, detail=f"مهارت «{slug}» یافت نشد.")
+    # Admin test: non-enforcing (admins may test a capability before enabling it),
+    # but the call still goes through the gateway and is audited.
     result, blocks, _ = await run_capability_text(
         session=session,
         capability_key=skill.capability_key,
         user_text=sample_input,
         user_id=user_id,
         textbook_strict=False,
+        enforce=False,
     )
     answer = result.content if isinstance(result.content, str) else str(result.content)
     return {
@@ -342,10 +378,16 @@ async def run_capability_json(
     subject_scope: str | None = None,
     grade_scope: str | None = None,
     model: str | None = None,
+    user: User | None = None,
+    enforce: bool = True,
 ) -> tuple[GatewayResult, Skill | None]:
     """JSON variant of :func:`run_capability_text` (structured output skills)."""
     skill: Skill | None = None
     system_prompt = "تو یک موتور آموزشی فارسی هستی. فقط JSON برگردان."
+    if enforce:
+        await enforce_capability_call(
+            session, capability_key, user=user, feature_key=feature_key or capability_key
+        )
     if session is not None:
         skill = await load_active_skill(
             session, capability_key, subject_scope=subject_scope, grade_scope=grade_scope

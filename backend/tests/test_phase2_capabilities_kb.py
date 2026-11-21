@@ -708,3 +708,171 @@ async def test_trigger_defaults_end_page_from_pdf_file(phase2_env, tmp_path, mon
     assert resp.status_code == 202
     assert resp.json()["job"]["end_page"] == 3
     assert resp.json()["job"]["total_pages"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 review: runtime enforcement, web upload end-to-end, figure extraction
+# ---------------------------------------------------------------------------
+
+
+def _fake_gateway_result():
+    from app.services.ai_gateway import GatewayResult
+
+    return GatewayResult(
+        content="پاسخ آزمایشی",
+        model_name="fake-model",
+        latency_ms=1,
+        tokens_in=1,
+        tokens_out=1,
+        audit_id="audit-1",
+        status="ok",
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_blocks_disabled_capability_before_gateway(phase2_env, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.services import capability_runtime
+
+    calls = []
+
+    async def _gateway(**kwargs):
+        calls.append(kwargs)
+        return _fake_gateway_result()
+
+    monkeypatch.setattr(capability_runtime, "complete_text_via_gateway", _gateway)
+    async with phase2_env() as session:
+        cap = await session.get(Capability, "chat")
+        cap.is_enabled = False
+        await session.commit()
+        with pytest.raises(HTTPException) as info:
+            await capability_runtime.run_capability_text(
+                session=session, capability_key="chat", user_text="سلام"
+            )
+    assert info.value.status_code == 403
+    assert calls == []  # the gateway was never reached
+
+
+@pytest.mark.asyncio
+async def test_runtime_enforces_quota_before_gateway(phase2_env, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.models.auth import User
+    from app.services import capability_runtime
+
+    calls = []
+
+    async def _gateway(**kwargs):
+        calls.append(kwargs)
+        return _fake_gateway_result()
+
+    async def _quota_exceeded(session, *, user, feature_key, now=None):
+        raise HTTPException(status_code=429, detail="quota")
+
+    monkeypatch.setattr(capability_runtime, "complete_text_via_gateway", _gateway)
+    monkeypatch.setattr(capability_runtime, "enforce_ai_quota", _quota_exceeded)
+    async with phase2_env() as session:
+        user = User(phone_number="09120000001", role="student", plan_code="trial")
+        session.add(user)
+        await session.commit()
+        with pytest.raises(HTTPException) as info:
+            await capability_runtime.run_capability_text(
+                session=session, capability_key="chat", user_text="سلام", user=user
+            )
+    assert info.value.status_code == 429
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_enabled_call_goes_through_gateway_with_skill(phase2_env, monkeypatch):
+    from app.services import capability_runtime
+
+    calls = []
+
+    async def _gateway(**kwargs):
+        calls.append(kwargs)
+        return _fake_gateway_result()
+
+    monkeypatch.setattr(capability_runtime, "complete_text_via_gateway", _gateway)
+    async with phase2_env() as session:
+        result, blocks, skill = await capability_runtime.run_capability_text(
+            session=session, capability_key="chat", user_text="سلام"
+        )
+    assert len(calls) == 1
+    assert calls[0]["ctx"].skill_id == "tutor_core"
+    assert skill is not None and skill.slug == "tutor_core"
+    assert result.content == "پاسخ آزمایشی"
+    assert [b.type for b in blocks][0] == "text_markdown"
+
+
+@pytest.mark.asyncio
+async def test_admin_skill_test_may_run_disabled_capability(phase2_env, monkeypatch):
+    from app.services import capability_runtime
+
+    calls = []
+
+    async def _gateway(**kwargs):
+        calls.append(kwargs)
+        return _fake_gateway_result()
+
+    monkeypatch.setattr(capability_runtime, "complete_text_via_gateway", _gateway)
+    async with phase2_env() as session:
+        cap = await session.get(Capability, "chat")
+        cap.is_enabled = False
+        await session.commit()
+        out = await capability_runtime.test_skill(
+            session=session, slug="tutor_core", sample_input="آزمایش"
+        )
+    assert len(calls) == 1  # admin test still goes through the gateway
+    assert out["answer"] == "پاسخ آزمایشی"
+
+
+@pytest.mark.asyncio
+async def test_web_upload_from_admin_ingests_and_extracts_figures_without_cli(
+    phase2_env, tmp_path, monkeypatch
+):
+    """Upload a PDF via /api/v1/admin/books/upload-and-ingest (no CLI involved).
+
+    The vision model is replaced by a stub so no network call happens; everything
+    else (job tracking, book status, figure extraction and storage) is real.
+    """
+    from app.api import admin as admin_api
+
+    monkeypatch.setattr(admin_api, "UPLOAD_DIR", tmp_path / "uploads")
+    pdf_bytes_path = tmp_path / "upload.pdf"
+    _make_pdf_with_image(pdf_bytes_path, pages=2)
+
+    async def _stub_ingest(**kwargs):
+        return {"failed_pages": [], "totals": {}}
+
+    monkeypatch.setattr(kb_ingestion_service, "ingest_book_pages", _stub_ingest)
+    async with _client() as client:
+        with open(pdf_bytes_path, "rb") as handle:
+            resp = await client.post(
+                "/api/v1/admin/books/upload-and-ingest",
+                headers=ADMIN_HEADERS,
+                files={"file": ("book.pdf", handle, "application/pdf")},
+                data={
+                    "grade_number": "12",
+                    "major_code": "math_physics",
+                    "book_title": "کتاب وب",
+                    "start_page": "1",
+                    "end_page": "2",
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        job_id, book_id = payload["job_id"], payload["book_id"]
+        job_resp = await client.get(f"/api/v1/admin/kb/jobs/{job_id}", headers=ADMIN_HEADERS)
+        figs = await client.get(f"/api/v1/admin/kb/books/{book_id}/figures", headers=ADMIN_HEADERS)
+    job = job_resp.json()["job"]
+    assert job["status"] == kb_ingestion_service.JOB_COMPLETED
+    assert job["total_pages"] == 2
+    figures = figs.json()["figures"]
+    assert len(figures) >= 1
+    assert Path(figures[0]["image_path"]).is_file()
+    assert figures[0]["pdf_page_index"] == 1
+    async with phase2_env() as session:
+        book = await session.get(Book, book_id)
+    assert book.status == BookStatus.ready

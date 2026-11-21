@@ -45,7 +45,8 @@ def upgrade() -> None:
     op.create_table(
         "skills",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("slug", sa.String(length=96), nullable=False, unique=True),
+        sa.Column("slug", sa.String(length=96), nullable=False),
+        sa.UniqueConstraint("slug", name="uq_skills_slug"),
         sa.Column("capability_key", sa.String(length=64), sa.ForeignKey("capabilities.key"), nullable=False),
         sa.Column("title_fa", sa.String(length=160), nullable=False),
         sa.Column("subject_scope", sa.String(length=64), nullable=True),

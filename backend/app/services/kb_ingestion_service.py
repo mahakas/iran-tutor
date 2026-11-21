@@ -118,6 +118,18 @@ async def _update_job(job_id: str, **fields: Any) -> None:
         await session.commit()
 
 
+async def _extract_figures_safely(book_id: int, start_page: int, end_page: int) -> int | None:
+    try:
+        async with async_session_factory() as session:
+            result = await extract_source_figures(
+                session, book_id=book_id, start_page=start_page, end_page=end_page
+            )
+        return int(result["figures_created"])
+    except Exception:  # noqa: BLE001
+        logger.exception("kb source figure extraction failed book=%s", book_id)
+        return None
+
+
 async def _set_book_status(book_id: int, status: BookStatus) -> None:
     async with async_session_factory() as session:
         book = await session.get(Book, book_id)
@@ -160,15 +172,20 @@ async def run_ingestion_job(job_id: str) -> dict[str, Any]:
     processed = 0
     failed = 0
     pending: set[asyncio.Task] = set()
+    # Progress writes are serialised and read the counter when they run, so an
+    # older write can never overwrite a newer count (out-of-order commits).
+    progress_lock = asyncio.Lock()
+
+    async def _flush_progress() -> None:
+        async with progress_lock:
+            await _update_job(job_id, processed_pages=processed, failed_pages=failed)
 
     def _progress(payload: dict[str, Any]) -> None:
         nonlocal processed
         # ingest_book_pages ticks once per page with status done|skipped.
         if payload.get("status") in ("done", "skipped"):
             processed += 1
-        task = asyncio.get_running_loop().create_task(
-            _update_job(job_id, processed_pages=processed)
-        )
+        task = asyncio.get_running_loop().create_task(_flush_progress())
         pending.add(task)
         task.add_done_callback(pending.discard)
 
@@ -187,6 +204,8 @@ async def run_ingestion_job(job_id: str) -> dict[str, Any]:
             use_db=True,
             progress_callback=_progress,
         )
+        if pending:
+            await asyncio.gather(*list(pending), return_exceptions=True)
         failed = len(report.get("failed_pages") or [])
         cancelled = await _is_cancelled(job_id)
         if cancelled:
@@ -199,6 +218,11 @@ async def run_ingestion_job(job_id: str) -> dict[str, Any]:
             )
             return {"ok": False, "error": "cancelled", "report": report}
         await _set_book_status(book_db_id, BookStatus.ready)
+        # Source figures are part of the pipeline, not a manual step. A figure
+        # failure must not fail the (already successful) text ingestion.
+        figures_count = await _extract_figures_safely(book_db_id, start_page, end_page)
+        if figures_count is not None:
+            report = {**report, "figures_created": figures_count}
         await _update_job(
             job_id,
             status=JOB_COMPLETED,
