@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.runtime_config import get_runtime_overrides
@@ -20,6 +20,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # Deployment environment. `production` turns weak secrets into a startup error
+    # (see app.core.production_guard). Reads APP_ENV, falling back to ENVIRONMENT.
+    app_env: str = Field(default="local", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
 
     demo_mode: bool = False
     llm_base_url: str = Field(min_length=1)

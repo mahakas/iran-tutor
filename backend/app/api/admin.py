@@ -2415,10 +2415,75 @@ async def delete_feature_route(
 
 @protected_router.get("/quotas")
 async def get_quota_policy(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
-    from app.services.quota_service import DEFAULT_QUOTA_POLICY, get_quota_policy as read_policy
+    from app.services.quota_service import (
+        DEFAULT_QUOTA_POLICY,
+        get_feature_overrides,
+        get_quota_policy as read_policy,
+    )
 
     policy = await read_policy(session)
-    return {"policy": policy, "defaults": DEFAULT_QUOTA_POLICY}
+    overrides = await get_feature_overrides(session)
+    return {"policy": policy, "defaults": DEFAULT_QUOTA_POLICY, "feature_overrides": overrides}
+
+
+@protected_router.put("/quotas/features/{feature_key}")
+async def set_feature_quota_override(
+    feature_key: str,
+    body: QuotaPolicyBody,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Set per-capability limits. Omitted fields keep the global value (inherit)."""
+    import re
+
+    from app.services.quota_service import (
+        FEATURE_KEY_PATTERN,
+        PER_FEATURE_KEY,
+        QUOTA_POLICY_KEY,
+        get_feature_overrides,
+    )
+
+    if not re.fullmatch(FEATURE_KEY_PATTERN, feature_key):
+        raise HTTPException(status_code=422, detail="کلید قابلیت معتبر نیست (حروف کوچک لاتین، عدد و _).")
+    fields = body.model_dump(exclude_none=True)
+    if not fields:
+        raise HTTPException(status_code=422, detail="حداقل یک سقف برای این قابلیت وارد کنید.")
+
+    billing = await get_or_init_billing_settings(session)
+    config = dict(billing.system_config or {})
+    quotas = dict(config.get(QUOTA_POLICY_KEY) or {})
+    per_feature = dict(quotas.get(PER_FEATURE_KEY) or {})
+    per_feature[feature_key] = {**(await get_feature_overrides(session)).get(feature_key, {}), **fields}
+    quotas[PER_FEATURE_KEY] = per_feature
+    config[QUOTA_POLICY_KEY] = quotas
+    billing.system_config = config
+    from sqlalchemy.orm.attributes import flag_modified
+
+    flag_modified(billing, "system_config")
+    await session.commit()
+    return {"feature_key": feature_key, "override": per_feature[feature_key]}
+
+
+@protected_router.delete("/quotas/features/{feature_key}")
+async def delete_feature_quota_override(
+    feature_key: str, session: AsyncSession = Depends(get_session)
+) -> dict[str, object]:
+    from app.services.quota_service import PER_FEATURE_KEY, QUOTA_POLICY_KEY
+
+    billing = await get_or_init_billing_settings(session)
+    config = dict(billing.system_config or {})
+    quotas = dict(config.get(QUOTA_POLICY_KEY) or {})
+    per_feature = dict(quotas.get(PER_FEATURE_KEY) or {})
+    if feature_key not in per_feature:
+        raise HTTPException(status_code=404, detail="برای این قابلیت سقف اختصاصی ثبت نشده است.")
+    per_feature.pop(feature_key)
+    quotas[PER_FEATURE_KEY] = per_feature
+    config[QUOTA_POLICY_KEY] = quotas
+    billing.system_config = config
+    from sqlalchemy.orm.attributes import flag_modified
+
+    flag_modified(billing, "system_config")
+    await session.commit()
+    return {"deleted": True, "feature_key": feature_key}
 
 
 @protected_router.put("/quotas")
@@ -2437,7 +2502,9 @@ async def update_quota_policy(
     for key, value in body.model_dump(exclude_none=True).items():
         if key in current:
             current[key] = int(value)
-    config[QUOTA_POLICY_KEY] = current
+    # Keep per-capability overrides: only the global keys are replaced here.
+    previous = config.get(QUOTA_POLICY_KEY) if isinstance(config.get(QUOTA_POLICY_KEY), dict) else {}
+    config[QUOTA_POLICY_KEY] = {**previous, **current}
     billing.system_config = config
     from sqlalchemy.orm.attributes import flag_modified
 

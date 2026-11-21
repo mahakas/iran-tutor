@@ -885,6 +885,7 @@ async def record_decision_audit(
     decision: dict[str, Any],
     flag_reason: str | None = None,
     session: AsyncSession | None = None,
+    status: str = STATUS_SUCCESS,
 ) -> str | None:
     """Audit a non-LLM decision (e.g. router heuristic fallback) in `ai_audit_logs`.
 
@@ -904,7 +905,7 @@ async def record_decision_audit(
         tokens_in=0,
         tokens_out=0,
         latency_ms=0,
-        status=STATUS_SUCCESS,
+        status=status,
         flag_reason=flag_reason,
         session=session,
     )

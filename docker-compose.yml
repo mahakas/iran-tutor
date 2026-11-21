@@ -1,4 +1,7 @@
 name: iran-ai-tutor
+# This file runs INFRASTRUCTURE only (PostgreSQL, Qdrant, Redis), bound to 127.0.0.1.
+# The API and web app run from source; the exact production sequence (env, migrate, start)
+# is in docs/RELEASE_READINESS.md section 4. Start infra with: docker compose up -d
 
 services:
   postgres:

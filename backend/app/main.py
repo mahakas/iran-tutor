@@ -16,6 +16,10 @@ from app.services.retrieval_service import close_qdrant
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    from app.core.config import get_settings
+    from app.core.production_guard import enforce_production_settings
+
+    enforce_production_settings(get_settings())  # raises in production with weak secrets
     _warn_insecure_admin_defaults()
     await seed_database()
     await load_runtime_overrides_from_db()
