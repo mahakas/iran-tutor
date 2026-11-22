@@ -761,7 +761,7 @@ async def _search_pgvector(
           AND e.major_code = :major_code
           AND bp.status = 'done'
           AND b.status = 'ready'
-          AND b.catalog_status <> 'pending_review'
+          AND b.catalog_status = ANY(:catalog_statuses)
           AND e.embedding_model = :embedding_model
           AND (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) >= 0.15
         ORDER BY e.embedding <=> CAST(:query_vector AS vector) ASC, bp.pdf_page_index ASC
