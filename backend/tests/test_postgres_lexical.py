@@ -46,7 +46,8 @@ async def test_postgres_search_query_is_scoped_and_uses_full_text_search(monkeyp
     assert "book_pages.status" in compiled
     assert "books.id" in compiled
     assert "grades.number" in compiled
-    assert "majors.code" in compiled
+    assert "books.id =" in compiled
+    assert "majors.code =" not in compiled
 
 
 def test_persian_lexical_query_strips_stopwords_and_normalizes_arabic_letters():
@@ -116,7 +117,7 @@ async def test_pgvector_search_compiles_scoped_cosine_query_and_routes_when_enab
     results = await retrieval_service.search_textbook(
         "سرعت متوسط چیست؟",
         grade_number=12,
-        major_code="math_physics",
+        major_code="electronics",
         book_id=2,
         top_k=5,
     )
@@ -127,6 +128,7 @@ async def test_pgvector_search_compiles_scoped_cosine_query_and_routes_when_enab
     assert observed["params"]["catalog_statuses"] == ["approved"]
     assert observed["params"]["book_id"] == 2
     assert observed["params"]["grade_number"] == 12
-    assert observed["params"]["major_code"] == "math_physics"
+    assert "major_code" not in observed["params"]
+    assert "e.major_code" not in observed["sql"]
     assert len(results) == 1
     assert results[0]["pdf_page_index"] == 15
