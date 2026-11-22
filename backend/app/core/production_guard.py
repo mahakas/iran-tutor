@@ -44,6 +44,8 @@ def production_violations(settings: Any) -> list[str]:
     problems: list[str] = []
     if bool(getattr(settings, "demo_mode", False)):
         problems.append("DEMO_MODE must be false in production (it exposes OTP codes in API responses)")
+    if bool(getattr(settings, "seed_mahdi_test_user", False)):
+        problems.append("SEED_MAHDI_TEST_USER must be false in production (fixed test credentials are not allowed)")
     if is_weak_admin_password(getattr(settings, "admin_password", None)):
         problems.append(
             f"ADMIN_PASSWORD is weak or default (must be at least {MIN_ADMIN_PASSWORD_LEN} characters and not a placeholder)"

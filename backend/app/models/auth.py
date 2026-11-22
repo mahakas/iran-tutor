@@ -64,6 +64,9 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     avatar_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Argon2id PHC string. Never store or return plaintext passwords.
+    password_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    phone_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     role: Mapped[str] = mapped_column(String(32), default="student", server_default="student", nullable=False)
     # Phase 1 RBAC metadata: grade level (1-12, null = unspecified), study major,
     # and an optional reference to the plans table alongside the legacy plan_code.
@@ -80,6 +83,8 @@ class User(Base):
     plan_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     plan_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Soft deletion preserves billing/audit foreign keys while anonymizing login identity.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -99,6 +104,9 @@ class OtpCode(Base):
     max_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    verification_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     sms_sender: str | None = None
     sms_template: str | None = None
     sms_webhook_url: str | None = None
+    # Explicitly seed one fixed local QA account. Production startup rejects this flag.
+    seed_mahdi_test_user: bool = False
     payment_provider: Literal["demo", "zarinpal"] = "demo"
     zarinpal_merchant_id: str | None = None
     zarinpal_sandbox: bool = False
