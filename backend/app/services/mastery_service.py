@@ -444,6 +444,7 @@ async def record_objective_evidence(
             select(LearningEvidence).where(
                 LearningEvidence.user_id == user_id,
                 LearningEvidence.objective_id == objective_id,
+                LearningEvidence.book_id == book_id,
                 LearningEvidence.source_type == source_type,
                 LearningEvidence.source_ref == source_ref,
             )
@@ -606,8 +607,20 @@ async def objective_tree(
             .where(
                 ObjectivePrerequisite.objective_id.in_(objective_ids),
                 CurriculumUnit.grade_id == book.grade_id,
+                CurriculumUnit.is_active.is_(True),
                 LearningObjective.is_active.is_(True),
                 scope_condition,
+                (
+                    and_(
+                        CurriculumUnit.academic_year_id.is_(None),
+                        CurriculumUnit.scope_code == "unspecified",
+                    )
+                    if book.academic_year_id is None
+                    else or_(
+                        CurriculumUnit.academic_year_id.is_(None),
+                        CurriculumUnit.academic_year_id == book.academic_year_id,
+                    )
+                ),
                 branch_scope_condition,
             )
         )
@@ -619,6 +632,7 @@ async def objective_tree(
             select(LearningEvidence)
             .where(
                 LearningEvidence.user_id == user_id,
+                LearningEvidence.book_id == book_id,
                 LearningEvidence.objective_id.in_(all_evidence_ids),
             )
             .order_by(LearningEvidence.observed_at.desc(), LearningEvidence.id.desc())

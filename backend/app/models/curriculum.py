@@ -289,9 +289,10 @@ class LearningEvidence(Base):
         UniqueConstraint(
             "user_id",
             "objective_id",
+            "book_id",
             "source_type",
             "source_ref",
-            name="uq_learning_evidence_source",
+            name="uq_learning_evidence_book_source",
         ),
     )
 

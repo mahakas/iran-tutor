@@ -20,7 +20,7 @@ from app.main import app
 from app.models.auth import User
 from app.models.curriculum import (
     Book, BookCurriculumLink, BookPage, BookPageObjective, BookStatus,
-    CurriculumUnit, Grade, LearningObjective, Major, PageStatus, Subject,
+    CurriculumUnit, Grade, LearningEvidence, LearningObjective, Major, PageStatus, Subject,
 )
 from app.models.exam import ExamSession, ExamStatus
 from app.models.flashcards import Flashcard, FlashcardDeck
