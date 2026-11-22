@@ -90,7 +90,9 @@ async def _load_official_book_context(
         major_code=None,
         chapter_numbers=frozenset({chapter_number}) if chapter_number is not None else None,
     )
-    hits = await search_textbook_scopes(problem, scopes=[scope], top_k=8)
+    hits = await search_textbook_scopes(
+        problem, scopes=[scope], top_k=8, route_session=session
+    )
     if not hits:
         raise HTTPException(
             status_code=409,

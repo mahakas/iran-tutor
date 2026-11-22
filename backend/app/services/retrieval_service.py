@@ -640,11 +640,13 @@ def merge_hybrid_results(
 
 
 async def _search_pgvector_scopes(
-    query: str, *, scopes: Sequence[TextbookScope], limit: int
+    query: str, *, scopes: Sequence[TextbookScope], limit: int,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
         texts=[query],
+        session=route_session,
     )
     vector = embedding_result.content[0]
     embedding_model = (
@@ -727,10 +729,12 @@ async def _search_pgvector(
     major_code: str | None,
     book_id: int,
     limit: int,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=book_id),
         texts=[query],
+        session=route_session,
     )
     vector = embedding_result.content[0]
     embedding_model = (
@@ -902,11 +906,13 @@ async def _filter_qdrant_points(
 
 
 async def _search_qdrant_scopes(
-    query: str, *, scopes: Sequence[TextbookScope], limit: int
+    query: str, *, scopes: Sequence[TextbookScope], limit: int,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
         texts=[query],
+        session=route_session,
     )
     vector = embedding_result.content[0]
     settings = get_settings()
@@ -957,6 +963,7 @@ async def _search_qdrant(
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=book_id),
         texts=[query],
+        session=route_session,
     )
     vector = embedding_result.content[0]
     settings = get_settings()
@@ -1002,6 +1009,7 @@ async def search_textbook_scopes(
     *,
     scopes: Sequence[TextbookScope],
     top_k: int = 5,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search across one or more exact (book, grade[, chapters]) scopes.
 
@@ -1025,11 +1033,11 @@ async def search_textbook_scopes(
         try:
             if get_settings().vector_backend == "pgvector":
                 vector_results = await _search_pgvector_scopes(
-                    query, scopes=scopes, limit=candidate_limit
+                    query, scopes=scopes, limit=candidate_limit, route_session=route_session
                 )
             else:
                 vector_results = await _search_qdrant_scopes(
-                    query, scopes=scopes, limit=candidate_limit
+                    query, scopes=scopes, limit=candidate_limit, route_session=route_session
                 )
         except Exception:  # noqa: BLE001 - lexical fallback is intentional
             logger.exception("vector search unavailable; using PostgreSQL lexical results")
@@ -1045,6 +1053,7 @@ async def search_textbook(
     major_code: str | None,
     book_id: int,
     top_k: int = 5,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search, always scoped to the exact selected grade and book edition.
 
@@ -1077,6 +1086,7 @@ async def search_textbook(
                     major_code=major_code,
                     book_id=book_id,
                     limit=candidate_limit,
+                    route_session=route_session,
                 )
             else:
                 vector_results = await _search_qdrant(
@@ -1085,6 +1095,7 @@ async def search_textbook(
                     major_code=major_code,
                     book_id=book_id,
                     limit=candidate_limit,
+                    route_session=route_session,
                 )
         except Exception:  # noqa: BLE001 - lexical fallback is intentional
             logger.exception("vector search unavailable; using PostgreSQL lexical results")
