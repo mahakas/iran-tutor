@@ -662,9 +662,10 @@ function RouteMatrix({
                       ))}
                   </select>
                   <div className="admin-muted" style={{ marginTop: 8 }}>
-                    <span>زنجیرهٔ جایگزین (به ترتیب اجرا)</span>
+                    <span>زنجیرهٔ جایگزین (به ترتیب اجرا، حداکثر ۸ مورد)</span>
                     <select
                       value=""
+                      disabled={draft.fallbackProviderIds.length >= 8}
                       onChange={(event) => {
                         const value = event.target.value;
                         if (!value || draft.fallbackProviderIds.includes(value)) return;
