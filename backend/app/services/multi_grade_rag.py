@@ -56,16 +56,19 @@ async def resolve_curriculum_book_ids(
     subject_ids: Sequence[int] | None = None,
     requested_book_ids: Sequence[int] | None = None,
 ) -> list[int]:
-    """Resolve only approved editions applicable to the selected branch/field/year.
+    """Resolve approved editions for the selected branch/field/year/subject.
 
-    This is the authorization boundary for multi-grade retrieval. Callers must
-    pass its returned IDs (not raw client-supplied IDs) to search_multi_grade.
+    An anchor edition must have at least one normalized subject link. This is
+    the authorization boundary for multi-grade retrieval; its returned IDs,
+    never raw client-supplied IDs, are passed to search_multi_grade.
     """
     grades = sorted({int(grade) for grade in grade_numbers})
     if not grades or any(grade not in (10, 11, 12) for grade in grades):
         raise ScopeError("grade_numbers must be within 10, 11, 12")
     if len(grades) > MAX_GRADES:
         raise ScopeError("too many grades")
+    if not subject_ids:
+        raise ScopeError("the anchor textbook must have an approved subject mapping for multi-grade retrieval")
     if not branch_code:
         raise ScopeError("branch_code is required for multi-grade retrieval")
 
