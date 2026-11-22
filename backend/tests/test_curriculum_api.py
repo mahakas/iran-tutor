@@ -186,7 +186,7 @@ async def test_resolve_book_scope_hides_pending_review_book():
         )
 
     assert error.value.status_code == 404
-\n
+
 from app.services.mastery_service import _evidence_progress
 
 
