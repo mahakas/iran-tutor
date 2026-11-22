@@ -267,10 +267,14 @@ async def _resolve_candidates(
     configured-but-unavailable route fails closed, avoiding a silent switch to
     credentials belonging to a different provider.
     """
-    if session is None:
-        return [None]
     try:
-        candidates = await resolve_feature_route_candidates(session, feature_key)
+        if session is not None:
+            candidates = await resolve_feature_route_candidates(session, feature_key)
+        else:
+            # Background jobs and some service-layer calls do not carry an
+            # HTTP request session. They must still honor admin routing.
+            async with async_session_factory() as route_session:
+                candidates = await resolve_feature_route_candidates(route_session, feature_key)
     except Exception as error:  # noqa: BLE001 - routing failures must not bypass governance
         logger.exception("ai_gateway.route_lookup_failed feature=%s", feature_key)
         raise RuntimeError("AI provider routing is temporarily unavailable") from error

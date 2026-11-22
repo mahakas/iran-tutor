@@ -267,3 +267,31 @@ async def test_embedding_query_route_requires_embedding_capability(monkeypatch):
         FakeSession(), "embedding_query"
     )
     assert resolved == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_without_request_session_still_resolves_admin_route(monkeypatch):
+    route = _route(7, "https://routed.example/v1", "routed-secret", "route")
+    sentinel_session = object()
+    opened: list[object] = []
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            opened.append(sentinel_session)
+            return sentinel_session
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def resolve(session, feature_key):
+        assert session is sentinel_session
+        assert feature_key == "chat"
+        return [route]
+
+    monkeypatch.setattr(ai_gateway, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr(ai_gateway, "resolve_feature_route_candidates", resolve)
+
+    resolved = await ai_gateway._resolve_candidates("chat", None)
+
+    assert resolved == [route]
+    assert opened == [sentinel_session]
