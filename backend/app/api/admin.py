@@ -35,6 +35,7 @@ from app.core.runtime_config import (
     set_runtime_overrides,
 )
 from app.db.session import async_session_factory
+from app.services.curriculum_access import is_student_visible_book
 from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User, UserFile, UserSession
 from app.models.chat import ChatSession
 from app.models.curriculum import (
@@ -349,6 +350,8 @@ async def list_learning_evidence(
             "rubric": dict(evidence.rubric_json or {}),
             "verification_status": evidence.verification_status,
             "feedback": evidence.feedback,
+            "review_note": evidence.review_note,
+            "reviewed_by": evidence.reviewed_by,
             "pdf_page_index": page.pdf_page_index if page is not None else None,
             "printed_page_number": page.printed_page_number if page is not None else None,
             "observed_at": evidence.observed_at.isoformat() if evidence.observed_at else None,
@@ -361,21 +364,116 @@ async def list_learning_evidence(
 async def review_learning_evidence(
     evidence_id: int,
     body: LearningEvidenceReviewBody,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    evidence = await session.get(LearningEvidence, evidence_id)
+    evidence = await session.scalar(
+        select(LearningEvidence)
+        .where(LearningEvidence.id == evidence_id)
+        .with_for_update()
+    )
     if evidence is None:
         raise HTTPException(status_code=404, detail="learning evidence not found")
+    if evidence.verification_status != "unverified":
+        raise HTTPException(
+            status_code=409,
+            detail="این شاهد قبلاً بازبینی شده است و بازبینی مجدد آن از این مسیر مجاز نیست.",
+        )
+    review_note = (body.review_note or "").strip()
+    if body.verification_status == "rejected" and not review_note:
+        raise HTTPException(
+            status_code=422,
+            detail="برای رد شاهد یادگیری، ثبت دلیل بازبینی الزامی است.",
+        )
+
+    # A positive decision is possible only for evidence attached to an
+    # approved edition and an active curriculum objective in the same scope.
+    book = await session.get(Book, evidence.book_id) if evidence.book_id is not None else None
+    objective = await session.get(LearningObjective, evidence.objective_id)
+    unit = await session.get(CurriculumUnit, objective.unit_id) if objective is not None else None
+    if body.verification_status == "verified":
+        if not is_student_visible_book(book) or objective is None or unit is None:
+            raise HTTPException(
+                status_code=409,
+                detail="برای تأیید شاهد، کتاب رسمیِ منتشرشده و هدف برنامهٔ درسی معتبر الزامی است.",
+            )
+        if not objective.is_active or not unit.is_active or unit.grade_id != book.grade_id:
+            raise HTTPException(
+                status_code=409,
+                detail="هدف یادگیری با پایه یا وضعیت کتاب انتخاب‌شده سازگار نیست.",
+            )
+        if unit.academic_year_id not in {None, book.academic_year_id}:
+            raise HTTPException(
+                status_code=409,
+                detail="هدف یادگیری متعلق به سال تحصیلی این نسخهٔ کتاب نیست.",
+            )
+        academic_year = (
+            await session.get(AcademicYear, book.academic_year_id)
+            if book.academic_year_id is not None
+            else None
+        )
+        if academic_year is not None and unit.scope_code not in {academic_year.code, "unspecified"}:
+            raise HTTPException(
+                status_code=409,
+                detail="دامنهٔ سال تحصیلی هدف یادگیری با نسخهٔ کتاب سازگار نیست.",
+            )
+        book_links = (
+            await session.scalars(
+                select(BookCurriculumLink).where(BookCurriculumLink.book_id == book.id)
+            )
+        ).all()
+        subject_ids = {link.subject_id for link in book_links if link.subject_id is not None}
+        if subject_ids and unit.subject_id not in subject_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="درس هدف یادگیری در محدودهٔ موضوعی این کتاب نیست.",
+            )
+        scoped_links = [link for link in book_links if link.branch_id is not None]
+        if scoped_links and not any(
+            link.branch_id == unit.branch_id
+            and (
+                link.field_of_study_id is None
+                or link.field_of_study_id == unit.field_of_study_id
+            )
+            for link in scoped_links
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="شاخه یا رشتهٔ هدف یادگیری با نسخهٔ کتاب سازگار نیست.",
+            )
+        page = await session.get(BookPage, evidence.book_page_id) if evidence.book_page_id else None
+        if evidence.book_page_id is not None:
+            if page is None or page.book_id != book.id or page.status != PageStatus.done:
+                raise HTTPException(
+                    status_code=409,
+                    detail="صفحهٔ منبع شاهد در کتاب انتخاب‌شده آماده یا معتبر نیست.",
+                )
+            mapped = await session.scalar(
+                select(BookPageObjective.id).where(
+                    BookPageObjective.book_page_id == page.id,
+                    BookPageObjective.objective_id == objective.id,
+                )
+            )
+            if mapped is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="هدف یادگیری به صفحهٔ منبع این شاهد متصل نیست.",
+                )
+
+    identity = getattr(request.state, "admin_identity", None) or {}
+    reviewer_id = identity.get("user_id")
+    reviewer_kind = str(identity.get("kind") or "admin")
     evidence.verification_status = body.verification_status
     evidence.reviewed_at = datetime.now(timezone.utc)
-    if body.review_note:
-        prior = (evidence.feedback or "").strip()
-        evidence.feedback = (prior + "\n\nبازبینی مدیر: " + body.review_note.strip()).strip()
+    evidence.reviewed_by = (f"user:{reviewer_id}" if reviewer_id else reviewer_kind)[:128]
+    evidence.review_note = review_note or None
     await session.commit()
     return {
         "evidence_id": evidence.id,
         "verification_status": evidence.verification_status,
         "reviewed_at": evidence.reviewed_at.isoformat() if evidence.reviewed_at else None,
+        "reviewed_by": evidence.reviewed_by,
+        "review_note": evidence.review_note,
     }
 
 

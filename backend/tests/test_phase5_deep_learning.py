@@ -900,9 +900,19 @@ async def test_admin_can_list_and_review_student_learning_evidence(env):
             params={"book_id": env.ids["book_id"], "verification_status": "unverified"},
             headers=ADMIN_HEADERS,
         )
+        missing_rejection_note = await client.patch(
+            f"/api/v1/admin/mastery/evidence/{evidence_id}/review",
+            json={"verification_status": "rejected", "review_note": ""},
+            headers=ADMIN_HEADERS,
+        )
         reviewed = await client.patch(
             f"/api/v1/admin/mastery/evidence/{evidence_id}/review",
             json={"verification_status": "verified", "review_note": "شاهد بررسی شد."},
+            headers=ADMIN_HEADERS,
+        )
+        duplicate_review = await client.patch(
+            f"/api/v1/admin/mastery/evidence/{evidence_id}/review",
+            json={"verification_status": "rejected", "review_note": "بازبینی دوم نباید پذیرفته شود."},
             headers=ADMIN_HEADERS,
         )
         verified = await client.get(
@@ -916,9 +926,14 @@ async def test_admin_can_list_and_review_student_learning_evidence(env):
     assert pending.json()["total"] == 1
     assert pending.json()["items"][0]["objective_id"] == objective_id
     assert pending.json()["items"][0]["book_id"] == env.ids["book_id"]
+    assert missing_rejection_note.status_code == 422
     assert reviewed.status_code == 200
     assert reviewed.json()["verification_status"] == "verified"
+    assert reviewed.json()["reviewed_by"] == "admin_session"
+    assert reviewed.json()["review_note"] == "شاهد بررسی شد."
+    assert duplicate_review.status_code == 409
     assert verified.status_code == 200
     assert verified.json()["total"] == 1
     assert verified.json()["items"][0]["verification_status"] == "verified"
-    assert "شاهد بررسی شد" in verified.json()["items"][0]["feedback"]
+    assert verified.json()["items"][0]["feedback"] == "پاسخ خودارزیابی دانش‌آموز"
+    assert verified.json()["items"][0]["review_note"] == "شاهد بررسی شد."
