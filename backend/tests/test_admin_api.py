@@ -235,6 +235,12 @@ async def test_fix_page_clears_warnings_supports_null_and_serves_admin_lists(mon
         title="فیزیک ۳",
         grade_id=12,
         major_id=1,
+        academic_year_id=None,
+        edition_label=None,
+        print_year=None,
+        publisher=None,
+        official_source_url=None,
+        catalog_status="approved",
         total_pdf_pages=1,
         status="ready",
     )
