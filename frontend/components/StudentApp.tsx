@@ -82,19 +82,45 @@ function errorMessage(payload: unknown, fallback: string) {
 }
 
 function sourceText(source: Source, lang: "fa" | "en") {
-  // Chat sources show book and chapter only; printed pages stay in the structured
-  // fields and are used by the immersive reader for click-through.
   const title = source.book_title ?? (lang === "en" ? "Textbook" : "کتاب درسی");
   const bookLabel = source.grade_number
     ? `${title} (${lang === "en" ? "Grade" : "پایه"} ${source.grade_number})`
     : title;
+  const scopeLabels = [
+    ...(source.branch_titles ?? []),
+    ...(source.field_titles ?? []),
+  ];
+  const scopeLabel = scopeLabels.length
+    ? `${lang === "en" ? "Scope" : "شاخه/رشته"}: ${scopeLabels.join(lang === "en" ? ", " : "، ")}`
+    : null;
+  const editionLabels = [
+    source.academic_year_code
+      ? `${lang === "en" ? "Academic year" : "سال تحصیلی"} ${source.academic_year_code}`
+      : null,
+    source.edition_label,
+    source.print_year
+      ? `${lang === "en" ? "Print" : "چاپ"} ${source.print_year}`
+      : null,
+    source.publisher
+      ? `${lang === "en" ? "Publisher" : "ناشر"}: ${source.publisher}`
+      : null,
+  ].filter(Boolean);
+  const editionLabel = editionLabels.length ? editionLabels.join(" · ") : null;
   const chapterLabel =
     source.chapter_number != null && source.chapter_title
       ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}: ${source.chapter_title}`
       : source.chapter_number != null
         ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}`
         : source.chapter_title ?? null;
-  return [bookLabel, chapterLabel].filter(Boolean).join(lang === "en" ? " · " : "، ");
+  const pageLabel =
+    source.printed_page_number != null
+      ? `${lang === "en" ? "Page" : "صفحه"} ${source.printed_page_number}`
+      : source.pdf_page_index != null
+        ? `${lang === "en" ? "PDF page" : "صفحه PDF"} ${source.pdf_page_index}`
+        : null;
+  return [bookLabel, scopeLabel, editionLabel, chapterLabel, pageLabel]
+    .filter(Boolean)
+    .join(lang === "en" ? " · " : "، ");
 }
 
 function uniqueSourceTexts(sources: Source[], lang: "fa" | "en") {
@@ -184,6 +210,7 @@ export default function StudentApp() {
   const appliedDefaultModeRef = useRef(false);
 
   const selectedBook = books.find((book) => String(book.id) === bookId);
+  const currentGrade = grades.find((grade) => grade.number === gradeNumber);
   const isUpperSecondary = gradeNumber !== null && gradeNumber >= 10;
   const hasMajor = Boolean(majorCode);
   const branchRequiresField = isUpperSecondary && (branchCode === "theoretical" || fields.length > 0);
@@ -853,6 +880,8 @@ export default function StudentApp() {
     draft,
     getActiveToken,
     gradeNumber,
+    branchCode,
+    isUpperSecondary,
     hasMajor,
     imageFile,
     lang,
@@ -1538,7 +1567,7 @@ export default function StudentApp() {
               <span>
                 {currentGrade?.title ?? (lang === "en" ? "Select Grade" : "انتخاب پایه")}
                 {hasMajor && majorCode
-                  ? ` · ${majors.find((major) => major.code === majorCode)?.title ?? ""}`
+                  ? ` · ${fields.find((field) => field.code === majorCode)?.title ?? ""}`
                   : ""}
               </span>
             </div>

@@ -83,6 +83,13 @@ export type Source = {
   book_id?: number;
   book_title?: string;
   grade_number?: number | null;
+  branch_titles?: string[];
+  field_titles?: string[];
+  subject_titles?: string[];
+  academic_year_code?: string | null;
+  edition_label?: string | null;
+  print_year?: number | null;
+  publisher?: string | null;
   chapter_number?: number | null;
   chapter_title?: string | null;
   pdf_page_index?: number | null;

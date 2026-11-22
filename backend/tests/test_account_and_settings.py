@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core import config as config_mod
 from app.db.base import Base
-from app.db.seed import seed_billing_settings, seed_grades, seed_majors, seed_plans
+from app.db.seed import seed_billing_settings, seed_curriculum_taxonomy, seed_grades, seed_majors, seed_plans
 from app.db.session import get_session
 from app.main import app
 from app.models.auth import BillingSettings, Plan, User, UserFile, UserSession
@@ -34,6 +34,7 @@ async def _setup_test_env(tmp_path, monkeypatch):
     async with factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await seed_curriculum_taxonomy(session)
         await seed_plans(session)
         await seed_billing_settings(session)
         await session.flush()
@@ -47,6 +48,7 @@ async def _setup_test_env(tmp_path, monkeypatch):
             pdf_file_path=str(tmp_path / "physics.pdf"),
             total_pdf_pages=1,
             status=BookStatus.ready,
+            catalog_status="approved",
         )
         session.add(book)
         await session.flush()

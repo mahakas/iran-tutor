@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.base import Base
-from app.db.seed import seed_grades, seed_majors
+from app.db.seed import seed_curriculum_taxonomy, seed_grades, seed_majors
 from app.models.concepts import ConceptLink
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
 from app.services import multi_grade_rag, retrieval_service
@@ -38,6 +38,7 @@ async def test_multi_grade_lexical_search_on_postgres(monkeypatch):
         async with factory() as session:
             await seed_grades(session)
             await seed_majors(session)
+            await seed_curriculum_taxonomy(session)
             major = await session.scalar(select(Major).where(Major.code == "math_physics"))
             books = {}
             for number, chapter, text in (
@@ -47,7 +48,7 @@ async def test_multi_grade_lexical_search_on_postgres(monkeypatch):
             ):
                 grade = await session.scalar(select(Grade).where(Grade.number == number))
                 book = Book(title=f"فیزیک {number}", grade_id=grade.id, major_id=major.id,
-                            pdf_file_path="/tmp/x.pdf", total_pdf_pages=3, status=BookStatus.ready)
+                            pdf_file_path="/tmp/x.pdf", total_pdf_pages=3, status=BookStatus.ready, catalog_status="approved")
                 session.add(book)
                 await session.flush()
                 session.add(BookPage(book_id=book.id, pdf_page_index=1, printed_page_number=40 + number,

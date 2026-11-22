@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.dependencies import require_student
 from app.db.base import Base
-from app.db.seed import seed_billing_settings, seed_grades, seed_majors, seed_plans
+from app.db.seed import seed_billing_settings, seed_curriculum_taxonomy, seed_grades, seed_majors, seed_plans
 from app.db.session import get_session
 from app.main import app
 from app.models.auth import User
@@ -47,7 +47,7 @@ from app.services import (
 from app.services.multi_grade_rag import ScopeError
 
 ADMIN_HEADERS = {"X-Admin-Username": "admin", "X-Admin-Password": "123"}
-NOW = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)
 ANSWER = "نیرو عاملی است که حرکت را تغییر می‌دهد. " * 6
 
 
@@ -65,6 +65,7 @@ async def env(tmp_path, monkeypatch):
     async with factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await seed_curriculum_taxonomy(session)
         await seed_plans(session)
         await seed_billing_settings(session)
         await capability_service.seed_capabilities(session)
@@ -84,6 +85,7 @@ async def env(tmp_path, monkeypatch):
                 pdf_file_path="/tmp/none.pdf",
                 total_pdf_pages=5,
                 status=BookStatus.ready,
+                catalog_status="approved",
             )
             session.add(book)
             await session.flush()

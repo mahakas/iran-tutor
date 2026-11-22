@@ -267,6 +267,8 @@ class CurriculumUnitInput(BaseModel):
     unit_type: Literal["chapter", "lesson", "topic", "skill"] = "chapter"
     parent_code: str | None = None
     academic_year_code: str | None = Field(default=None, max_length=24)
+    branch_code: str | None = Field(default=None, max_length=64)
+    field_code: str | None = Field(default=None, max_length=64)
     sort_order: int = 0
     source_url: str | None = None
     objectives: list[LearningObjectiveInput] = Field(default_factory=list)
@@ -289,7 +291,9 @@ class CurriculumCatalogImportBody(BaseModel):
 
 class BookApprovalBody(BaseModel):
     approved: bool
-\n\nclass LearningEvidenceReviewBody(BaseModel):
+
+
+class LearningEvidenceReviewBody(BaseModel):
     verification_status: Literal["verified", "rejected"]
     review_note: str | None = Field(default=None, max_length=2000)
 
@@ -316,6 +320,56 @@ async def review_learning_evidence(
     }
 
 
+
+
+def _validate_objective_unit_reuse(
+    existing_unit: CurriculumUnit | None,
+    target_unit: CurriculumUnit,
+) -> None:
+    """Never move a globally-coded objective away from its existing curriculum edition."""
+    if existing_unit is None or existing_unit.id != target_unit.id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "کد هدف یادگیری قبلاً به واحد یا نسخهٔ برنامهٔ درسی دیگری متصل شده است؛ "
+                "برای نسخهٔ جدید، کد یکتای نسخه‌دار تعریف کنید."
+            ),
+        )
+
+
+def _prerequisite_scope_is_compatible(
+    objective_unit: CurriculumUnit,
+    prerequisite_unit: CurriculumUnit,
+) -> bool:
+    """A prerequisite may be shared upward, but cannot be narrower than its objective."""
+    if objective_unit.grade_id != prerequisite_unit.grade_id:
+        return False
+
+    if objective_unit.scope_code == "unspecified":
+        if prerequisite_unit.scope_code != "unspecified":
+            return False
+    elif prerequisite_unit.scope_code not in {objective_unit.scope_code, "unspecified"}:
+        return False
+
+    if objective_unit.academic_year_id is None:
+        if prerequisite_unit.academic_year_id is not None:
+            return False
+    elif prerequisite_unit.academic_year_id not in {None, objective_unit.academic_year_id}:
+        return False
+
+    if objective_unit.branch_id is None:
+        if prerequisite_unit.branch_id is not None:
+            return False
+    elif prerequisite_unit.branch_id not in {None, objective_unit.branch_id}:
+        return False
+
+    if objective_unit.field_of_study_id is None:
+        if prerequisite_unit.field_of_study_id is not None:
+            return False
+    elif prerequisite_unit.field_of_study_id not in {None, objective_unit.field_of_study_id}:
+        return False
+
+    return True
 
 
 @protected_router.post("/curriculum/catalog/import")
@@ -408,25 +462,63 @@ async def import_curriculum_catalog(
                 session.add(unit_year)
                 await session.flush()
         unit_scope = unit_year.code if unit_year is not None else "unspecified"
-        unit = await session.scalar(
-            select(CurriculumUnit).where(
-                CurriculumUnit.grade_id == grade.id,
-                CurriculumUnit.subject_id == subject.id,
-                CurriculumUnit.scope_code == unit_scope,
-                CurriculumUnit.code == item.code,
+        unit_branch = None
+        unit_field = None
+        if item.branch_code:
+            if grade.number < 10:
+                raise HTTPException(status_code=422, detail="شاخه فقط برای پایه‌های ۱۰ تا ۱۲ معتبر است.")
+            unit_branch = await session.scalar(
+                select(EducationBranch).where(
+                    EducationBranch.code == item.branch_code,
+                    EducationBranch.is_active.is_(True),
+                )
             )
+            if unit_branch is None or not unit_branch.min_grade <= grade.number <= unit_branch.max_grade:
+                raise HTTPException(status_code=422, detail=f"شاخهٔ نامعتبر برای پایه: {item.branch_code}")
+        if item.field_code:
+            if unit_branch is None:
+                raise HTTPException(status_code=422, detail="برای تعیین رشته، شاخه نیز باید مشخص شود.")
+            unit_field = await session.scalar(
+                select(FieldOfStudy).where(
+                    FieldOfStudy.code == item.field_code,
+                    FieldOfStudy.branch_id == unit_branch.id,
+                    FieldOfStudy.is_active.is_(True),
+                )
+            )
+            if unit_field is None:
+                raise HTTPException(status_code=422, detail=f"رشتهٔ نامعتبر برای شاخه: {item.field_code}")
+        unit_stmt = select(CurriculumUnit).where(
+            CurriculumUnit.grade_id == grade.id,
+            CurriculumUnit.subject_id == subject.id,
+            CurriculumUnit.scope_code == unit_scope,
+            CurriculumUnit.code == item.code,
         )
+        unit_stmt = unit_stmt.where(
+            CurriculumUnit.branch_id == unit_branch.id
+            if unit_branch is not None
+            else CurriculumUnit.branch_id.is_(None)
+        )
+        unit_stmt = unit_stmt.where(
+            CurriculumUnit.field_of_study_id == unit_field.id
+            if unit_field is not None
+            else CurriculumUnit.field_of_study_id.is_(None)
+        )
+        unit = await session.scalar(unit_stmt)
         if unit is None:
             unit = CurriculumUnit(
                 grade_id=grade.id,
                 subject_id=subject.id,
                 academic_year_id=unit_year.id if unit_year is not None else None,
+                branch_id=unit_branch.id if unit_branch is not None else None,
+                field_of_study_id=unit_field.id if unit_field is not None else None,
                 scope_code=unit_scope,
                 code=item.code,
                 title=item.title,
             )
             session.add(unit)
         unit.academic_year_id = unit_year.id if unit_year is not None else None
+        unit.branch_id = unit_branch.id if unit_branch is not None else None
+        unit.field_of_study_id = unit_field.id if unit_field is not None else None
         unit.scope_code = unit_scope
         unit.title = item.title
         unit.unit_type = item.unit_type
@@ -444,6 +536,8 @@ async def import_curriculum_catalog(
                     CurriculumUnit.grade_id == grade.id,
                     CurriculumUnit.subject_id == subject.id,
                     CurriculumUnit.scope_code == unit.scope_code,
+                    CurriculumUnit.branch_id == unit.branch_id if unit.branch_id is not None else CurriculumUnit.branch_id.is_(None),
+                    CurriculumUnit.field_of_study_id == unit.field_of_study_id if unit.field_of_study_id is not None else CurriculumUnit.field_of_study_id.is_(None),
                     CurriculumUnit.code == item.parent_code,
                 )
             )
@@ -466,6 +560,9 @@ async def import_curriculum_catalog(
                     title=objective_input.title,
                 )
                 session.add(objective)
+            else:
+                existing_unit = await session.get(CurriculumUnit, objective.unit_id)
+                _validate_objective_unit_reuse(existing_unit, unit)
             objective.unit_id = unit.id
             objective.title = objective_input.title
             objective.description = objective_input.description
@@ -517,6 +614,20 @@ async def import_curriculum_catalog(
             )
         if objective.id == prerequisite.id:
             raise HTTPException(status_code=422, detail="هدف یادگیری نمی‌تواند پیش‌نیاز خودش باشد.")
+        objective_unit = await session.get(CurriculumUnit, objective.unit_id)
+        prerequisite_unit = await session.get(CurriculumUnit, prerequisite.unit_id)
+        if (
+            objective_unit is None
+            or prerequisite_unit is None
+            or not _prerequisite_scope_is_compatible(objective_unit, prerequisite_unit)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"پیش‌نیاز {prerequisite_code} از نظر پایه، شاخه، رشته یا سال تحصیلی "
+                    f"برای هدف {objective_code} قابل استفاده نیست."
+                ),
+            )
         exists_link = await session.scalar(
             select(ObjectivePrerequisite.id).where(
                 ObjectivePrerequisite.objective_id == objective.id,
@@ -573,6 +684,38 @@ async def import_curriculum_catalog(
                 status_code=422,
                 detail="درس هدف یادگیری با حوزهٔ درسی کتاب سازگار نیست.",
             )
+        book_year = await session.get(AcademicYear, book.academic_year_id) if book.academic_year_id else None
+        expected_year_code = book_year.code if book_year is not None else None
+        if expected_year_code:
+            if unit.scope_code not in {expected_year_code, "unspecified"} or unit.academic_year_id not in {
+                None,
+                book.academic_year_id,
+            }:
+                raise HTTPException(status_code=422, detail="سال تحصیلی هدف با نسخهٔ کتاب سازگار نیست.")
+        elif unit.scope_code != "unspecified" or unit.academic_year_id is not None:
+            raise HTTPException(status_code=422, detail="هدف نسخه‌دار به کتاب بدون سال تحصیلی متصل نمی‌شود.")
+        if unit.branch_id is not None:
+            book_links = (
+                await session.scalars(
+                    select(BookCurriculumLink).where(BookCurriculumLink.book_id == item.book_id)
+                )
+            ).all()
+            branch_match = any(
+                link.branch_id == unit.branch_id
+                and (
+                    (link.field_of_study_id is None and unit.field_of_study_id is None)
+                    or (
+                        link.field_of_study_id is not None
+                        and (
+                            unit.field_of_study_id is None
+                            or link.field_of_study_id == unit.field_of_study_id
+                        )
+                    )
+                )
+                for link in book_links
+            )
+            if not branch_match:
+                raise HTTPException(status_code=422, detail="شاخه یا رشتهٔ هدف با شاخه یا رشتهٔ کتاب سازگار نیست.")
         mapping = await session.scalar(
             select(BookPageObjective).where(
                 BookPageObjective.book_page_id == page.id,
@@ -752,6 +895,46 @@ async def _run_ingest_background(
                 await session.commit()
 
 
+def _branch_wide_applicability_codes(
+    *,
+    applicable_branch_codes: list[str],
+    branch_code: str | None,
+    selected_field_codes: list[str],
+) -> set[str]:
+    """Distinguish an explicit branch-wide grant from a field's parent branch."""
+    codes = {code.strip() for code in applicable_branch_codes if code and code.strip()}
+    if not selected_field_codes and branch_code and branch_code.strip():
+        codes.add(branch_code.strip())
+    return codes
+
+
+def _book_curriculum_scope_rows(
+    *,
+    grade_number: int,
+    is_general_book: bool,
+    subject_id: int | None,
+    branch_wide_branches: list[EducationBranch],
+    selected_fields: list[FieldOfStudy],
+) -> list[tuple[int | None, int | None, int | None, str]]:
+    """Build exact applicability links without widening field-only editions to a whole branch."""
+    rows: list[tuple[int | None, int | None, int | None, str]] = []
+    if is_general_book or grade_number < 10:
+        rows.append((None, None, subject_id, "general"))
+    rows.extend(
+        (branch.id, None, subject_id, f"branch:{branch.code}")
+        for branch in branch_wide_branches
+    )
+    rows.extend(
+        (field.branch_id, field.id, subject_id, f"field:{field.code}")
+        for field in selected_fields
+    )
+    # Stable scope_code uniqueness makes this idempotent even if inputs repeat.
+    unique_rows: dict[str, tuple[int | None, int | None, int | None, str]] = {}
+    for row in rows:
+        unique_rows[row[3]] = row
+    return list(unique_rows.values())
+
+
 @protected_router.post("/books/upload-and-ingest")
 async def upload_and_ingest(
     background_tasks: BackgroundTasks,
@@ -801,6 +984,15 @@ async def upload_and_ingest(
         selected_field_codes = list(dict.fromkeys(
             [code.strip() for code in [*applicable_field_codes, field_code, major_code] if code and code.strip()]
         ))
+        # branch_code is a required validation/parent selector for field-specific
+        # uploads; it is NOT itself a branch-wide applicability grant. A branch-wide
+        # link is created only for explicit applicable_branch_codes, or for a
+        # branch-only upload where no fields were selected.
+        branch_wide_codes = _branch_wide_applicability_codes(
+            applicable_branch_codes=applicable_branch_codes,
+            branch_code=branch_code,
+            selected_field_codes=selected_field_codes,
+        )
         if official_source_url:
             parsed_source_url = urlparse(official_source_url.strip())
             if parsed_source_url.scheme not in {"http", "https"} or not parsed_source_url.netloc:
@@ -861,6 +1053,9 @@ async def upload_and_ingest(
             selected_branches = (
                 await session.scalars(select(EducationBranch).where(EducationBranch.id.in_(branch_ids)))
             ).all()
+        branch_wide_branches = [
+            item for item in selected_branches if item.code in branch_wide_codes
+        ]
 
         # Book.major_id remains a compatibility alias only when the edition applies
         # to exactly one old-style field. Multi-field editions use the link table.
@@ -923,13 +1118,13 @@ async def upload_and_ingest(
             session.add(book)
             await session.flush()
             book_id = book.id
-            scope_rows = []
             linked_subject_id = selected_subject.id if selected_subject is not None else None
-            if is_general_book or grade.number < 10:
-                scope_rows.append((None, None, linked_subject_id, "general"))
-            scope_rows.extend((item.id, None, linked_subject_id, f"branch:{item.code}") for item in selected_branches)
-            scope_rows.extend(
-                (item.branch_id, item.id, linked_subject_id, f"field:{item.code}") for item in selected_fields
+            scope_rows = _book_curriculum_scope_rows(
+                grade_number=grade.number,
+                is_general_book=is_general_book,
+                subject_id=linked_subject_id,
+                branch_wide_branches=branch_wide_branches,
+                selected_fields=selected_fields,
             )
             for linked_branch_id, linked_field_id, link_subject_id, scope_code in scope_rows:
                 session.add(
@@ -1013,13 +1208,13 @@ async def upload_and_ingest(
         session.add(book)
         await session.flush()
         book_id = book.id
-        scope_rows = []
         linked_subject_id = selected_subject.id if selected_subject is not None else None
-        if is_general_book or grade.number < 10:
-            scope_rows.append((None, None, linked_subject_id, "general"))
-        scope_rows.extend((item.id, None, linked_subject_id, f"branch:{item.code}") for item in selected_branches)
-        scope_rows.extend(
-            (item.branch_id, item.id, linked_subject_id, f"field:{item.code}") for item in selected_fields
+        scope_rows = _book_curriculum_scope_rows(
+            grade_number=grade.number,
+            is_general_book=is_general_book,
+            subject_id=linked_subject_id,
+            branch_wide_branches=branch_wide_branches,
+            selected_fields=selected_fields,
         )
         for linked_branch_id, linked_field_id, link_subject_id, scope_code in scope_rows:
             session.add(

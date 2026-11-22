@@ -33,7 +33,14 @@ def _fake_student() -> SimpleNamespace:
 class FakeSession:
     async def get(self, model, identity):
         if model is Book and identity == 1:
-            return SimpleNamespace(id=1, grade_id=12, major_id=2)
+            return SimpleNamespace(
+                id=1,
+                grade_id=12,
+                major_id=2,
+                status="ready",
+                catalog_status="approved",
+                academic_year_id=None,
+            )
         if model is Grade and identity == 12:
             return SimpleNamespace(number=12, has_major=True)
         if model is Major and identity == 2:
@@ -108,7 +115,7 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
 async def test_chat_sessions_roundtrip_crud(tmp_path):
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from app.db.base import Base
-    from app.db.seed import seed_grades, seed_majors
+    from app.db.seed import seed_curriculum_taxonomy, seed_grades, seed_majors
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chat_test.sqlite3'}")
     async with engine.begin() as conn:
@@ -118,6 +125,7 @@ async def test_chat_sessions_roundtrip_crud(tmp_path):
     async with factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await seed_curriculum_taxonomy(session)
         await session.flush()
         grade = await session.get(Grade, 12)
         major = await session.get(Major, 1)
@@ -128,6 +136,7 @@ async def test_chat_sessions_roundtrip_crud(tmp_path):
             pdf_file_path="dummy.pdf",
             total_pdf_pages=1,
             status="ready",
+            catalog_status="approved",
         )
         user = User(
             id="user-chat-1",

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.dependencies import require_student
 from app.db.base import Base
-from app.db.seed import seed_billing_settings, seed_grades, seed_majors, seed_plans
+from app.db.seed import seed_billing_settings, seed_curriculum_taxonomy, seed_grades, seed_majors, seed_plans
 from app.db.session import get_session
 from app.main import app
 from app.models.auth import User
@@ -45,7 +45,7 @@ from app.services import (
 from app.services import ai_gateway as _gw  # noqa: F401  (ensures gateway import order)
 
 ADMIN_HEADERS = {"X-Admin-Username": "admin", "X-Admin-Password": "123"}
-NOW = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)
 
 GOOD_QUESTION = {
     "prompt": "کدام کمیت برداری است؟",
@@ -78,6 +78,7 @@ async def env(tmp_path, monkeypatch):
     async with factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await seed_curriculum_taxonomy(session)
         await seed_plans(session)
         await seed_billing_settings(session)
         await capability_service.seed_capabilities(session)
@@ -85,7 +86,7 @@ async def env(tmp_path, monkeypatch):
         major = await session.scalar(select(Major).where(Major.code == "math_physics"))
         grade = await session.scalar(select(Grade).where(Grade.number == 10))
         book = Book(title="فیزیک دهم", grade_id=grade.id, major_id=major.id, pdf_file_path="/tmp/none.pdf",
-                    total_pdf_pages=5, status=BookStatus.ready)
+                    total_pdf_pages=5, status=BookStatus.ready, catalog_status="approved")
         session.add(book)
         await session.flush()
         for index, chapter, printed, text in (

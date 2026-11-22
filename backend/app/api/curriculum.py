@@ -250,7 +250,7 @@ async def list_books(
                     FieldOfStudy.is_active.is_(True),
                 )
             )
-            if selected_field is None:
+            if selected_field is None or selected_field.branch_id != selected_branch.id:
                 raise HTTPException(status_code=404, detail="field of study not found")
         elif selected_branch.code == "theoretical":
             raise HTTPException(status_code=422, detail="برای شاخهٔ نظری باید رشتهٔ تحصیلی نیز انتخاب شود.")

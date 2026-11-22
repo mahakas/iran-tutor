@@ -32,9 +32,29 @@ def _format_context(pages: list[dict[str, Any]], max_chars: int = 24_000) -> str
         content = str(page.get("full_text") or page.get("markdown_content") or "").strip()
         if not content or remaining <= 0:
             continue
+        scope_labels = []
+        branch_titles = page.get("branch_titles") or []
+        field_titles = page.get("field_titles") or []
+        if branch_titles:
+            scope_labels.append("شاخه: " + "، ".join(branch_titles))
+        if field_titles:
+            scope_labels.append("رشته: " + "، ".join(field_titles))
+        year_code = page.get("academic_year_code")
+        if year_code:
+            scope_labels.append("سال تحصیلی: " + str(year_code))
+        edition_label = page.get("edition_label")
+        if edition_label:
+            scope_labels.append("نوبت چاپ: " + str(edition_label))
+        print_year = page.get("print_year")
+        if print_year:
+            scope_labels.append("سال چاپ: " + str(print_year))
+        publisher = page.get("publisher")
+        if publisher:
+            scope_labels.append("ناشر: " + str(publisher))
+        edition_context = " | " + " | ".join(scope_labels) if scope_labels else ""
         block = (
             f"[کتاب: {page.get('book_title', 'نامشخص')} | پایه: {page.get('grade_number', '?')} | "
-            f"فصل: {chapter} | {page_ref} | صفحه PDF: {pdf_ref}]\n{content}"
+            f"فصل: {chapter} | {page_ref} | صفحه PDF: {pdf_ref}{edition_context}]\n{content}"
         )
         block = block[:remaining]
         blocks.append(block)
@@ -85,19 +105,125 @@ def build_tutor_messages(
 
 
 def _source_label(page: dict[str, Any]) -> str:
-    """Book and chapter only (no page). Used for the chat sources list; pages stay in structured fields."""
+    """Book, curriculum edition and chapter (page is present in the structured citation)."""
     title = page.get("book_title") or "کتاب درسی"
     if page.get("grade_number"):
         title = f"{title} (پایه {page['grade_number']})"
+    labels = []
+    if page.get("branch_titles"):
+        labels.append("شاخه " + "، ".join(page["branch_titles"]))
+    if page.get("field_titles"):
+        labels.append("رشته " + "، ".join(page["field_titles"]))
+    if page.get("academic_year_code"):
+        labels.append("سال تحصیلی " + str(page["academic_year_code"]))
+    if page.get("edition_label"):
+        labels.append(str(page["edition_label"]))
+    if page.get("print_year"):
+        labels.append("چاپ " + str(page["print_year"]))
+    if page.get("publisher"):
+        labels.append("ناشر " + str(page["publisher"]))
+    printed = page.get("printed_page_number")
+    if printed is not None:
+        labels.append("صفحه " + str(printed))
+    else:
+        labels.append("صفحه PDF " + str(page.get("pdf_page_index", "?")))
     chapter_number = page.get("chapter_number")
     chapter_title = page.get("chapter_title")
     if chapter_number is not None and chapter_title:
-        return f"{title}، فصل {chapter_number}: {chapter_title}"
-    if chapter_title:
-        return f"{title}، {chapter_title}"
-    if chapter_number is not None:
-        return f"{title}، فصل {chapter_number}"
-    return f"{title}، فصل نامشخص"
+        chapter = f"فصل {chapter_number}: {chapter_title}"
+    elif chapter_title:
+        chapter = chapter_title
+    elif chapter_number is not None:
+        chapter = f"فصل {chapter_number}"
+    else:
+        chapter = "فصل نامشخص"
+    edition = "، " + "، ".join(labels) if labels else ""
+    return f"{title}{edition}، {chapter}"
+
+
+async def _enrich_page_citation_metadata(
+    db_session: Any | None,
+    pages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach authoritative book edition and curriculum scope metadata to citations."""
+    if db_session is None:
+        return pages
+    from sqlalchemy import select
+
+    from app.models.curriculum import (
+        AcademicYear,
+        Book,
+        BookCurriculumLink,
+        EducationBranch,
+        FieldOfStudy,
+        Grade,
+        Subject,
+    )
+
+    book_ids = sorted({int(page["book_id"]) for page in pages if page.get("book_id") is not None})
+    if not book_ids:
+        return pages
+
+    book_rows = (
+        await db_session.execute(
+            select(
+                Book.id,
+                Grade.number,
+                AcademicYear.code,
+                Book.edition_label,
+                Book.print_year,
+                Book.publisher,
+            )
+            .join(Grade, Book.grade_id == Grade.id)
+            .outerjoin(AcademicYear, Book.academic_year_id == AcademicYear.id)
+            .where(Book.id.in_(book_ids))
+        )
+    ).all()
+    metadata: dict[int, dict[str, Any]] = {
+        row[0]: {
+            "grade_number": row[1],
+            "academic_year_code": row[2],
+            "edition_label": row[3],
+            "print_year": row[4],
+            "publisher": row[5],
+            "branch_titles": [],
+            "field_titles": [],
+            "subject_titles": [],
+        }
+        for row in book_rows
+    }
+    link_rows = (
+        await db_session.execute(
+            select(
+                BookCurriculumLink.book_id,
+                EducationBranch.title,
+                FieldOfStudy.title,
+                Subject.title,
+            )
+            .outerjoin(EducationBranch, BookCurriculumLink.branch_id == EducationBranch.id)
+            .outerjoin(FieldOfStudy, BookCurriculumLink.field_of_study_id == FieldOfStudy.id)
+            .outerjoin(Subject, BookCurriculumLink.subject_id == Subject.id)
+            .where(BookCurriculumLink.book_id.in_(book_ids))
+        )
+    ).all()
+    for book_id, branch_title, field_title, subject_title in link_rows:
+        target = metadata.get(book_id)
+        if target is None:
+            continue
+        for key, value in (
+            ("branch_titles", branch_title),
+            ("field_titles", field_title),
+            ("subject_titles", subject_title),
+        ):
+            if value and value not in target[key]:
+                target[key].append(value)
+
+    enriched: list[dict[str, Any]] = []
+    for page in pages:
+        row = dict(page)
+        row.update(metadata.get(int(page["book_id"]), {}))
+        enriched.append(row)
+    return enriched
 
 
 def _source_reference(page: dict[str, Any]) -> str:
@@ -119,7 +245,21 @@ def _source_reference(page: dict[str, Any]) -> str:
         page_ref = f"شمارهٔ چاپی نامشخص (صفحهٔ PDF {page.get('pdf_page_index', '?')})"
     else:
         page_ref = f"صفحهٔ {printed}"
-    return f"{title}، {chapter}، {page_ref}"
+    labels = []
+    if page.get("branch_titles"):
+        labels.append("شاخه " + "، ".join(page["branch_titles"]))
+    if page.get("field_titles"):
+        labels.append("رشته " + "، ".join(page["field_titles"]))
+    if page.get("academic_year_code"):
+        labels.append("سال تحصیلی " + str(page["academic_year_code"]))
+    if page.get("edition_label"):
+        labels.append(str(page["edition_label"]))
+    if page.get("print_year"):
+        labels.append("چاپ " + str(page["print_year"]))
+    if page.get("publisher"):
+        labels.append("ناشر " + str(page["publisher"]))
+    edition = "، " + "، ".join(labels) if labels else ""
+    return f"{title}{edition}، {chapter}، {page_ref}"
 
 
 # `mode` -> gateway `feature_key`, so admins can route a different model per feature.
@@ -223,6 +363,7 @@ async def answer_grounded(
     """Answer from retrieved pages; optionally publish model text as it arrives."""
     from app.services.learner_memory_service import build_memory_context
 
+    pages = await _enrich_page_citation_metadata(db_session, pages)
     retrieved_count = len(pages)
     context = _format_context(pages)
     if not context:
@@ -317,6 +458,13 @@ async def answer_grounded(
                 "book_title": page.get("book_title"),
                 "grade_number": page.get("grade_number"),
                 "major_code": page.get("major_code"),
+                "branch_titles": page.get("branch_titles") or [],
+                "field_titles": page.get("field_titles") or [],
+                "subject_titles": page.get("subject_titles") or [],
+                "academic_year_code": page.get("academic_year_code"),
+                "edition_label": page.get("edition_label"),
+                "print_year": page.get("print_year"),
+                "publisher": page.get("publisher"),
                 "chapter_number": page.get("chapter_number"),
                 "chapter_title": page.get("chapter_title"),
                 "pdf_page_index": page.get("pdf_page_index"),

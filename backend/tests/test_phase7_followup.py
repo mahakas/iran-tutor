@@ -33,6 +33,7 @@ async def _seed_figure(factory, tmp_path, *, status: BookStatus, name: str = "fi
             pdf_file_path=str(tmp_path / "book.pdf"),
             total_pdf_pages=3,
             status=status,
+            catalog_status="approved" if status == BookStatus.ready else "legacy_unverified",
         )
         session.add(book)
         await session.flush()
@@ -330,6 +331,7 @@ async def _seed_grounded_book(factory, *, status: BookStatus):
             pdf_file_path="x.pdf",
             total_pdf_pages=10,
             status=status,
+            catalog_status="approved" if status == BookStatus.ready else "legacy_unverified",
         )
         session.add(book)
         await session.flush()

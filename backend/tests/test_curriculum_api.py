@@ -44,7 +44,14 @@ async def test_list_books_for_high_school_requires_and_scopes_major():
     )
     session = FakeSession(grade, major, [book])
 
-    response = await list_books(12, "math_physics", session)
+    response = await list_books(
+        12,
+        "math_physics",
+        session,
+        branch_code=None,
+        field_code=None,
+        academic_year_code=None,
+    )
 
     assert response == [
         {
@@ -63,7 +70,14 @@ async def test_list_books_rejects_high_school_without_major():
     session = FakeSession(grade)
 
     with pytest.raises(HTTPException) as error:
-        await list_books(12, None, session)
+        await list_books(
+            12,
+            None,
+            session,
+            branch_code=None,
+            field_code=None,
+            academic_year_code=None,
+        )
 
     assert error.value.status_code == 422
     assert session.scalar_calls == 1
@@ -88,6 +102,8 @@ async def test_list_books_for_technical_branch_uses_branch_scope():
         None,
         session,
         branch_code="technical_vocational",
+        field_code=None,
+        academic_year_code=None,
     )
 
     assert response[0]["id"] == 21
@@ -110,6 +126,11 @@ async def test_resolve_book_scope_accepts_approved_technical_branch_book():
         grade,
         scalar_values=[branch, 501],  # matching branch and BookCurriculumLink
     )
+    # resolve_book_scope loads the grade via get(), so its first scalar is the branch.
+    async def fake_scalar(statement):
+        return session.scalar_values.pop(0) if session.scalar_values else None
+
+    session.scalar = fake_scalar
 
     async def fake_get(model, identifier):
         return {Book: book, Grade: grade}.get(model)
@@ -142,6 +163,11 @@ async def test_resolve_book_scope_rejects_field_from_another_branch():
     branch = SimpleNamespace(id=3, code="technical_vocational", min_grade=10, max_grade=12, is_active=True)
     field = SimpleNamespace(id=9, code="math_physics", branch_id=1, is_active=True)
     session = FakeSession(grade, scalar_values=[branch, field])
+
+    async def fake_scalar(statement):
+        return session.scalar_values.pop(0) if session.scalar_values else None
+
+    session.scalar = fake_scalar
 
     async def fake_get(model, identifier):
         return {Book: book, Grade: grade}.get(model)
@@ -186,7 +212,7 @@ async def test_resolve_book_scope_hides_pending_review_book():
         )
 
     assert error.value.status_code == 404
-\n
+
 from app.services.mastery_service import _evidence_progress
 
 

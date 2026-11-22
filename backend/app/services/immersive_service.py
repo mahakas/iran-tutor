@@ -14,7 +14,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import User
-from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.curriculum import (
+    AcademicYear,
+    Book,
+    BookCurriculumLink,
+    BookPage,
+    BookStatus,
+    EducationBranch,
+    FieldOfStudy,
+    Grade,
+    Major,
+    PageStatus,
+    Subject,
+)
 from app.services import kb_ingestion_service
 from app.services.capability_runtime import run_capability_text
 from app.services.curriculum_access import is_student_visible_book
@@ -62,11 +74,13 @@ async def book_overview(session: AsyncSession, book_id: int) -> dict[str, Any]:
             entry["printed_end"] = page.printed_page_number
     grade = await session.get(Grade, book.grade_id)
     major = await session.get(Major, book.major_id) if book.major_id else None
+    metadata = await _book_scope_metadata(session, book)
     return {
         "id": book.id,
         "title": book.title,
         "grade_number": grade.number if grade else None,
         "major_code": major.code if major else "general",
+        **metadata,
         "page_count": len(pages),
         "chapters": list(chapters.values()),
         "pages": [
@@ -81,9 +95,61 @@ async def book_overview(session: AsyncSession, book_id: int) -> dict[str, Any]:
     }
 
 
-def citation_for_page(book: Book, page: BookPage) -> dict[str, Any]:
+async def _book_scope_metadata(session: AsyncSession, book: Book) -> dict[str, Any]:
+    """Resolve stable edition and scope labels for student-facing citations."""
+    year = await session.get(AcademicYear, book.academic_year_id) if book.academic_year_id else None
+    rows = (
+        await session.execute(
+            select(
+                EducationBranch.title,
+                FieldOfStudy.title,
+                Subject.title,
+            )
+            .select_from(BookCurriculumLink)
+            .outerjoin(EducationBranch, BookCurriculumLink.branch_id == EducationBranch.id)
+            .outerjoin(FieldOfStudy, BookCurriculumLink.field_of_study_id == FieldOfStudy.id)
+            .outerjoin(Subject, BookCurriculumLink.subject_id == Subject.id)
+            .where(BookCurriculumLink.book_id == book.id)
+        )
+    ).all()
+    branch_titles = list(dict.fromkeys(row[0] for row in rows if row[0]))
+    field_titles = list(dict.fromkeys(row[1] for row in rows if row[1]))
+    subject_titles = list(dict.fromkeys(row[2] for row in rows if row[2]))
+    return {
+        "academic_year_code": year.code if year else None,
+        "edition_label": book.edition_label,
+        "print_year": book.print_year,
+        "publisher": book.publisher,
+        "branch_titles": branch_titles,
+        "field_titles": field_titles,
+        "subject_titles": subject_titles,
+    }
+
+
+def citation_for_page(
+    book: Book,
+    page: BookPage,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = metadata or {}
     chapter = page.chapter_title or (f"فصل {page.chapter_number}" if page.chapter_number else "فصل نامشخص")
     printed = f"صفحه چاپی {page.printed_page_number}" if page.printed_page_number is not None else "صفحه نامشخص"
+    branch_titles = metadata.get("branch_titles") or []
+    field_titles = metadata.get("field_titles") or []
+    edition_labels = []
+    if branch_titles:
+        edition_labels.append("شاخه " + "، ".join(branch_titles))
+    if field_titles:
+        edition_labels.append("رشته " + "، ".join(field_titles))
+    if metadata.get("academic_year_code"):
+        edition_labels.append("سال تحصیلی " + str(metadata["academic_year_code"]))
+    if metadata.get("edition_label"):
+        edition_labels.append(str(metadata["edition_label"]))
+    if metadata.get("print_year"):
+        edition_labels.append("چاپ " + str(metadata["print_year"]))
+    if metadata.get("publisher"):
+        edition_labels.append("ناشر " + str(metadata["publisher"]))
+    edition = "، " + "، ".join(edition_labels) if edition_labels else ""
     return {
         "book_id": book.id,
         "book_title": book.title,
@@ -91,7 +157,8 @@ def citation_for_page(book: Book, page: BookPage) -> dict[str, Any]:
         "chapter_title": page.chapter_title,
         "pdf_page_index": page.pdf_page_index,
         "printed_page_number": page.printed_page_number,
-        "citation": f"{book.title}، {chapter}، {printed}",
+        **metadata,
+        "citation": f"{book.title}{edition}، {chapter}، {printed}",
     }
 
 
@@ -103,8 +170,9 @@ async def page_detail(session: AsyncSession, book_id: int, pdf_page_index: int) 
     if page is None or page.status != PageStatus.done:
         raise HTTPException(status_code=404, detail="صفحه یافت نشد.")
     figures = await kb_ingestion_service.list_figures(session, book_id=book_id, page_index=pdf_page_index)
+    metadata = await _book_scope_metadata(session, book)
     return {
-        **citation_for_page(book, page),
+        **citation_for_page(book, page, metadata),
         "markdown_content": page.markdown_content,
         "figures": [kb_ingestion_service.serialize_figure(figure) for figure in figures],
     }
@@ -140,7 +208,8 @@ async def assist(
     context = (selection or "").strip() or (page.markdown_content or "").strip()
     if not context:
         raise HTTPException(status_code=409, detail="متنی برای این صفحه ثبت نشده است.")
-    citation = citation_for_page(book, page)
+    metadata = await _book_scope_metadata(session, book)
+    citation = citation_for_page(book, page, metadata)
     try:
         result, _blocks, _skill = await run_capability_text(
             session=session,
