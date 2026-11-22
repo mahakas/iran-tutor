@@ -30,25 +30,23 @@ def upgrade() -> None:
             ["id"],
         )
         batch.drop_constraint("uq_curriculum_unit_code", type_="unique")
-        batch.create_unique_constraint(
-            "uq_curriculum_unit_code",
-            [
-                "grade_id",
-                "subject_id",
-                "scope_code",
-                "branch_id",
-                "field_of_study_id",
-                "code",
-            ],
-        )
         batch.create_check_constraint(
             "ck_curriculum_unit_field_requires_branch",
             "field_of_study_id IS NULL OR branch_id IS NOT NULL",
         )
-        batch.create_check_constraint(
-            "ck_curriculum_unit_branch_upper_secondary",
-            "branch_id IS NULL OR grade_id >= 10",
-        )
+    op.create_index(
+        "uq_curriculum_unit_code_scope",
+        "curriculum_units",
+        [
+            "grade_id",
+            "subject_id",
+            "scope_code",
+            sa.text("COALESCE(branch_id, 0)"),
+            sa.text("COALESCE(field_of_study_id, 0)"),
+            "code",
+        ],
+        unique=True,
+    )
     op.create_index("ix_curriculum_units_branch_id", "curriculum_units", ["branch_id"])
     op.create_index(
         "ix_curriculum_units_field_of_study_id",
@@ -60,10 +58,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_curriculum_units_field_of_study_id", table_name="curriculum_units")
     op.drop_index("ix_curriculum_units_branch_id", table_name="curriculum_units")
+    op.drop_index("uq_curriculum_unit_code_scope", table_name="curriculum_units")
     with op.batch_alter_table("curriculum_units") as batch:
-        batch.drop_constraint("ck_curriculum_unit_branch_upper_secondary", type_="check")
         batch.drop_constraint("ck_curriculum_unit_field_requires_branch", type_="check")
-        batch.drop_constraint("uq_curriculum_unit_code", type_="unique")
         batch.create_unique_constraint(
             "uq_curriculum_unit_code",
             ["grade_id", "subject_id", "scope_code", "code"],
