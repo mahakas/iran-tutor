@@ -45,7 +45,10 @@ async def test_gateway_uses_provider_url_and_key_and_fails_over(monkeypatch):
             raise ProviderUnavailable("primary is unavailable")
         return "پاسخ از ارائه‌دهندهٔ جایگزین"
 
-    async def fake_audit(**_kwargs):
+    audit_calls: list[dict[str, object]] = []
+
+    async def fake_audit(**kwargs):
+        audit_calls.append(kwargs)
         return "audit-id"
 
     monkeypatch.setattr(ai_gateway, "_resolve_candidates", candidates)
@@ -71,6 +74,8 @@ async def test_gateway_uses_provider_url_and_key_and_fails_over(monkeypatch):
     ]
     assert calls[1][1]["max_tokens"] == fallback.max_tokens
     assert result.model_name == fallback.model_name
+    assert audit_calls[0]["record_quota"] is False  # failed primary is audited, not double-counted
+
 
 
 @pytest.mark.asyncio

@@ -179,6 +179,7 @@ async def _write_audit(
     error_message: str | None = None,
     flag_reason: str | None = None,
     session: AsyncSession | None = None,
+    record_quota: bool = True,
 ) -> str | None:
     """Persist the audit row; returns its id (or None when logging failed)."""
     audit_feature = ctx.feature_key
@@ -231,7 +232,7 @@ async def _write_audit(
 
     # Quota counters share the audit producer: same transaction when a caller session
     # exists, otherwise a short dedicated session.
-    if ctx.user_id:
+    if ctx.user_id and record_quota:
         try:
             if session is not None:
                 await quota_service.record_ai_usage(
@@ -311,6 +312,9 @@ async def _call_provider_candidates(
         try:
             return route, await invoke(route)
         except Exception as error:  # noqa: BLE001 - failover is intentionally centralized
+            should_continue = (
+                index + 1 < len(candidates) and _fallback_eligible(error)
+            )
             await _write_audit(
                 ctx=ctx,
                 route=route,
@@ -323,8 +327,11 @@ async def _call_provider_candidates(
                 status=STATUS_ERROR,
                 error_message=f"{type(error).__name__}: {error}",
                 session=session,
+                # All failed upstream attempts are audited, but one user request
+                # must increment request quota only once.
+                record_quota=not should_continue,
             )
-            if index + 1 >= len(candidates) or not _fallback_eligible(error):
+            if not should_continue:
                 raise
             logger.warning(
                 "ai_gateway.provider_failover feature=%s failed_provider=%s next_provider=%s error_type=%s",
@@ -426,15 +433,20 @@ async def stream_text_via_gateway(
             route = candidate
             break
         except Exception as error:  # noqa: BLE001
+            # Once a chunk reached the client, failover would splice two answers.
+            should_continue = (
+                not emitted
+                and index + 1 < len(candidates)
+                and _fallback_eligible(error)
+            )
             await _write_audit(
                 ctx=ctx, route=candidate, model_name=effective_model, messages=messages,
                 response_text=None, tokens_in=0, tokens_out=0,
                 latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
                 status=STATUS_ERROR, error_message=f"{type(error).__name__}: {error}",
-                session=session,
+                session=session, record_quota=not should_continue,
             )
-            # Once a chunk reached the client, failover would splice two answers.
-            if emitted or index + 1 >= len(candidates) or not _fallback_eligible(error):
+            if not should_continue:
                 raise
             logger.warning(
                 "ai_gateway.stream_failover feature=%s failed_provider=%s next_provider=%s",
