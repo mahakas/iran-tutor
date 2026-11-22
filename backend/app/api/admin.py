@@ -291,7 +291,9 @@ class CurriculumCatalogImportBody(BaseModel):
 
 class BookApprovalBody(BaseModel):
     approved: bool
-\n\nclass LearningEvidenceReviewBody(BaseModel):
+
+
+class LearningEvidenceReviewBody(BaseModel):
     verification_status: Literal["verified", "rejected"]
     review_note: str | None = Field(default=None, max_length=2000)
 
