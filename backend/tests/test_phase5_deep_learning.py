@@ -514,6 +514,23 @@ async def test_immersive_overview_page_and_assist_cite_exact_page(env):
 
 
 @pytest.mark.asyncio
+async def test_immersive_reader_does_not_serve_unapproved_page_image(env):
+    book_id = env.ids["book_id"]
+    async with env.factory() as session:
+        page = await session.scalar(
+            select(BookPage).where(BookPage.book_id == book_id, BookPage.pdf_page_index == 1)
+        )
+        page.status = PageStatus.needs_review
+        await session.commit()
+
+    async with _client() as client:
+        response = await client.get(
+            f"/api/v1/immersive/books/{book_id}/pages/1/image"
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_immersive_assist_rejects_unknown_action_and_missing_page(env):
     book_id = env.ids["book_id"]
     async with _client() as client:
