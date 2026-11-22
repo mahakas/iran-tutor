@@ -191,6 +191,12 @@ export default function StudentApp() {
   // Phase 4: Auto-Mode router, multi-grade filter, streaming, chat search / bin.
   const [autoMode, setAutoMode] = useState(false);
   const [multiGrades, setMultiGrades] = useState<number[]>([]);
+  const selectGradeNumber = useCallback((nextGrade: number | null) => {
+    setGradeNumber(nextGrade);
+    setMultiGrades((previous) =>
+      nextGrade === null ? [] : previous.filter((grade) => grade <= nextGrade)
+    );
+  }, []);
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [chatBinTab, setChatBinTab] = useState<"search" | "bin" | null>(null);
   // Capability Registry (Phase 2): null = registry unreachable -> keep the legacy menu.
@@ -284,7 +290,7 @@ export default function StudentApp() {
         if (cancelled) return;
         setGrades(gradeData);
         setBranches(branchData);
-        setGradeNumber(
+        selectGradeNumber(
           gradeData.find((item) => item.number === 12)?.number ?? gradeData[0]?.number ?? null
         );
         setBranchCode(branchData.find((item) => item.code === "theoretical")?.code ?? branchData[0]?.code ?? "");
@@ -320,7 +326,7 @@ export default function StudentApp() {
     return () => {
       cancelled = true;
     };
-  }, [lang]);
+  }, [lang, selectGradeNumber]);
 
   const currentUserId = currentUser?.id ?? null;
 
@@ -562,8 +568,8 @@ export default function StudentApp() {
       const started = await startTutorStream(authFetch, {
         query,
         grade_number: useMulti ? null : gradeNumber,
-        major_code: useMulti ? null : hasMajor ? majorCode : null,
-        branch_code: useMulti ? null : isUpperSecondary ? branchCode : null,
+        major_code: hasMajor ? majorCode : null,
+        branch_code: isUpperSecondary ? branchCode : null,
         book_id: Number(bookId),
         grade_numbers: useMulti ? multiGrades : null,
         book_ids: null,
@@ -909,7 +915,7 @@ export default function StudentApp() {
           throw new Error(lang === "en" ? "Conversation not found" : "گفت‌وگو پیدا نشد");
         }
         const detail = (await response.json()) as ChatSessionDetail;
-        setGradeNumber(detail.grade_number);
+        selectGradeNumber(detail.grade_number);
         setMajorCode(detail.major_code === "general" ? "" : detail.major_code);
         setBranchCode(detail.branch_code ?? (detail.major_code !== "general" ? "theoretical" : ""));
         setBookId(String(detail.book_id));
@@ -1177,7 +1183,7 @@ export default function StudentApp() {
       handledDeepLinkRef.current = true;
       const timer = window.setTimeout(() => {
         setActiveExam(null);
-        setGradeNumber(Number(jumpGrade));
+        selectGradeNumber(Number(jumpGrade));
         setMajorCode(jumpMajor ?? "");
         setBookId(jumpBookId);
         if (jumpTopic) {
@@ -1647,7 +1653,7 @@ export default function StudentApp() {
                 setActiveExam(null);
                 setExamHistoryOpen(false);
                 setExamSetupOpen(false);
-                setGradeNumber(nextGrade);
+                selectGradeNumber(nextGrade);
                 setBranchCode(nextMajor ? "theoretical" : nextGrade >= 10 ? "theoretical" : "");
                 setMajorCode(nextMajor);
                 setBookId(String(nextBookId));
@@ -1700,7 +1706,7 @@ export default function StudentApp() {
               onChange={(nextVal) => {
                 if (!nextVal) return;
                 const nextGrade = Number(nextVal);
-                setGradeNumber(nextGrade);
+                selectGradeNumber(nextGrade);
                 setBranchCode(nextGrade >= 10 ? "theoretical" : "");
                 setMajorCode("");
                 setBooks([]);
@@ -1817,11 +1823,14 @@ export default function StudentApp() {
                 type="button"
                 className={`grade-chip ${active ? "selected" : ""}`}
                 aria-pressed={active}
+                disabled={gradeNumber === null || grade.value > gradeNumber}
                 onClick={() =>
                   setMultiGrades((prev) =>
                     prev.includes(grade.value)
                       ? prev.filter((item) => item !== grade.value)
-                      : [...prev, grade.value].sort((a, b) => a - b)
+                      : gradeNumber !== null && grade.value <= gradeNumber
+                        ? [...prev, grade.value].sort((a, b) => a - b)
+                        : prev
                   )
                 }
               >

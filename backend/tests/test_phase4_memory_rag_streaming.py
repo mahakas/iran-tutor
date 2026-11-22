@@ -30,7 +30,7 @@ from app.main import app
 from app.models.auth import User
 from app.models.chat import ChatSession
 from app.models.concepts import ConceptLink
-from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.curriculum import AcademicYear, Book, BookCurriculumLink, BookPage, BookStatus, EducationBranch, FieldOfStudy, Grade, Major, PageStatus, Subject
 from app.models.governance import AiAuditLog
 from app.models.learner_memory import LearnerMemory
 from app.services import (
@@ -71,6 +71,20 @@ async def env(tmp_path, monkeypatch):
         await capability_service.seed_capabilities(session)
         await skill_seed.seed_skills(session)
         major = await session.scalar(select(Major).where(Major.code == "math_physics"))
+        branch = await session.scalar(
+            select(EducationBranch).where(EducationBranch.code == "theoretical")
+        )
+        field = await session.scalar(
+            select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+        )
+        academic_year = AcademicYear(
+            code="1405-1406",
+            title="۱۴۰۵–۱۴۰۶",
+            is_active=True,
+        )
+        subject = Subject(code="physics", title="فیزیک", is_active=True)
+        session.add_all([academic_year, subject])
+        await session.flush()
         books: dict[int, Book] = {}
         for grade_number, chapter, text in (
             (10, 3, "نیرو و حرکت در فیزیک دهم، نیرو کشش یا هل دادن است"),
@@ -82,6 +96,7 @@ async def env(tmp_path, monkeypatch):
                 title=f"فیزیک پایه {grade_number}",
                 grade_id=grade.id,
                 major_id=major.id,
+                academic_year_id=academic_year.id,
                 pdf_file_path="/tmp/none.pdf",
                 total_pdf_pages=5,
                 status=BookStatus.ready,
@@ -89,6 +104,15 @@ async def env(tmp_path, monkeypatch):
             )
             session.add(book)
             await session.flush()
+            session.add(
+                BookCurriculumLink(
+                    book_id=book.id,
+                    branch_id=branch.id,
+                    field_of_study_id=field.id,
+                    subject_id=subject.id,
+                    scope_code="field:math_physics:physics",
+                )
+            )
             session.add(
                 BookPage(
                     book_id=book.id,
@@ -104,6 +128,7 @@ async def env(tmp_path, monkeypatch):
             books[grade_number] = book
         student = User(
             phone_number="09121000001", full_name="دانش‌آموز", role="student",
+            grade_level=12,
             tokens_remaining=1_000_000, plan_expires_at=NOW + timedelta(days=30), is_active=True,
         )
         other = User(
@@ -118,6 +143,7 @@ async def env(tmp_path, monkeypatch):
             book10=books[10].id,
             book11=books[11].id,
             book12=books[12].id,
+            subject_id=subject.id,
         )
         await session.commit()
 
@@ -204,7 +230,12 @@ async def _count(factory, model, *where) -> int:
 async def test_multi_grade_search_returns_pages_from_at_least_two_grades(env):
     async with env.factory() as session:
         result = await multi_grade_rag.search_multi_grade(
-            session, "نیرو", grade_numbers=[10, 11, 12], top_k=6, expand_links=False
+            session,
+            "نیرو",
+            grade_numbers=[10, 11, 12],
+            book_ids=[env.ids["book10"], env.ids["book11"], env.ids["book12"]],
+            top_k=6,
+            expand_links=False,
         )
     grades = {item["grade_number"] for item in result["results"]}
     assert len(grades) >= 2
@@ -216,10 +247,247 @@ async def test_multi_grade_search_returns_pages_from_at_least_two_grades(env):
 
 
 @pytest.mark.asyncio
+async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalog(env):
+    async with env.factory() as session:
+        year = await session.scalar(
+            select(AcademicYear).where(AcademicYear.code == "1405-1406")
+        )
+        grade10 = await session.scalar(select(Grade).where(Grade.number == 10))
+        foreign_branch = EducationBranch(
+            code="technical_scope_test",
+            title="شاخهٔ فنی آزمون",
+            min_grade=10,
+            max_grade=12,
+            is_active=True,
+        )
+        session.add(foreign_branch)
+        await session.flush()
+        foreign_field = FieldOfStudy(
+            branch_id=foreign_branch.id,
+            code="electronics_scope_test",
+            title="الکترونیک آزمون",
+            is_active=True,
+        )
+        session.add(foreign_field)
+        await session.flush()
+        same_branch_other_field = await session.scalar(
+            select(FieldOfStudy).where(FieldOfStudy.code == "islamic_studies")
+        )
+        theoretical_branch = await session.scalar(
+            select(EducationBranch).where(EducationBranch.code == "theoretical")
+        )
+        selected_field = await session.scalar(
+            select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+        )
+
+        foreign_book = Book(
+            title="کتاب فنی خارج از رشتهٔ انتخابی",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/foreign.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="approved",
+        )
+        same_branch_foreign_field_book = Book(
+            title="کتاب رشتهٔ دیگر در همان شاخه",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/same-branch-foreign-field.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="approved",
+        )
+        hidden_book = Book(
+            title="کتاب قدیمی تأییدنشده",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/hidden.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="legacy_unverified",
+        )
+        pending_book = Book(
+            title="کتاب در انتظار بررسی",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/pending.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="pending_review",
+        )
+        missing_subject_book = Book(
+            title="کتاب بدون پیوند رسمی درس",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/missing-subject.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="approved",
+        )
+        session.add_all(
+            [foreign_book, same_branch_foreign_field_book, hidden_book, pending_book, missing_subject_book]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                BookCurriculumLink(
+                    book_id=foreign_book.id,
+                    branch_id=foreign_branch.id,
+                    field_of_study_id=foreign_field.id,
+                    scope_code="field:electronics_scope_test",
+                ),
+                BookCurriculumLink(
+                    book_id=same_branch_foreign_field_book.id,
+                    branch_id=theoretical_branch.id,
+                    field_of_study_id=same_branch_other_field.id,
+                    scope_code="field:islamic_studies",
+                ),
+                BookCurriculumLink(
+                    book_id=missing_subject_book.id,
+                    branch_id=theoretical_branch.id,
+                    field_of_study_id=selected_field.id,
+                    subject_id=None,
+                    scope_code="field:math_physics:unmapped-subject",
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                BookCurriculumLink(
+                    book_id=hidden_book.id,
+                    branch_id=(await session.scalar(
+                        select(EducationBranch).where(EducationBranch.code == "theoretical")
+                    )).id,
+                    field_of_study_id=(await session.scalar(
+                        select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+                    )).id,
+                    scope_code="field:legacy_hidden",
+                ),
+                BookCurriculumLink(
+                    book_id=pending_book.id,
+                    branch_id=(await session.scalar(
+                        select(EducationBranch).where(EducationBranch.code == "theoretical")
+                    )).id,
+                    field_of_study_id=(await session.scalar(
+                        select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+                    )).id,
+                    scope_code="field:pending_hidden",
+                ),
+            ]
+        )
+        await session.commit()
+
+        resolved = await multi_grade_rag.resolve_curriculum_book_ids(
+            session,
+            grade_numbers=[10, 11, 12],
+            branch_code="theoretical",
+            field_code="math_physics",
+            academic_year_id=year.id,
+            subject_ids=[env.ids["subject_id"]],
+        )
+
+        assert set(resolved) == {
+            env.ids["book10"],
+            env.ids["book11"],
+            env.ids["book12"],
+        }
+        assert foreign_book.id not in resolved
+        assert same_branch_foreign_field_book.id not in resolved
+        assert hidden_book.id not in resolved
+        assert pending_book.id not in resolved
+        assert missing_subject_book.id not in resolved
+
+        with pytest.raises(ScopeError):
+            await multi_grade_rag.resolve_curriculum_book_ids(
+                session,
+                grade_numbers=[10, 11, 12],
+                branch_code="theoretical",
+                field_code="math_physics",
+                academic_year_id=year.id,
+                subject_ids=[env.ids["subject_id"]],
+                requested_book_ids=[foreign_book.id],
+            )
+
+        with pytest.raises(ScopeError):
+            await multi_grade_rag.resolve_curriculum_book_ids(
+                session,
+                grade_numbers=[10, 11, 12],
+                branch_code="theoretical",
+                field_code="math_physics",
+                academic_year_id=year.id + 1,
+                subject_ids=[env.ids["subject_id"]],
+            )
+
+        # Branches with active fields must not silently fall back to branch-wide scope.
+        with pytest.raises(ScopeError, match="field of study is required"):
+            await multi_grade_rag.resolve_curriculum_book_ids(
+                session,
+                grade_numbers=[10, 11, 12],
+                branch_code="technical_scope_test",
+                field_code=None,
+                academic_year_id=year.id,
+                subject_ids=[env.ids["subject_id"]],
+            )
+
+
+@pytest.mark.asyncio
+async def test_multi_grade_resolution_caps_automatically_matched_books(env):
+    async with env.factory() as session:
+        year = await session.scalar(
+            select(AcademicYear).where(AcademicYear.code == "1405-1406")
+        )
+        grade10 = await session.scalar(select(Grade).where(Grade.number == 10))
+        branch = await session.scalar(
+            select(EducationBranch).where(EducationBranch.code == "theoretical")
+        )
+        field = await session.scalar(
+            select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+        )
+        for index in range(10):
+            book = Book(
+                title=f"کتاب تکمیلی فیزیک {index}",
+                grade_id=grade10.id,
+                major_id=None,
+                academic_year_id=year.id,
+                pdf_file_path=f"/tmp/extra-{index}.pdf",
+                total_pdf_pages=1,
+                status=BookStatus.ready,
+                catalog_status="approved",
+            )
+            session.add(book)
+            await session.flush()
+            session.add(
+                BookCurriculumLink(
+                    book_id=book.id,
+                    branch_id=branch.id,
+                    field_of_study_id=field.id,
+                    subject_id=env.ids["subject_id"],
+                    scope_code=f"field:math_physics:extra:{index}",
+                )
+            )
+        await session.commit()
+
+        with pytest.raises(ScopeError, match="too many textbooks"):
+            await multi_grade_rag.resolve_curriculum_book_ids(
+                session,
+                grade_numbers=[10, 11, 12],
+                branch_code="theoretical",
+                field_code="math_physics",
+                academic_year_id=year.id,
+                subject_ids=[env.ids["subject_id"]],
+            )
+
+
+@pytest.mark.asyncio
 async def test_grade_filter_is_strict_and_never_widened(env):
     async with env.factory() as session:
         result = await multi_grade_rag.search_multi_grade(
-            session, "نیرو", grade_numbers=[11], expand_links=False
+            session,
+            "نیرو",
+            grade_numbers=[11],
+            book_ids=[env.ids["book11"]],
+            expand_links=False,
         )
     assert result["results"]
     assert {item["grade_number"] for item in result["results"]} == {11}
@@ -229,7 +497,9 @@ async def test_grade_filter_is_strict_and_never_widened(env):
 async def test_build_scopes_rejects_bad_grade_and_foreign_book(env):
     async with env.factory() as session:
         with pytest.raises(ScopeError):
-            await multi_grade_rag.build_scopes(session, grade_numbers=[9])
+            await multi_grade_rag.build_scopes(
+                session, grade_numbers=[9], book_ids=[env.ids["book10"]]
+            )
         with pytest.raises(ScopeError):
             await multi_grade_rag.build_scopes(
                 session, grade_numbers=[10], book_ids=[env.ids["book12"]]
@@ -250,15 +520,28 @@ async def test_concept_link_expands_only_to_selected_grades(env):
 
     async with env.factory() as session:
         allowed_both = await multi_grade_rag.expand_with_concept_links(
-            session, seeds=[(env.ids["book10"], 3)], allowed_grades=[10, 12]
+            session,
+            seeds=[(env.ids["book10"], 3)],
+            allowed_grades=[10, 12],
+            allowed_book_ids={env.ids["book10"], env.ids["book12"]},
         )
         allowed_ten = await multi_grade_rag.expand_with_concept_links(
-            session, seeds=[(env.ids["book10"], 3)], allowed_grades=[10]
+            session,
+            seeds=[(env.ids["book10"], 3)],
+            allowed_grades=[10],
+            allowed_book_ids={env.ids["book10"]},
+        )
+        disallowed_book = await multi_grade_rag.expand_with_concept_links(
+            session,
+            seeds=[(env.ids["book10"], 3)],
+            allowed_grades=[10, 12],
+            allowed_book_ids={env.ids["book10"]},
         )
     assert len(allowed_both) == 1
     assert allowed_both[0].grade_number == 12
     assert allowed_both[0].chapter_numbers == frozenset({1})
     assert allowed_ten == []  # the grade-12 filter is not silently widened
+    assert disallowed_book == []  # a valid grade cannot widen the authorized book allowlist
 
 
 @pytest.mark.asyncio
@@ -283,7 +566,16 @@ async def test_ask_endpoint_multi_grade_cites_two_grades(env):
     async with _client() as client:
         resp = await client.post(
             "/api/v1/tutor/ask",
-            json={"query": "نیرو", "grade_numbers": [10, 11, 12], "top_k": 6, "mode": "tutor"},
+            json={
+                "query": "نیرو",
+                "grade_number": None,
+                "grade_numbers": [10, 11, 12],
+                "book_id": env.ids["book12"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+                "top_k": 6,
+                "mode": "tutor",
+            },
         )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -291,6 +583,181 @@ async def test_ask_endpoint_multi_grade_cites_two_grades(env):
     assert len(cited_grades) >= 2
     assert body["scope_count"] == 3
     assert "پایه" in body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_audio_tutor_accepts_and_validates_education_branch(env, monkeypatch):
+    from app.api import tutor as tutor_api
+
+    seen: dict[str, object] = {}
+    original_resolve_scope = tutor_api.resolve_book_scope
+
+    async def tracked_resolve_scope(*args, **kwargs):
+        seen["branch_code"] = kwargs.get("branch_code")
+        return await original_resolve_scope(*args, **kwargs)
+
+    async def no_capability_gate(*args, **kwargs):
+        return None
+
+    async def no_quota_gate(*args, **kwargs):
+        return None
+
+    async def no_attachment(*args, **kwargs):
+        return None
+
+    async def fake_audio_answer(**kwargs):
+        return {"answer": "پاسخ مبتنی بر کتاب", "sources": []}
+
+    monkeypatch.setattr(tutor_api, "resolve_book_scope", tracked_resolve_scope)
+    monkeypatch.setattr(tutor_api, "check_capability_access", no_capability_gate)
+    monkeypatch.setattr(tutor_api, "enforce_ai_quota", no_quota_gate)
+    monkeypatch.setattr(tutor_api, "_maybe_store_tutor_attachment", no_attachment)
+    monkeypatch.setattr(tutor_api, "verify_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tutor_api, "answer_audio_question", fake_audio_answer)
+
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/tutor/ask-audio",
+            files={"audio": ("question.wav", b"audio", "audio/wav")},
+            data={
+                "grade_number": "12",
+                "book_id": str(env.ids["book12"]),
+                "major_code": "math_physics",
+                "branch_code": "theoretical",
+                "mode": "tutor",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert seen["branch_code"] == "theoretical"
+    assert response.json()["answer"] == "پاسخ مبتنی بر کتاب"
+
+
+@pytest.mark.asyncio
+async def test_single_book_tutor_and_exam_respect_student_grade_level(env):
+    async with env.factory() as session:
+        student = await session.get(User, env.ids["student_id"])
+        student.grade_level = 10
+        await session.commit()
+
+    async with _client() as client:
+        tutor_response = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "قانون دوم نیوتون",
+                "grade_number": 12,
+                "book_id": env.ids["book12"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+                "mode": "tutor",
+            },
+        )
+        exam_response = await client.post(
+            "/api/v1/exams",
+            json={
+                "grade_number": 12,
+                "book_id": env.ids["book12"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+                "question_count": 5,
+                "time_limit_minutes": 15,
+                "exam_type": "konkoor",
+            },
+        )
+        reader_response = await client.get(f"/api/v1/immersive/books/{env.ids['book12']}")
+        mastery_response = await client.get(f"/api/v1/mastery/books/{env.ids['book12']}")
+
+    assert tutor_response.status_code == 422
+    assert exam_response.status_code == 422
+    assert reader_response.status_code == 422
+    assert mastery_response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_multi_grade_endpoint_enforces_student_grade_ceiling(env):
+    async with env.factory() as session:
+        student = await session.get(User, env.ids["student_id"])
+        student.grade_level = 10
+        await session.commit()
+
+    async with _client() as client:
+        too_high_anchor = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 12],
+                "book_id": env.ids["book12"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+            },
+        )
+        too_high_cross_grade = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 11],
+                "book_id": env.ids["book10"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+            },
+        )
+
+    assert too_high_anchor.status_code == 422
+    assert too_high_cross_grade.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_multi_grade_unknown_profile_uses_anchor_grade_as_ceiling(env):
+    async with env.factory() as session:
+        student = await session.get(User, env.ids["student_id"])
+        student.grade_level = None
+        await session.commit()
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 12],
+                "book_id": env.ids["book10"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+            },
+        )
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_multi_grade_endpoint_requires_anchor_and_branch(env):
+    async with _client() as client:
+        no_anchor = await client.post(
+            "/api/v1/tutor/ask",
+            json={"query": "نیرو", "grade_numbers": [10, 11, 12]},
+        )
+        no_branch = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 11, 12],
+                "book_id": env.ids["book12"],
+                "major_code": "math_physics",
+            },
+        )
+        wrong_field_branch = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 11, 12],
+                "book_id": env.ids["book12"],
+                "branch_code": "technical_vocational",
+                "major_code": "math_physics",
+            },
+        )
+
+    assert no_anchor.status_code == 422
+    assert no_branch.status_code == 422
+    assert wrong_field_branch.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -773,8 +1240,17 @@ async def test_other_students_chats_are_not_searchable(env):
 @pytest.mark.asyncio
 async def test_scope_error_is_422_for_multi_grade_stream(env):
     async with _client() as client:
-        resp = await client.post("/api/v1/tutor/stream",
-                                 json={"query": "نیرو", "grade_numbers": [9], "top_k": 3})
+        resp = await client.post(
+            "/api/v1/tutor/stream",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [9],
+                "book_id": env.ids["book10"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+                "top_k": 3,
+            },
+        )
     assert resp.status_code == 422
 
 

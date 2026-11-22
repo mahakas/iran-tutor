@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import require_student, resolve_book_scope
+from app.api.dependencies import enforce_student_grade_level, require_student, resolve_book_scope
 from app.core.llm_client import track_token_usage
 from app.db.session import get_session
 from app.models.auth import User
@@ -53,6 +53,7 @@ async def start_exam(
         major_code=body.major_code,
         branch_code=body.branch_code,
     )
+    enforce_student_grade_level(current_user, grade.number)
     await check_capability_access(session, "quiz", current_user)
     await enforce_ai_quota(session, user=current_user, feature_key="quiz")
     try:

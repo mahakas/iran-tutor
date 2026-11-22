@@ -20,11 +20,23 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.concepts import ConceptLink
-from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.curriculum import (
+    Book,
+    BookCurriculumLink,
+    BookPage,
+    BookStatus,
+    EducationBranch,
+    FieldOfStudy,
+    Grade,
+    Major,
+    PageStatus,
+    Subject,
+)
+from app.services.curriculum_access import student_book_catalog_clause
 from app.services.retrieval_service import TextbookScope, search_textbook_scopes
 
 MAX_GRADES = 3
@@ -35,13 +47,166 @@ class ScopeError(ValueError):
     """Raised when a requested grade/book combination is invalid."""
 
 
+async def resolve_curriculum_book_ids(
+    session: AsyncSession,
+    *,
+    grade_numbers: Sequence[int],
+    branch_code: str,
+    field_code: str | None,
+    academic_year_id: int | None,
+    subject_ids: Sequence[int] | None = None,
+    requested_book_ids: Sequence[int] | None = None,
+) -> list[int]:
+    """Resolve approved editions for the selected branch/field/year/subject.
+
+    An anchor edition must have at least one normalized subject link. This is
+    the authorization boundary for multi-grade retrieval; its returned IDs,
+    never raw client-supplied IDs, are passed to search_multi_grade.
+    """
+    grades = sorted({int(grade) for grade in grade_numbers})
+    if not grades or any(grade not in (10, 11, 12) for grade in grades):
+        raise ScopeError("grade_numbers must be within 10, 11, 12")
+    if len(grades) > MAX_GRADES:
+        raise ScopeError("too many grades")
+    if not subject_ids:
+        raise ScopeError("the anchor textbook must have an approved subject mapping for multi-grade retrieval")
+    subject_ids = sorted(
+        set(
+            (
+                await session.scalars(
+                    select(Subject.id).where(
+                        Subject.id.in_([int(subject_id) for subject_id in subject_ids]),
+                        Subject.is_active.is_(True),
+                    )
+                )
+            ).all()
+        )
+    )
+    if not subject_ids:
+        raise ScopeError("the anchor textbook has no active subject mapping for multi-grade retrieval")
+    if not branch_code:
+        raise ScopeError("branch_code is required for multi-grade retrieval")
+
+    branch = await session.scalar(
+        select(EducationBranch).where(
+            EducationBranch.code == branch_code,
+            EducationBranch.is_active.is_(True),
+        )
+    )
+    if branch is None or any(not branch.min_grade <= grade <= branch.max_grade for grade in grades):
+        raise ScopeError("selected branch is not valid for every requested grade")
+
+    selected_field = None
+    if field_code:
+        selected_field = await session.scalar(
+            select(FieldOfStudy).where(
+                FieldOfStudy.code == field_code,
+                FieldOfStudy.branch_id == branch.id,
+                FieldOfStudy.is_active.is_(True),
+            )
+        )
+        if selected_field is None:
+            raise ScopeError("selected field does not belong to the selected branch")
+    elif (
+        await session.scalar(
+            select(FieldOfStudy.id)
+            .where(
+                FieldOfStudy.branch_id == branch.id,
+                FieldOfStudy.is_active.is_(True),
+            )
+            .limit(1)
+        )
+    ) is not None:
+        raise ScopeError("a field of study is required for this branch")
+
+    # Every candidate edition must have an explicit active subject link.
+    # A NULL subject is not an authorization wildcard for multi-grade retrieval.
+    subject_match = BookCurriculumLink.subject_id.in_(subject_ids)
+    applicable_links = [
+        exists(
+            select(BookCurriculumLink.id).where(
+                BookCurriculumLink.book_id == Book.id,
+                BookCurriculumLink.branch_id.is_(None),
+                BookCurriculumLink.field_of_study_id.is_(None),
+                subject_match,
+            )
+        ),
+        exists(
+            select(BookCurriculumLink.id).where(
+                BookCurriculumLink.book_id == Book.id,
+                BookCurriculumLink.branch_id == branch.id,
+                BookCurriculumLink.field_of_study_id.is_(None),
+                subject_match,
+            )
+        ),
+    ]
+    if selected_field is not None:
+        applicable_links.append(
+            exists(
+                select(BookCurriculumLink.id).where(
+                    BookCurriculumLink.book_id == Book.id,
+                    BookCurriculumLink.branch_id == branch.id,
+                    BookCurriculumLink.field_of_study_id == selected_field.id,
+                    subject_match,
+                )
+            )
+        )
+
+    year_condition = (
+        Book.academic_year_id == academic_year_id
+        if academic_year_id is not None
+        else Book.academic_year_id.is_(None)
+    )
+    predicates = [
+        Book.status == BookStatus.ready,
+        student_book_catalog_clause(),
+        Grade.number.in_(grades),
+        year_condition,
+        or_(*applicable_links),
+    ]
+    statement = (
+        select(Book.id)
+        .join(Grade, Book.grade_id == Grade.id)
+        .where(*predicates)
+        .order_by(Grade.number.asc(), Book.id.asc())
+    )
+
+    requested_ids: list[int] | None = None
+    if requested_book_ids is not None:
+        requested_ids = sorted({int(book_id) for book_id in requested_book_ids})
+        if not requested_ids:
+            raise ScopeError("book_ids cannot be empty when explicitly supplied")
+        if len(requested_ids) > MAX_BOOKS:
+            raise ScopeError("too many books")
+        statement = statement.where(Book.id.in_(requested_ids))
+
+    allowed_ids = [int(book_id) for book_id in (await session.scalars(statement)).all()]
+    if len(allowed_ids) > MAX_BOOKS:
+        raise ScopeError(
+            f"too many textbooks match the selected curriculum scope (maximum {MAX_BOOKS}); "
+            "narrow the subject or explicitly select textbooks"
+        )
+    if requested_ids is not None:
+        missing = sorted(set(requested_ids) - set(allowed_ids))
+        if missing:
+            raise ScopeError(
+                "books are not approved for the selected grades, branch, field, subject, and academic year: "
+                f"{missing}"
+            )
+    if not allowed_ids:
+        raise ScopeError("no approved textbooks are available in the selected curriculum scope")
+    return allowed_ids
+
+
 async def build_scopes(
     session: AsyncSession,
     *,
     grade_numbers: Sequence[int],
-    book_ids: Sequence[int] | None = None,
+    book_ids: Sequence[int],
 ) -> list[TextbookScope]:
-    """Resolve the allowed (book, grade, major) slices for a multi-grade request."""
+    """Build retrieval scopes from server-authorized book IDs only."""
+    if not book_ids:
+        raise ScopeError("authorized book_ids are required for multi-grade retrieval")
     grades = sorted({int(g) for g in grade_numbers})
     if not grades:
         raise ScopeError("at least one grade is required")
@@ -54,21 +219,23 @@ async def build_scopes(
         select(Book, Grade.number, Major.code)
         .join(Grade, Book.grade_id == Grade.id)
         .outerjoin(Major, Book.major_id == Major.id)
-        .where(Grade.number.in_(grades), Book.status == BookStatus.ready)
+        .where(
+            Grade.number.in_(grades),
+            Book.status == BookStatus.ready,
+            student_book_catalog_clause(),
+        )
         .order_by(Grade.number.asc(), Book.id.asc())
     )
-    if book_ids:
-        ids = sorted({int(b) for b in book_ids})
-        if len(ids) > MAX_BOOKS:
-            raise ScopeError("too many books")
-        statement = statement.where(Book.id.in_(ids))
+    ids = sorted({int(book_id) for book_id in book_ids})
+    if not ids:
+        raise ScopeError("authorized book_ids are required for multi-grade retrieval")
+    statement = statement.where(Book.id.in_(ids))
     rows = (await session.execute(statement)).all()
 
-    if book_ids:
-        found = {book.id for book, _, _ in rows}
-        missing = sorted(set(book_ids) - found)
-        if missing:
-            raise ScopeError(f"books not available for the selected grades: {missing}")
+    found = {book.id for book, _, _ in rows}
+    missing = sorted(set(ids) - found)
+    if missing:
+        raise ScopeError(f"authorized books are not ready or do not match selected grades: {missing}")
 
     return [
         TextbookScope(book_id=book.id, grade_number=grade, major_code=major or "general")
@@ -99,9 +266,13 @@ async def search_multi_grade(
 
     expanded: list[dict[str, Any]] = []
     if expand_links and primary:
+        authorized_book_ids = {scope.book_id for scope in scopes}
         seeds = [(r["book_id"], r["chapter_number"]) for r in primary if r.get("chapter_number")]
         link_scopes = await expand_with_concept_links(
-            session, seeds=seeds, allowed_grades=grade_numbers
+            session,
+            seeds=seeds,
+            allowed_grades=grade_numbers,
+            allowed_book_ids=authorized_book_ids,
         )
         if link_scopes:
             expanded = await search_textbook_scopes(query, scopes=link_scopes, top_k=max(2, top_k // 2))
@@ -117,6 +288,7 @@ async def expand_with_concept_links(
     *,
     seeds: Iterable[tuple[int, int]],
     allowed_grades: Sequence[int],
+    allowed_book_ids: set[int] | Sequence[int],
 ) -> list[TextbookScope]:
     """Chapter-level scopes for books linked to the seed chapters.
 
@@ -148,12 +320,20 @@ async def expand_with_concept_links(
         return []
 
     allowed = set(int(g) for g in allowed_grades)
+    allowed_ids = {int(book_id) for book_id in allowed_book_ids}
+    target_ids = sorted(set(targets) & allowed_ids)
+    if not target_ids:
+        return []
     book_rows = (
         await session.execute(
             select(Book.id, Grade.number, Major.code)
             .join(Grade, Book.grade_id == Grade.id)
             .outerjoin(Major, Book.major_id == Major.id)
-            .where(Book.id.in_(list(targets)), Book.status == BookStatus.ready)
+            .where(
+                Book.id.in_(target_ids),
+                Book.status == BookStatus.ready,
+                student_book_catalog_clause(),
+            )
         )
     ).all()
     scopes: list[TextbookScope] = []
