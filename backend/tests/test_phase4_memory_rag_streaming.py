@@ -30,7 +30,7 @@ from app.main import app
 from app.models.auth import User
 from app.models.chat import ChatSession
 from app.models.concepts import ConceptLink
-from app.models.curriculum import AcademicYear, Book, BookCurriculumLink, BookPage, BookStatus, EducationBranch, FieldOfStudy, Grade, Major, PageStatus
+from app.models.curriculum import AcademicYear, Book, BookCurriculumLink, BookPage, BookStatus, EducationBranch, FieldOfStudy, Grade, Major, PageStatus, Subject
 from app.models.governance import AiAuditLog
 from app.models.learner_memory import LearnerMemory
 from app.services import (
@@ -82,7 +82,8 @@ async def env(tmp_path, monkeypatch):
             title="۱۴۰۵–۱۴۰۶",
             is_active=True,
         )
-        session.add(academic_year)
+        subject = Subject(code="physics", title="فیزیک", is_active=True)
+        session.add_all([academic_year, subject])
         await session.flush()
         books: dict[int, Book] = {}
         for grade_number, chapter, text in (
@@ -108,7 +109,8 @@ async def env(tmp_path, monkeypatch):
                     book_id=book.id,
                     branch_id=branch.id,
                     field_of_study_id=field.id,
-                    scope_code="field:math_physics",
+                    subject_id=subject.id,
+                    scope_code="field:math_physics:physics",
                 )
             )
             session.add(
@@ -140,6 +142,7 @@ async def env(tmp_path, monkeypatch):
             book10=books[10].id,
             book11=books[11].id,
             book12=books[12].id,
+            subject_id=subject.id,
         )
         await session.commit()
 
@@ -359,6 +362,7 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
             branch_code="theoretical",
             field_code="math_physics",
             academic_year_id=year.id,
+            subject_ids=[env.ids["subject_id"]],
         )
 
         assert set(resolved) == {
@@ -378,6 +382,7 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
                 branch_code="theoretical",
                 field_code="math_physics",
                 academic_year_id=year.id,
+                subject_ids=[env.ids["subject_id"]],
                 requested_book_ids=[foreign_book.id],
             )
 
@@ -388,6 +393,7 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
                 branch_code="theoretical",
                 field_code="math_physics",
                 academic_year_id=year.id + 1,
+                subject_ids=[env.ids["subject_id"]],
             )
 
 
