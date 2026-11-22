@@ -828,6 +828,19 @@ async def _run_ingest_background(
                 await session.commit()
 
 
+def _branch_wide_applicability_codes(
+    *,
+    applicable_branch_codes: list[str],
+    branch_code: str | None,
+    selected_field_codes: list[str],
+) -> set[str]:
+    """Distinguish an explicit branch-wide grant from a field's parent branch."""
+    codes = {code.strip() for code in applicable_branch_codes if code and code.strip()}
+    if not selected_field_codes and branch_code and branch_code.strip():
+        codes.add(branch_code.strip())
+    return codes
+
+
 def _book_curriculum_scope_rows(
     *,
     grade_number: int,
@@ -908,11 +921,11 @@ async def upload_and_ingest(
         # uploads; it is NOT itself a branch-wide applicability grant. A branch-wide
         # link is created only for explicit applicable_branch_codes, or for a
         # branch-only upload where no fields were selected.
-        branch_wide_codes = {
-            code.strip() for code in applicable_branch_codes if code and code.strip()
-        }
-        if not selected_field_codes and branch_code and branch_code.strip():
-            branch_wide_codes.add(branch_code.strip())
+        branch_wide_codes = _branch_wide_applicability_codes(
+            applicable_branch_codes=applicable_branch_codes,
+            branch_code=branch_code,
+            selected_field_codes=selected_field_codes,
+        )
         if official_source_url:
             parsed_source_url = urlparse(official_source_url.strip())
             if parsed_source_url.scheme not in {"http", "https"} or not parsed_source_url.netloc:
