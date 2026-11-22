@@ -104,6 +104,7 @@ export default function ImmersiveReader({ bookId }: Props) {
     (index: number) => {
       if (!pages.some((page) => page.pdf_page_index === index)) return;
       setPageIndex(index);
+      setSelection("");
       setNotice(null);
       contentRef.current?.scrollTo({ top: 0 });
     },
