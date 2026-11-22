@@ -233,3 +233,37 @@ async def test_provider_route_resolves_ordered_multi_fallback_chain(monkeypatch)
         (3, "main-model"),
     ]
     assert [item.api_key for item in resolved] == ["key:p", "key:b2", "key:b3"]
+
+
+@pytest.mark.asyncio
+async def test_embedding_query_route_requires_embedding_capability(monkeypatch):
+    from app.services import ai_provider_service
+
+    route = SimpleNamespace(
+        provider_id=1,
+        model_name="embedding-model",
+        temperature=0,
+        max_tokens=256,
+        fallback_chain_json=[],
+        fallback_provider_id=None,
+        fallback_model_name=None,
+    )
+    providers = {
+        1: SimpleNamespace(id=1, name="wrong-capability", provider_type="openai_compatible",
+                           base_url="https://wrong.example/v1", encrypted_api_key="wrong",
+                           is_active=True, capabilities=["chat"]),
+    }
+
+    class FakeSession:
+        async def get(self, model, provider_id):
+            return providers.get(provider_id)
+
+    async def active_route(_session, feature):
+        assert feature == "embedding_query"
+        return route
+
+    monkeypatch.setattr(ai_provider_service, "get_active_route", active_route)
+    resolved = await ai_provider_service.resolve_feature_route_candidates(
+        FakeSession(), "embedding_query"
+    )
+    assert resolved == []

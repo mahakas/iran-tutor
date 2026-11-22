@@ -167,7 +167,7 @@ async def resolve_feature_route_candidates(
         required_capability = "stt"
     elif feature_key in {"tts", "audio_tts", "speech_synthesis"}:
         required_capability = "tts"
-    elif feature_key in {"embedding", "embeddings"}:
+    elif feature_key in {"embedding", "embeddings", "embedding_query"}:
         required_capability = "embedding"
     else:
         required_capability = "chat"
