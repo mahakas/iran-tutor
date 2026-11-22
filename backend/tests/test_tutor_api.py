@@ -39,8 +39,8 @@ class FakeSession:
             return SimpleNamespace(
                 id=3, code="theoretical", min_grade=10, max_grade=12, is_active=True
             )
-        if "field_of_study" in sql:
-            if "field_of_study.code" not in sql:
+        if "fields_of_study" in sql:
+            if "fields_of_study.code" not in sql:
                 return 5
             code = next(
                 (value for value in params.values() if value in {"math_physics", "experimental"}),
@@ -132,7 +132,7 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
     finally:
         app.dependency_overrides.clear()
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert response.json()["answer"] == "پاسخ مستند"
 
 
