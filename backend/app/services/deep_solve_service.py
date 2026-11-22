@@ -10,7 +10,6 @@ counts as independent only if no hint was used and the tutor did not reveal it.
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -21,10 +20,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import User
-from app.models.curriculum import AcademicYear, Book, BookPage, Grade, PageStatus
+from app.models.curriculum import AcademicYear, Book, Grade
 from app.models.phase5 import DeepSolveSession
 from app.services.curriculum_access import is_student_visible_book
 from app.core.config import get_settings
+from app.services.retrieval_service import TextbookScope, search_textbook_scopes
 from app.services import mastery_service
 from app.services.capability_runtime import run_capability_json
 
@@ -68,7 +68,7 @@ async def _load_official_book_context(
     problem: str,
     chapter_number: int | None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Load grounded pages from one approved edition; never solve from free-form knowledge."""
+    """Retrieve relevant passages from one approved textbook edition only."""
     book = await session.get(Book, book_id)
     if not is_student_visible_book(book):
         raise HTTPException(status_code=404, detail="کتاب رسمیِ آماده و تأییدشده یافت نشد.")
@@ -81,56 +81,34 @@ async def _load_official_book_context(
     if assigned_grade is not None and grade.number > assigned_grade:
         raise HTTPException(status_code=422, detail="کتاب انتخاب‌شده بالاتر از پایهٔ ثبت‌شدهٔ دانش‌آموز است.")
 
-    statement = (
-        select(BookPage)
-        .where(BookPage.book_id == book_id, BookPage.status == PageStatus.done)
-        .order_by(BookPage.pdf_page_index.asc())
+    # Reuse the product's exact-book hybrid retrieval (PostgreSQL lexical +
+    # pgvector/Qdrant semantic search). A hit can never widen to a sibling
+    # edition because book_id is mandatory in search_textbook.
+    scope = TextbookScope(
+        book_id=book_id,
+        grade_number=grade.number,
+        major_code=None,
+        chapter_numbers=frozenset({chapter_number}) if chapter_number is not None else None,
     )
-    if chapter_number is not None:
-        statement = statement.where(BookPage.chapter_number == chapter_number)
-    pages = list((await session.scalars(statement)).all())
-    if not pages:
+    hits = await search_textbook_scopes(problem, scopes=[scope], top_k=8)
+    if not hits:
         raise HTTPException(
             status_code=409,
-            detail="برای این کتاب و فصل، صفحهٔ پردازش‌شده و تأییدشده‌ای برای استناد وجود ندارد.",
+            detail="در صفحات تأییدشدهٔ همین نسخهٔ کتاب، منبع مرتبط با صورت مسئله پیدا نشد؛ فصل یا صورت مسئله را دقیق‌تر انتخاب کنید.",
         )
 
-    stopwords = {
-        "برای", "چیست", "چگونه", "می‌شود", "می‌کنند", "است", "هست", "بود",
-        "این", "آن", "یک", "با", "در", "از", "به", "را", "که", "و", "یا",
-        "چرا", "آیا", "اگر", "اما", "هم", "تا", "بر", "روی", "پس",
-    }
-    tokens = {
-        token for token in re.findall(r"[\w۰-۹]{2,}", problem.casefold())
-        if token not in stopwords
-    }
-    ranked: list[tuple[int, BookPage, str]] = []
-    for page in pages:
-        page_text = (page.markdown_content or "").strip()
-        if not page_text:
-            continue
-        page_tokens = set(re.findall(r"[\w۰-۹]{2,}", page_text.casefold()))
-        # Exact token overlap avoids substring false positives such as query
-        # token "در" matching the word "ضربدر".
-        score = len(tokens & page_tokens)
-        ranked.append((score, page, page_text))
-    if not ranked:
-        raise HTTPException(status_code=409, detail="محتوای متنیِ قابل استناد در صفحات انتخاب‌شده موجود نیست.")
-    if max(score for score, _page, _text in ranked) <= 0:
-        raise HTTPException(
-            status_code=409,
-            detail="در صفحات تأییدشدهٔ کتاب، منبع مرتبط با صورت مسئله پیدا نشد؛ لطفاً مسئله یا فصل را دقیق‌تر انتخاب کنید.",
-        )
-
-    ranked.sort(key=lambda item: (-item[0], item[1].pdf_page_index))
-    selected = ranked[:8]
     year = await session.get(AcademicYear, book.academic_year_id) if book.academic_year_id else None
     citations: list[dict[str, Any]] = []
     blocks: list[str] = []
     remaining = 18_000
-    for _score, page, page_text in selected:
+    for hit in hits:
         if remaining <= 0:
             break
+        page_text = (hit.get("full_text") or hit.get("markdown_content") or "").strip()
+        if not page_text:
+            continue
+        pdf_page_index = hit.get("pdf_page_index")
+        printed_page_number = hit.get("printed_page_number")
         citation = {
             "book_id": book.id,
             "book_title": book.title,
@@ -139,20 +117,20 @@ async def _load_official_book_context(
             "edition_label": book.edition_label,
             "print_year": book.print_year,
             "publisher": book.publisher,
-            "chapter_number": page.chapter_number,
-            "chapter_title": page.chapter_title,
-            "pdf_page_index": page.pdf_page_index,
-            "printed_page_number": page.printed_page_number,
+            "chapter_number": hit.get("chapter_number"),
+            "chapter_title": hit.get("chapter_title"),
+            "pdf_page_index": pdf_page_index,
+            "printed_page_number": printed_page_number,
         }
         citation["citation"] = (
             f"[کتاب: {book.title} | پایه {grade.number} | "
             f"سال تحصیلی {year.code if year else 'نامشخص'} | "
-            f"صفحه {page.printed_page_number if page.printed_page_number is not None else page.pdf_page_index}]"
+            f"صفحه {printed_page_number if printed_page_number is not None else pdf_page_index}]"
         )
         body = page_text[:remaining]
         blocks.append(
             f"{citation['citation']}\n"
-            f"فصل: {page.chapter_title or 'نامشخص'} | صفحه PDF: {page.pdf_page_index}\n{body}"
+            f"فصل: {hit.get('chapter_title') or 'نامشخص'} | صفحه PDF: {pdf_page_index}\n{body}"
         )
         remaining -= len(body)
         citations.append(citation)
@@ -166,7 +144,6 @@ async def _load_official_book_context(
         + "\n</textbook_sources>"
     )
     return context, citations
-
 
 async def create_session(
     session: AsyncSession,
