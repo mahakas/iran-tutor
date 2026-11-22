@@ -80,17 +80,46 @@ async def create_session(
             user=user,
             enforce=True,
         )
+        try:
+            plan = parse_plan(result.content)
+        except ValueError:
+            # Match DeepTutor's one-shot schema repair: repair the structured
+            # response once, without creating a second session or repeating the
+            # pre-call quota gate. The gateway still records the repair call.
+            invalid_json = json.dumps(result.content, ensure_ascii=False, default=str)[:12000]
+            repaired, _skill = await run_capability_json(
+                session=session,
+                capability_key=DEEP_SOLVE_CAPABILITY,
+                feature_key=DEEP_SOLVE_CAPABILITY,
+                user_text=(
+                    f"مسئله اصلی:\n{problem[:4000]}\n\n"
+                    f"خروجی JSON نامعتبر قبلی:\n{invalid_json}\n\n"
+                    "خروجی قبلی را با قرارداد ساختاری زیر اصلاح کن. "
+                    "حداقل ۲ و حداکثر ۱۰ گام تولید کن. هر گام باید title، hint1، "
+                    "hint2، explanation و result داشته باشد. خروجی فقط یک شیء JSON باشد."
+                ),
+                user_id=user.id,
+                book_id=book_id,
+                textbook_strict=False,
+                user=user,
+                enforce=False,
+                extra_system=(
+                    "قرارداد خروجی: {topic: string, subject: string, "
+                    "steps: [{title: string, hint1: string, hint2: string, "
+                    "explanation: string, result: string}], final_answer: string}. "
+                    "هیچ کلید الزامی را حذف نکن و فقط JSON معتبر برگردان."
+                ),
+            )
+            plan = parse_plan(repaired.content)
     except HTTPException:
         await session.rollback()
         raise
-    except Exception as error:  # noqa: BLE001 - map provider failures to a clean 502
-        await session.commit()  # keep the gateway audit row for the failed call
-        raise HTTPException(status_code=502, detail="حل گام‌به‌گام در دسترس نیست.") from error
-    try:
-        plan = parse_plan(result.content)
     except ValueError as error:
-        await session.commit()  # keep the audit of the invalid model output; no session row is created
+        await session.commit()  # preserve both audits; never create a session with an invalid plan
         raise HTTPException(status_code=502, detail="مدل طرح حل معتبر برنگرداند؛ دوباره تلاش کنید.") from error
+    except Exception as error:  # noqa: BLE001 - map provider failures to a clean 502
+        await session.commit()  # keep gateway audit rows for failed generation/repair
+        raise HTTPException(status_code=502, detail="حل گام‌به‌گام در دسترس نیست.") from error
 
     row = DeepSolveSession(
         id=str(uuid.uuid4()),
