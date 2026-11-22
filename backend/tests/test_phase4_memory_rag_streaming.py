@@ -532,6 +532,47 @@ async def test_auto_mode_falls_back_to_heuristic_and_audits_fallback(env):
     assert row is not None
 
 
+@pytest.mark.asyncio
+async def test_auto_mode_stream_rechecks_routed_capability_before_generation(env, monkeypatch):
+    from app.models.capabilities import Capability
+    from app.services.intent_router import RouterDecision
+
+    async def force_quiz_route(**kwargs):
+        return RouterDecision(
+            mode="question_designer",
+            confidence=0.99,
+            reason="test route",
+            source="heuristic",
+        )
+
+    monkeypatch.setattr(intent_router, "route_intent", force_quiz_route)
+    async with env.factory() as session:
+        quiz = await session.get(Capability, "quiz")
+        quiz.is_enabled = False
+        await session.commit()
+
+    body = dict(
+        _STREAM_BODY,
+        book_id=env.ids["book11"],
+        chat_session_id="chat-auto-disabled-quiz",
+        auto_mode=True,
+    )
+    async with _client() as client:
+        started = await client.post("/api/v1/tutor/stream", json=body)
+        assert started.status_code == 200, started.text
+        payload = started.json()
+        chunks, end = await _read_stream(client, payload["stream_id"])
+
+    assert end["status"] == "error"
+    assert chunks == []
+    assert env.fake.text_calls == []
+    assert await _count(
+        env.factory,
+        AiAuditLog,
+        AiAuditLog.feature_key == "quiz",
+    ) == 0
+
+
 def test_router_heuristic_and_invalid_llm_output():
     assert intent_router.heuristic_mode("مسئله را حل کن")[0] == "problem_solver"
     assert intent_router.heuristic_mode("سؤال طراحی کن")[0] == "question_designer"
