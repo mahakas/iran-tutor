@@ -45,7 +45,7 @@ from app.services import (
 from app.services import ai_gateway as _gw  # noqa: F401  (ensures gateway import order)
 
 ADMIN_HEADERS = {"X-Admin-Username": "admin", "X-Admin-Password": "123"}
-NOW = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)
 
 GOOD_QUESTION = {
     "prompt": "کدام کمیت برداری است؟",
