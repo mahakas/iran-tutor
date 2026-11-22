@@ -199,7 +199,7 @@ async def build_scopes(
     session: AsyncSession,
     *,
     grade_numbers: Sequence[int],
-    book_ids: Sequence[int] | None = None,
+    book_ids: Sequence[int],
 ) -> list[TextbookScope]:
     """Build retrieval scopes from server-authorized book IDs only."""
     if not book_ids:
@@ -223,18 +223,16 @@ async def build_scopes(
         )
         .order_by(Grade.number.asc(), Book.id.asc())
     )
-    if book_ids:
-        ids = sorted({int(b) for b in book_ids})
-        if len(ids) > MAX_BOOKS:
-            raise ScopeError("too many books")
-        statement = statement.where(Book.id.in_(ids))
+    ids = sorted({int(book_id) for book_id in book_ids})
+    if not ids:
+        raise ScopeError("authorized book_ids are required for multi-grade retrieval")
+    statement = statement.where(Book.id.in_(ids))
     rows = (await session.execute(statement)).all()
 
-    if book_ids:
-        found = {book.id for book, _, _ in rows}
-        missing = sorted(set(book_ids) - found)
-        if missing:
-            raise ScopeError(f"books not available for the selected grades: {missing}")
+    found = {book.id for book, _, _ in rows}
+    missing = sorted(set(ids) - found)
+    if missing:
+        raise ScopeError(f"authorized books are not ready or do not match selected grades: {missing}")
 
     return [
         TextbookScope(book_id=book.id, grade_number=grade, major_code=major or "general")
