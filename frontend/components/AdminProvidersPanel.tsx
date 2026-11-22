@@ -330,13 +330,13 @@ export default function AdminProvidersPanel({
             <label className="form-field">
               <span>نوع ارائه‌دهنده</span>
               <select value={formType} onChange={(event) => setFormType(event.target.value)}>
-                {(providerTypes.length ? providerTypes : Object.keys(PROVIDER_TYPE_LABELS)).map(
-                  (type) => (
+                (providerTypes.length ? providerTypes : Object.keys(PROVIDER_TYPE_LABELS))
+                  .filter((type) => ["openai", "openai_compatible", "local"].includes(type))
+                  .map((type) => (
                     <option key={type} value={type}>
                       {PROVIDER_TYPE_LABELS[type] ?? type}
                     </option>
-                  ),
-                )}
+                  ))
               </select>
             </label>
           </div>
