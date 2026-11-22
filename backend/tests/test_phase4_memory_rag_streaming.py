@@ -266,12 +266,27 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
         )
         session.add(foreign_field)
         await session.flush()
+        same_branch_other_field = await session.scalar(
+            select(FieldOfStudy).where(FieldOfStudy.code == "islamic_studies")
+        )
+        theoretical_branch = await session.scalar(
+            select(EducationBranch).where(EducationBranch.code == "theoretical")
+        )
 
         foreign_book = Book(
             title="کتاب فنی خارج از رشتهٔ انتخابی",
             grade_id=grade10.id,
             academic_year_id=year.id,
             pdf_file_path="/tmp/foreign.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="approved",
+        )
+        same_branch_foreign_field_book = Book(
+            title="کتاب رشتهٔ دیگر در همان شاخه",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/same-branch-foreign-field.pdf",
             total_pdf_pages=1,
             status=BookStatus.ready,
             catalog_status="approved",
@@ -294,15 +309,23 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
             status=BookStatus.ready,
             catalog_status="pending_review",
         )
-        session.add_all([foreign_book, hidden_book, pending_book])
+        session.add_all([foreign_book, same_branch_foreign_field_book, hidden_book, pending_book])
         await session.flush()
-        session.add(
-            BookCurriculumLink(
-                book_id=foreign_book.id,
-                branch_id=foreign_branch.id,
-                field_of_study_id=foreign_field.id,
-                scope_code="field:electronics_scope_test",
-            )
+        session.add_all(
+            [
+                BookCurriculumLink(
+                    book_id=foreign_book.id,
+                    branch_id=foreign_branch.id,
+                    field_of_study_id=foreign_field.id,
+                    scope_code="field:electronics_scope_test",
+                ),
+                BookCurriculumLink(
+                    book_id=same_branch_foreign_field_book.id,
+                    branch_id=theoretical_branch.id,
+                    field_of_study_id=same_branch_other_field.id,
+                    scope_code="field:islamic_studies",
+                ),
+            ]
         )
         session.add_all(
             [
@@ -344,6 +367,7 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
             env.ids["book12"],
         }
         assert foreign_book.id not in resolved
+        assert same_branch_foreign_field_book.id not in resolved
         assert hidden_book.id not in resolved
         assert pending_book.id not in resolved
 
