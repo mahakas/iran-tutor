@@ -41,7 +41,7 @@ from app.services import (
 from app.services.ai_gateway import GatewayResult
 from app.services.visual_safety import UnsafeVisualError, sanitize_svg, validate_mermaid
 
-NOW = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)
 HIT = {
     "book_id": 1,
     "chapter_number": 2,
