@@ -2918,6 +2918,13 @@ FEATURE_ROUTE_LABELS: dict[str, str] = {
     "ingest_ocr": "پردازش کتاب (OCR)",
     "memory": "حافظهٔ یادگیرنده (L2/L3)",
     "intent_router": "مسیریاب هوشمند حالت‌ها",
+    "immersive_reader": "مطالعهٔ تعاملی",
+    "deep_solve": "حل عمیق تمرین",
+    "quiz_validator": "اعتبارسنجی آزمون",
+    "learning_notebook": "دفتر یادگیری",
+    "web_visualize": "تجسم و نمودار",
+    "living_book": "کتاب زنده",
+    "audio_tts": "تبدیل متن به گفتار",
 }
 
 
