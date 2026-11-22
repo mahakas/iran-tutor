@@ -45,6 +45,10 @@ def upgrade() -> None:
             "ck_curriculum_unit_field_requires_branch",
             "field_of_study_id IS NULL OR branch_id IS NOT NULL",
         )
+        batch.create_check_constraint(
+            "ck_curriculum_unit_branch_upper_secondary",
+            "branch_id IS NULL OR grade_id >= 10",
+        )
     op.create_index("ix_curriculum_units_branch_id", "curriculum_units", ["branch_id"])
     op.create_index(
         "ix_curriculum_units_field_of_study_id",
@@ -57,6 +61,7 @@ def downgrade() -> None:
     op.drop_index("ix_curriculum_units_field_of_study_id", table_name="curriculum_units")
     op.drop_index("ix_curriculum_units_branch_id", table_name="curriculum_units")
     with op.batch_alter_table("curriculum_units") as batch:
+        batch.drop_constraint("ck_curriculum_unit_branch_upper_secondary", type_="check")
         batch.drop_constraint("ck_curriculum_unit_field_requires_branch", type_="check")
         batch.drop_constraint("uq_curriculum_unit_code", type_="unique")
         batch.create_unique_constraint(
