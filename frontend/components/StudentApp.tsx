@@ -562,8 +562,8 @@ export default function StudentApp() {
       const started = await startTutorStream(authFetch, {
         query,
         grade_number: useMulti ? null : gradeNumber,
-        major_code: useMulti ? null : hasMajor ? majorCode : null,
-        branch_code: useMulti ? null : isUpperSecondary ? branchCode : null,
+        major_code: hasMajor ? majorCode : null,
+        branch_code: isUpperSecondary ? branchCode : null,
         book_id: Number(bookId),
         grade_numbers: useMulti ? multiGrades : null,
         book_ids: null,
