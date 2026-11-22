@@ -318,6 +318,8 @@ def _evidence_progress(
                 "score": latest.score,
                 "qualitative_level": level,
                 "verification_status": getattr(latest, "verification_status", "unverified"),
+                "review_note": getattr(latest, "review_note", None),
+                "reviewed_at": latest.reviewed_at.isoformat() if getattr(latest, "reviewed_at", None) else None,
                 "feedback": latest.feedback,
                 "observed_at": latest.observed_at.isoformat() if latest.observed_at else None,
             }
@@ -332,6 +334,7 @@ def _evidence_progress(
                 "qualitative_level": row.qualitative_level,
                 "verification_status": getattr(row, "verification_status", "unverified"),
                 "reviewed_at": row.reviewed_at.isoformat() if getattr(row, "reviewed_at", None) else None,
+                "review_note": getattr(row, "review_note", None),
                 "rubric": dict(row.rubric_json or {}),
                 "feedback": row.feedback,
                 "observed_at": row.observed_at.isoformat() if row.observed_at else None,

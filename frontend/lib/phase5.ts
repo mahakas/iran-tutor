@@ -221,6 +221,7 @@ export type ObjectiveEvidenceItem = {
   qualitative_level: string | null;
   verification_status: "unverified" | "verified" | "rejected" | string;
   reviewed_at: string | null;
+  review_note: string | null;
   rubric: Record<string, unknown>;
   feedback: string | null;
   observed_at: string | null;
@@ -244,6 +245,8 @@ export type ObjectiveMasteryItem = {
     score: number | null;
     qualitative_level: string | null;
     verification_status: "unverified" | "verified" | "rejected" | string;
+    review_note: string | null;
+    reviewed_at: string | null;
     feedback: string | null;
     observed_at: string | null;
   } | null;

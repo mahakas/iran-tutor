@@ -215,7 +215,12 @@ export default function MasteryWorkspace() {
               {objective.latest_evidence ? (
                 <div style={{ fontSize: 12, opacity: 0.8 }}>
                   آخرین شاهد: {objective.latest_evidence.source_type}
-                  {objective.latest_evidence.verification_status === "unverified" ? " · در انتظار بازبینی" : ""}
+                  {objective.latest_evidence.verification_status === "unverified"
+                    ? " · در انتظار بازبینی"
+                    : objective.latest_evidence.verification_status === "rejected"
+                      ? " · ردشده"
+                      : " · بازبینی‌شده"}
+                  {objective.latest_evidence.review_note ? ` · یادداشت بازبین: ${objective.latest_evidence.review_note}` : ""}
                 </div>
               ) : null}
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
