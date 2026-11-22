@@ -169,6 +169,7 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
                         "major_code": "math_physics",
                         "book_title": "فیزیک ۳",
                         "pdf_page_index": 1,
+                        "embedding_model": settings.embedding_model,
                     },
                 ),
                 models.PointStruct(
@@ -180,6 +181,7 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
                         "major_code": "experimental",
                         "book_title": "فیزیک ۳",
                         "pdf_page_index": 2,
+                        "embedding_model": settings.embedding_model,
                     },
                 ),
                 models.PointStruct(
@@ -191,6 +193,7 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
                         "major_code": "math_physics",
                         "book_title": "فیزیک ۲",
                         "pdf_page_index": 3,
+                        "embedding_model": settings.embedding_model,
                     },
                 ),
             ],
