@@ -23,10 +23,10 @@ class FakeSession:
 
     async def scalar(self, statement):
         self.scalar_calls += 1
-        if self.scalar_calls == 1:
-            return self.grade
         if self.scalar_values:
             return self.scalar_values.pop(0)
+        if self.scalar_calls == 1:
+            return self.grade
         return self.major
 
     async def scalars(self, statement):
@@ -126,7 +126,7 @@ async def test_resolve_book_scope_accepts_approved_technical_branch_book():
         grade,
         scalar_values=[branch, 501],  # matching branch and BookCurriculumLink
     )
-
+    # resolve_book_scope loads the grade via get(), so the first scalar is the branch.
     async def fake_get(model, identifier):
         return {Book: book, Grade: grade}.get(model)
 
