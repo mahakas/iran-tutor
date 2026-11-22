@@ -116,7 +116,42 @@ async def test_objective_tree_handles_prerequisites_and_scoped_units(curriculum_
         title="شناخت سرعت",
         assessment_profile="written",
     )
-    session.add_all([first, second])
+    other_branch = EducationBranch(
+        code="technical_vocational",
+        title="فنی‌وحرفه‌ای",
+        min_grade=10,
+        max_grade=12,
+        is_active=True,
+    )
+    session.add(other_branch)
+    await session.flush()
+    other_field = FieldOfStudy(
+        branch_id=other_branch.id,
+        code="electronics",
+        title="الکترونیک",
+        is_active=True,
+    )
+    session.add(other_field)
+    await session.flush()
+    other_unit = CurriculumUnit(
+        grade_id=grade.id,
+        subject_id=subject.id,
+        branch_id=other_branch.id,
+        field_of_study_id=other_field.id,
+        academic_year_id=year.id,
+        scope_code=year.code,
+        code="unit-other-branch",
+        title="واحد خارج از شاخه",
+    )
+    session.add(other_unit)
+    await session.flush()
+    other_objective = LearningObjective(
+        unit_id=other_unit.id,
+        code="physics.electronics.basic",
+        title="هدف خارج از شاخهٔ کتاب",
+        assessment_profile="written",
+    )
+    session.add_all([first, second, other_objective])
     await session.flush()
     session.add(
         ObjectivePrerequisite(
@@ -134,6 +169,7 @@ async def test_objective_tree_handles_prerequisites_and_scoped_units(curriculum_
 
     by_code = {item["code"]: item for item in result["objectives"]}
     assert set(by_code) == {"physics.motion.basic", "physics.motion.velocity"}
+    assert "physics.electronics.basic" not in by_code
     assert by_code["physics.motion.basic"]["status"] == "not_started"
     assert by_code["physics.motion.velocity"]["status"] == "locked"
     assert by_code["physics.motion.velocity"]["prerequisites"][0]["code"] == "physics.motion.basic"
