@@ -17,8 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import enforce_student_book_grade_level, require_student
 from app.db.session import get_session
 from app.models.auth import User
-from app.models.curriculum import Book
-from app.services.curriculum_access import is_student_visible_book
 from app.services import deep_solve_service as ds
 from app.services import immersive_service as imm
 from app.services import mastery_service
