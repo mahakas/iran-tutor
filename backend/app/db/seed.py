@@ -334,6 +334,15 @@ async def _ensure_sqlite_demo_columns(connection) -> None:
     if grade_cols and "cycle_id" not in grade_cols:
         await connection.execute(text("ALTER TABLE grades ADD COLUMN cycle_id INTEGER"))
 
+    unit_cols = {
+        row[1]
+        for row in (await connection.execute(text("PRAGMA table_info(curriculum_units)"))).fetchall()
+    }
+    if unit_cols and "branch_id" not in unit_cols:
+        await connection.execute(text("ALTER TABLE curriculum_units ADD COLUMN branch_id INTEGER"))
+    if unit_cols and "field_of_study_id" not in unit_cols:
+        await connection.execute(text("ALTER TABLE curriculum_units ADD COLUMN field_of_study_id INTEGER"))
+
     book_cols = {
         row[1]
         for row in (await connection.execute(text("PRAGMA table_info(books)"))).fetchall()
