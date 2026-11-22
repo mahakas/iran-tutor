@@ -159,6 +159,15 @@ async def env(tmp_path, monkeypatch):
             await asyncio.sleep(fake.text_delay)
         return fake.text_reply
 
+    async def fake_stream_text(model, messages, on_chunk):
+        fake.text_calls.append(messages)
+        if fake.text_delay:
+            await asyncio.sleep(fake.text_delay)
+        content = fake.text_reply
+        for start in range(0, len(content), 40):
+            await on_chunk(content[start : start + 40])
+        return content
+
     async def fake_complete_json(model, messages):
         fake.json_calls.append(messages)
         if callable(fake.json_reply):
@@ -166,6 +175,7 @@ async def env(tmp_path, monkeypatch):
         return fake.json_reply or {"facts": []}
 
     monkeypatch.setattr(ai_gateway, "complete_text", fake_complete_text)
+    monkeypatch.setattr(ai_gateway, "stream_text", fake_stream_text)
     monkeypatch.setattr(ai_gateway, "complete_json", fake_complete_json)
 
     env_obj = SimpleNamespace(factory=factory, ids=ids, fake=fake)
