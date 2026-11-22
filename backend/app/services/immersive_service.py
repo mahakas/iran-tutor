@@ -147,6 +147,8 @@ def citation_for_page(
         edition_labels.append(str(metadata["edition_label"]))
     if metadata.get("print_year"):
         edition_labels.append("چاپ " + str(metadata["print_year"]))
+    if metadata.get("publisher"):
+        edition_labels.append("ناشر " + str(metadata["publisher"]))
     edition = "، " + "، ".join(edition_labels) if edition_labels else ""
     return {
         "book_id": book.id,
