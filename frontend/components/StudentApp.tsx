@@ -101,6 +101,9 @@ function sourceText(source: Source, lang: "fa" | "en") {
     source.print_year
       ? `${lang === "en" ? "Print" : "چاپ"} ${source.print_year}`
       : null,
+    source.publisher
+      ? `${lang === "en" ? "Publisher" : "ناشر"}: ${source.publisher}`
+      : null,
   ].filter(Boolean);
   const editionLabel = editionLabels.length ? editionLabels.join(" · ") : null;
   const chapterLabel =
