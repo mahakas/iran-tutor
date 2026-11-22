@@ -181,6 +181,11 @@ async def resolve_curriculum_book_ids(
         statement = statement.where(Book.id.in_(requested_ids))
 
     allowed_ids = [int(book_id) for book_id in (await session.scalars(statement)).all()]
+    if len(allowed_ids) > MAX_BOOKS:
+        raise ScopeError(
+            f"too many textbooks match the selected curriculum scope (maximum {MAX_BOOKS}); "
+            "narrow the subject or explicitly select textbooks"
+        )
     if requested_ids is not None:
         missing = sorted(set(requested_ids) - set(allowed_ids))
         if missing:
