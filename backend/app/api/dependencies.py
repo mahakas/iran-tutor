@@ -90,10 +90,10 @@ async def require_student(
         raise HTTPException(status_code=401, detail="برای ادامه لطفاً با شماره موبایل وارد شوید.")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال شده است.")
-    # Teachers/admins may use student-facing preview tools; guardians must not.
-    from app.api.rbac_deps import normalize_role
-
-    if normalize_role(user.role) not in {"student", "teacher", "admin"}:
+    # Teachers/admins may use student-facing preview tools; guardians and
+    # unknown roles must fail closed rather than being normalized to "student".
+    role = (getattr(user, "role", None) or "").strip().lower()
+    if role not in {"student", "teacher", "admin"}:
         raise HTTPException(status_code=403, detail="این بخش برای نقش کاربری شما در دسترس نیست.")
     request.state.current_user = user
     return user
