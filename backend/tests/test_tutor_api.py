@@ -26,6 +26,7 @@ def _fake_student() -> SimpleNamespace:
         tokens_remaining=15000,
         tokens_used_total=0,
         plan_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        grade_level=12,
         is_active=True,
     )
 

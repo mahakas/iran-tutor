@@ -883,6 +883,7 @@ async def test_tutor_ask_writes_audit_row_end_to_end(tmp_path, monkeypatch):
 
                 row.plan_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
                 row.tokens_remaining = 50_000
+                row.grade_level = 12
                 await session.commit()
             response = await client.post(
                 "/api/v1/tutor/ask",
