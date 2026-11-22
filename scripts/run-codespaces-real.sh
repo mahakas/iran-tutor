@@ -38,7 +38,7 @@ fi
 export APP_ENV="${APP_ENV:-local}"
 export DEMO_MODE=false
 export ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
-export DATABASE_URL="${DATABASE_URL:-postgresql+asyncpg://iran_tutor:${POSTGRES_PASSWORD}@127.0.0.1:5432/iran_tutor}"
+export DATABASE_URL="${DATABASE_URL:-$(python3 -c 'import os; from urllib.parse import quote; print("postgresql+asyncpg://iran_tutor:" + quote(os.environ["POSTGRES_PASSWORD"], safe="") + "@127.0.0.1:5432/iran_tutor")')}"
 export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
 export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
 export VECTOR_BACKEND="${VECTOR_BACKEND:-qdrant}"
@@ -67,11 +67,79 @@ cd "$ROOT"
 
 # Docker Compose reads the root .env. Keep it local and private; never commit it.
 umask 077
-cat > "$ROOT/.env" <<EOF
-POSTGRES_USER=iran_tutor
-POSTGRES_PASSWORD=$POSTGRES_PASSWORD
-POSTGRES_DB=iran_tutor
-EOF
+python3 - <<'PY'
+import os
+from pathlib import Path
+
+password = os.environ["POSTGRES_PASSWORD"]
+if "\\n" in password or "\\r" in password:
+    raise SystemExit("POSTGRES_PASSWORD must not contain a newline")
+
+# Docker Compose dotenv supports single-quoted values with escaped backslashes
+# and apostrophes. This prevents '
+echo "==> Starting PostgreSQL, Qdrant and Redis"
+docker compose up -d --wait
+
+if [[ ! -x "$ROOT/backend/.venv/bin/python" ]]; then
+  echo "==> Creating backend virtual environment"
+  python3 -m venv "$ROOT/backend/.venv"
+fi
+
+echo "==> Installing/verifying Python dependencies"
+"$ROOT/backend/.venv/bin/python" -m pip install --upgrade pip
+"$ROOT/backend/.venv/bin/python" -m pip install -r "$ROOT/backend/requirements.txt"
+
+if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
+  echo "==> Installing frontend dependencies"
+  (cd "$ROOT/frontend" && npm ci --no-audit --no-fund)
+fi
+
+echo "==> Applying database migrations"
+(cd "$ROOT/backend" && "$ROOT/backend/.venv/bin/alembic" upgrade head)
+
+pids=()
+cleanup() {
+  echo
+  echo "==> Stopping Iran Tutor application processes"
+  for pid in "${pids[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in "${pids[@]:-}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT INT TERM
+
+echo "==> Starting FastAPI on port $BACKEND_PORT"
+(
+  cd "$ROOT/backend"
+  "$ROOT/backend/.venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port "$BACKEND_PORT"
+) &
+pids+=("$!")
+
+echo "==> Starting Next.js on port $FRONTEND_PORT"
+(
+  cd "$ROOT/frontend"
+  BACKEND_ORIGIN="http://127.0.0.1:$BACKEND_PORT" npm run dev -- --port "$FRONTEND_PORT"
+) &
+pids+=("$!")
+
+echo
+echo "Iran Tutor is running in REAL mode (DEMO_MODE=false)."
+echo "Frontend: port $FRONTEND_PORT"
+echo "Backend:  port $BACKEND_PORT (keep this port private)"
+echo "After startup, open /admin and configure AI providers and feature routes."
+echo "Use Ctrl+C to stop the application processes; Docker services remain running."
+wait
+ and '#' in passwords being re-interpreted.
+escaped = password.replace("\\\\", "\\\\\\\\").replace("'", "\\\\'")
+Path(".env").write_text(
+    "POSTGRES_USER=iran_tutor\\n"
+    + "POSTGRES_PASSWORD='" + escaped + "'\\n"
+    + "POSTGRES_DB=iran_tutor\\n",
+    encoding="utf-8",
+)
+PY
 chmod 600 "$ROOT/.env"
 
 echo "==> Starting PostgreSQL, Qdrant and Redis"
