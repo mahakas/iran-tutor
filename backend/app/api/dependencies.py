@@ -86,6 +86,19 @@ async def require_student(
     return user
 
 
+def enforce_student_grade_level(user: User, grade_number: int) -> None:
+    """Prevent a profiled student from accessing content above their assigned grade.
+
+    A missing grade_level is deliberately not guessed here; deployments should
+    complete student grade profiles to activate this restriction.
+    """
+    if user.grade_level is not None and grade_number > user.grade_level:
+        raise HTTPException(
+            status_code=422,
+            detail="the selected textbook is above the student's assigned grade level",
+        )
+
+
 async def resolve_book_scope(
     session: AsyncSession,
     *,
