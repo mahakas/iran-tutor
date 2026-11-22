@@ -270,8 +270,15 @@ async def _check_stop(store: StreamStore, stream_id: str) -> None:
 
 
 async def _run_generation(stream_id: str, params: StreamParams) -> None:
+    from app.models.auth import User
+    from app.services.capability_service import check_capability_access
     from app.services.intent_router import route_intent
-    from app.services.tutor_service import answer_from_textbook
+    from app.services.quota_service import enforce_ai_quota
+    from app.services.tutor_service import (
+        MODE_CAPABILITY_KEYS,
+        MODE_FEATURE_KEYS,
+        answer_from_textbook,
+    )
     from app.services.tutor_turns import finish_turn_success
 
     store = await get_stream_store()
@@ -288,6 +295,21 @@ async def _run_generation(stream_id: str, params: StreamParams) -> None:
                         db_session=db,
                     )
                     mode = decision.mode
+                    # The HTTP entrypoint can only pre-check Chat before routing.
+                    # Re-check the selected non-chat capability and its own quota
+                    # before any Solve/Quiz work is allowed to run in the background.
+                    if mode != "tutor":
+                        user = await db.get(User, params.user_id)
+                        if user is None:
+                            raise RuntimeError("student account is no longer available")
+                        await check_capability_access(
+                            db, MODE_CAPABILITY_KEYS.get(mode, "chat"), user
+                        )
+                        await enforce_ai_quota(
+                            db,
+                            user=user,
+                            feature_key=MODE_FEATURE_KEYS.get(mode, "chat"),
+                        )
                 await _check_stop(store, stream_id)
 
                 pending_text = ""
