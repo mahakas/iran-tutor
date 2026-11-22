@@ -82,7 +82,7 @@ jobs:
         working-directory: frontend
         # The repository already contains setState-in-effect patterns in async data loaders.
         # Keep reporting them without making this legacy rule block all CI jobs.
-        run: npm run lint -- --rule 'react-hooks/set-state-in-effect: warn'
+        run: "npm run lint -- --rule 'react-hooks/set-state-in-effect: warn'"
       - name: Build frontend
         working-directory: frontend
         run: npm run build
