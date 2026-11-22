@@ -267,6 +267,8 @@ class CurriculumUnitInput(BaseModel):
     unit_type: Literal["chapter", "lesson", "topic", "skill"] = "chapter"
     parent_code: str | None = None
     academic_year_code: str | None = Field(default=None, max_length=24)
+    branch_code: str | None = Field(default=None, max_length=64)
+    field_code: str | None = Field(default=None, max_length=64)
     sort_order: int = 0
     source_url: str | None = None
     objectives: list[LearningObjectiveInput] = Field(default_factory=list)
@@ -408,25 +410,63 @@ async def import_curriculum_catalog(
                 session.add(unit_year)
                 await session.flush()
         unit_scope = unit_year.code if unit_year is not None else "unspecified"
-        unit = await session.scalar(
-            select(CurriculumUnit).where(
-                CurriculumUnit.grade_id == grade.id,
-                CurriculumUnit.subject_id == subject.id,
-                CurriculumUnit.scope_code == unit_scope,
-                CurriculumUnit.code == item.code,
+        unit_branch = None
+        unit_field = None
+        if item.branch_code:
+            if grade.number < 10:
+                raise HTTPException(status_code=422, detail="شاخه فقط برای پایه‌های ۱۰ تا ۱۲ معتبر است.")
+            unit_branch = await session.scalar(
+                select(EducationBranch).where(
+                    EducationBranch.code == item.branch_code,
+                    EducationBranch.is_active.is_(True),
+                )
             )
+            if unit_branch is None or not unit_branch.min_grade <= grade.number <= unit_branch.max_grade:
+                raise HTTPException(status_code=422, detail=f"شاخهٔ نامعتبر برای پایه: {item.branch_code}")
+        if item.field_code:
+            if unit_branch is None:
+                raise HTTPException(status_code=422, detail="برای تعیین رشته، شاخه نیز باید مشخص شود.")
+            unit_field = await session.scalar(
+                select(FieldOfStudy).where(
+                    FieldOfStudy.code == item.field_code,
+                    FieldOfStudy.branch_id == unit_branch.id,
+                    FieldOfStudy.is_active.is_(True),
+                )
+            )
+            if unit_field is None:
+                raise HTTPException(status_code=422, detail=f"رشتهٔ نامعتبر برای شاخه: {item.field_code}")
+        unit_stmt = select(CurriculumUnit).where(
+            CurriculumUnit.grade_id == grade.id,
+            CurriculumUnit.subject_id == subject.id,
+            CurriculumUnit.scope_code == unit_scope,
+            CurriculumUnit.code == item.code,
         )
+        unit_stmt = unit_stmt.where(
+            CurriculumUnit.branch_id == unit_branch.id
+            if unit_branch is not None
+            else CurriculumUnit.branch_id.is_(None)
+        )
+        unit_stmt = unit_stmt.where(
+            CurriculumUnit.field_of_study_id == unit_field.id
+            if unit_field is not None
+            else CurriculumUnit.field_of_study_id.is_(None)
+        )
+        unit = await session.scalar(unit_stmt)
         if unit is None:
             unit = CurriculumUnit(
                 grade_id=grade.id,
                 subject_id=subject.id,
                 academic_year_id=unit_year.id if unit_year is not None else None,
+                branch_id=unit_branch.id if unit_branch is not None else None,
+                field_of_study_id=unit_field.id if unit_field is not None else None,
                 scope_code=unit_scope,
                 code=item.code,
                 title=item.title,
             )
             session.add(unit)
         unit.academic_year_id = unit_year.id if unit_year is not None else None
+        unit.branch_id = unit_branch.id if unit_branch is not None else None
+        unit.field_of_study_id = unit_field.id if unit_field is not None else None
         unit.scope_code = unit_scope
         unit.title = item.title
         unit.unit_type = item.unit_type
@@ -444,6 +484,8 @@ async def import_curriculum_catalog(
                     CurriculumUnit.grade_id == grade.id,
                     CurriculumUnit.subject_id == subject.id,
                     CurriculumUnit.scope_code == unit.scope_code,
+                    CurriculumUnit.branch_id == unit.branch_id if unit.branch_id is not None else CurriculumUnit.branch_id.is_(None),
+                    CurriculumUnit.field_of_study_id == unit.field_of_study_id if unit.field_of_study_id is not None else CurriculumUnit.field_of_study_id.is_(None),
                     CurriculumUnit.code == item.parent_code,
                 )
             )
@@ -573,6 +615,29 @@ async def import_curriculum_catalog(
                 status_code=422,
                 detail="درس هدف یادگیری با حوزهٔ درسی کتاب سازگار نیست.",
             )
+        book_year = await session.get(AcademicYear, book.academic_year_id) if book.academic_year_id else None
+        expected_year_code = book_year.code if book_year is not None else None
+        if expected_year_code:
+            if unit.scope_code not in {expected_year_code, "unspecified"}:
+                raise HTTPException(status_code=422, detail="سال تحصیلی هدف با نسخهٔ کتاب سازگار نیست.")
+        elif unit.scope_code != "unspecified":
+            raise HTTPException(status_code=422, detail="هدف نسخه‌دار به کتاب بدون سال تحصیلی متصل نمی‌شود.")
+        if unit.branch_id is not None:
+            book_links = (
+                await session.scalars(
+                    select(BookCurriculumLink).where(BookCurriculumLink.book_id == item.book_id)
+                )
+            ).all()
+            branch_match = any(
+                link.branch_id == unit.branch_id
+                and (
+                    (link.field_of_study_id is None and unit.field_of_study_id is None)
+                    or link.field_of_study_id == unit.field_of_study_id
+                )
+                for link in book_links
+            )
+            if not branch_match:
+                raise HTTPException(status_code=422, detail="شاخه یا رشتهٔ هدف با شاخه یا رشتهٔ کتاب سازگار نیست.")
         mapping = await session.scalar(
             select(BookPageObjective).where(
                 BookPageObjective.book_page_id == page.id,
