@@ -217,6 +217,10 @@ class CurriculumUnit(Base):
             "field_of_study_id IS NULL OR branch_id IS NOT NULL",
             name="ck_curriculum_unit_field_requires_branch",
         ),
+        CheckConstraint(
+            "branch_id IS NULL OR grade_id >= 10",
+            name="ck_curriculum_unit_branch_upper_secondary",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
