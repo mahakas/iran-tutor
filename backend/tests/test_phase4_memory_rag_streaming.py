@@ -538,6 +538,54 @@ async def test_ask_endpoint_multi_grade_cites_two_grades(env):
 
 
 @pytest.mark.asyncio
+async def test_audio_tutor_accepts_and_validates_education_branch(env, monkeypatch):
+    from app.api import tutor as tutor_api
+
+    seen: dict[str, object] = {}
+    original_resolve_scope = tutor_api.resolve_book_scope
+
+    async def tracked_resolve_scope(*args, **kwargs):
+        seen["branch_code"] = kwargs.get("branch_code")
+        return await original_resolve_scope(*args, **kwargs)
+
+    async def no_capability_gate(*args, **kwargs):
+        return None
+
+    async def no_quota_gate(*args, **kwargs):
+        return None
+
+    async def no_attachment(*args, **kwargs):
+        return None
+
+    async def fake_audio_answer(**kwargs):
+        return {"answer": "پاسخ مبتنی بر کتاب", "sources": []}
+
+    monkeypatch.setattr(tutor_api, "resolve_book_scope", tracked_resolve_scope)
+    monkeypatch.setattr(tutor_api, "check_capability_access", no_capability_gate)
+    monkeypatch.setattr(tutor_api, "enforce_ai_quota", no_quota_gate)
+    monkeypatch.setattr(tutor_api, "_maybe_store_tutor_attachment", no_attachment)
+    monkeypatch.setattr(tutor_api, "verify_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tutor_api, "answer_audio_question", fake_audio_answer)
+
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/tutor/ask-audio",
+            files={"audio": ("question.wav", b"audio", "audio/wav")},
+            data={
+                "grade_number": "12",
+                "book_id": str(env.ids["book12"]),
+                "major_code": "math_physics",
+                "branch_code": "theoretical",
+                "mode": "tutor",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert seen["branch_code"] == "theoretical"
+    assert response.json()["answer"] == "پاسخ مبتنی بر کتاب"
+
+
+@pytest.mark.asyncio
 async def test_multi_grade_endpoint_enforces_student_grade_ceiling(env):
     async with env.factory() as session:
         student = await session.get(User, env.ids["student_id"])
