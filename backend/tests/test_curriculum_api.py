@@ -23,10 +23,10 @@ class FakeSession:
 
     async def scalar(self, statement):
         self.scalar_calls += 1
-        if self.scalar_values:
-            return self.scalar_values.pop(0)
         if self.scalar_calls == 1:
             return self.grade
+        if self.scalar_values:
+            return self.scalar_values.pop(0)
         return self.major
 
     async def scalars(self, statement):
@@ -126,7 +126,12 @@ async def test_resolve_book_scope_accepts_approved_technical_branch_book():
         grade,
         scalar_values=[branch, 501],  # matching branch and BookCurriculumLink
     )
-    # resolve_book_scope loads the grade via get(), so the first scalar is the branch.
+    # resolve_book_scope loads the grade via get(), so its first scalar is the branch.
+    async def fake_scalar(statement):
+        return session.scalar_values.pop(0) if session.scalar_values else None
+
+    session.scalar = fake_scalar
+
     async def fake_get(model, identifier):
         return {Book: book, Grade: grade}.get(model)
 
@@ -158,6 +163,11 @@ async def test_resolve_book_scope_rejects_field_from_another_branch():
     branch = SimpleNamespace(id=3, code="technical_vocational", min_grade=10, max_grade=12, is_active=True)
     field = SimpleNamespace(id=9, code="math_physics", branch_id=1, is_active=True)
     session = FakeSession(grade, scalar_values=[branch, field])
+
+    async def fake_scalar(statement):
+        return session.scalar_values.pop(0) if session.scalar_values else None
+
+    session.scalar = fake_scalar
 
     async def fake_get(model, identifier):
         return {Book: book, Grade: grade}.get(model)
