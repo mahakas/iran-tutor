@@ -64,7 +64,22 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     avatar_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    role: Mapped[str] = mapped_column(String(32), default="student", server_default="student", nullable=False)
+    role: Mapped[str] = mapped_column(
+        String(32), default="student", server_default="student", nullable=False, index=True
+    )
+    # Argon2id digest only; NULL means the account has no password yet (OTP-only login).
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Set the first time an OTP confirms ownership of the number. Uniqueness of the
+    # verified number is enforced by normalize-before-check plus the unique index on
+    # phone_number; this column records provenance for the "unique verified phone" rule.
+    phone_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_password_change_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Soft delete: financial/audit rows keep referencing the account, so hard deletion is
+    # refused for accounts with history. A deleted account cannot authenticate.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    deleted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Phase 1 RBAC metadata: grade level (1-12, null = unspecified), study major,
     # and an optional reference to the plans table alongside the legacy plan_code.
     grade_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -94,6 +109,10 @@ class OtpCode(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     phone_number: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    # What the code is allowed to unlock: login, registration or password recovery.
+    purpose: Mapped[str] = mapped_column(
+        String(24), default="login", server_default="login", nullable=False, index=True
+    )
     code_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)

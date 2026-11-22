@@ -24,15 +24,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.models.auth import User
 from app.services import rbac
+from app.services.permissions import MAINTAINABLE_ROLES, ROLE_RANKS
 
 logger = logging.getLogger(__name__)
 
-VALID_ROLES: tuple[str, ...] = ("admin", "teacher", "student", "guardian")
+# Canonical role taxonomy lives in `app.services.permissions` so the API surface, the
+# admin service and the tests cannot drift apart.
+VALID_ROLES: tuple[str, ...] = MAINTAINABLE_ROLES
 
 
 def normalize_role(raw: str | None) -> str:
     role = (raw or "student").strip().lower()
-    return role if role in VALID_ROLES else "student"
+    return role if role in ROLE_RANKS else "student"
 
 
 def has_role(user: User | None, *roles: str) -> bool:
@@ -70,6 +73,11 @@ def require_roles(
     return dependency
 
 
-require_admin_role = require_roles("admin")
-require_teacher_role = require_roles("admin", "teacher")
-require_student_role = require_roles("student", "admin", "teacher")
+require_admin_role = require_roles("admin", "super_admin")
+require_teacher_role = require_roles("admin", "super_admin", "teacher")
+require_student_role = require_roles("student", "admin", "super_admin", "teacher")
+
+
+def require_moderator_role() -> Callable[[Request, AsyncSession], Awaitable[User]]:
+    """Moderator and above may read user/session/audit data (writes re-checked in service)."""
+    return require_roles("moderator", "admin", "super_admin")

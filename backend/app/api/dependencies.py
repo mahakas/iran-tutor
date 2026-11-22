@@ -88,12 +88,15 @@ async def require_student(
     user = await _resolve_user_from_request(request, session)
     if user is None:
         raise HTTPException(status_code=401, detail="برای ادامه لطفاً با شماره موبایل وارد شوید.")
+    # Soft-deleted accounts behave exactly like missing credentials.
+    if getattr(user, "deleted_at", None) is not None:
+        raise HTTPException(status_code=401, detail="برای ادامه لطفاً با شماره موبایل وارد شوید.")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال شده است.")
-    # Teachers/admins may use student-facing preview tools; guardians and
+    # Teachers/admins/moderators may use student-facing preview tools; guardians and
     # unknown roles must fail closed rather than being normalized to "student".
     role = (getattr(user, "role", None) or "").strip().lower()
-    if role not in {"student", "teacher", "admin"}:
+    if role not in {"student", "teacher", "admin", "super_admin", "moderator"}:
         raise HTTPException(status_code=403, detail="این بخش برای نقش کاربری شما در دسترس نیست.")
     request.state.current_user = user
     return user

@@ -74,6 +74,37 @@ class Settings(BaseSettings):
     otp_ttl_seconds: int = Field(default=180, gt=0)
     otp_resend_seconds: int = Field(default=60, ge=0)
     otp_max_attempts: int = Field(default=5, ge=1)
+
+    # Phone + password authentication (hotfix 2026-11-22).
+    # Minimum password length for user-set passwords. The dev seed may opt in to a weaker
+    # value through DEV_SEED_PASSWORD, which is refused in production by the guard.
+    password_min_length: int = Field(default=8, ge=4, le=64)
+    # Rate limits for password login and OTP flows (per IP and per normalized phone).
+    login_ip_limit: int = Field(default=20, ge=1)
+    login_ip_window_seconds: int = Field(default=900, gt=0)
+    login_phone_limit: int = Field(default=8, ge=1)
+    login_phone_window_seconds: int = Field(default=900, gt=0)
+    otp_phone_limit: int = Field(default=5, ge=1)
+    otp_phone_window_seconds: int = Field(default=3600, gt=0)
+    # Short-lived handshake token issued after OTP verification for registration/recovery.
+    auth_handshake_ttl_seconds: int = Field(default=900, gt=0)
+    # Lifetime of the "re-authenticate before a sensitive admin action" grant.
+    reauth_ttl_seconds: int = Field(default=300, gt=0)
+
+    # Persistent development test account (Phase 4). Never enabled in production.
+    dev_seed_enabled: bool = False
+    dev_seed_apply_env: Literal["local", "development", "dev", "test", ""] = "local"
+    dev_seed_name: str = "mahdi"
+    dev_seed_phone: str = "09134303348"
+    dev_seed_password: str = ""
+    dev_seed_role: str = "user"
+    # Only for the documented local test account (password "123"); never in production.
+    dev_seed_allow_weak_password: bool = False
+
+    # CSRF enforcement for cookie-authenticated mutations: "on" (origin check),
+    # "strict" (origin check + double-submit token), or "off" (unsafe; tooling only).
+    csrf_enforcement: Literal["on", "strict", "off"] = "on"
+
     sms_provider: Literal["demo", "kavenegar", "sms_ir", "webhook"] = "demo"
     sms_api_key: str | None = None
     sms_sender: str | None = None
