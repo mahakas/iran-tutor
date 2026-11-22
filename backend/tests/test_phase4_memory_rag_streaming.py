@@ -275,6 +275,9 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
         theoretical_branch = await session.scalar(
             select(EducationBranch).where(EducationBranch.code == "theoretical")
         )
+        selected_field = await session.scalar(
+            select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+        )
 
         foreign_book = Book(
             title="کتاب فنی خارج از رشتهٔ انتخابی",
@@ -312,7 +315,18 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
             status=BookStatus.ready,
             catalog_status="pending_review",
         )
-        session.add_all([foreign_book, same_branch_foreign_field_book, hidden_book, pending_book])
+        missing_subject_book = Book(
+            title="کتاب بدون پیوند رسمی درس",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/missing-subject.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="approved",
+        )
+        session.add_all(
+            [foreign_book, same_branch_foreign_field_book, hidden_book, pending_book, missing_subject_book]
+        )
         await session.flush()
         session.add_all(
             [
@@ -327,6 +341,13 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
                     branch_id=theoretical_branch.id,
                     field_of_study_id=same_branch_other_field.id,
                     scope_code="field:islamic_studies",
+                ),
+                BookCurriculumLink(
+                    book_id=missing_subject_book.id,
+                    branch_id=theoretical_branch.id,
+                    field_of_study_id=selected_field.id,
+                    subject_id=None,
+                    scope_code="field:math_physics:unmapped-subject",
                 ),
             ]
         )
@@ -374,6 +395,7 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
         assert same_branch_foreign_field_book.id not in resolved
         assert hidden_book.id not in resolved
         assert pending_book.id not in resolved
+        assert missing_subject_book.id not in resolved
 
         with pytest.raises(ScopeError):
             await multi_grade_rag.resolve_curriculum_book_ids(
@@ -393,6 +415,17 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
                 branch_code="theoretical",
                 field_code="math_physics",
                 academic_year_id=year.id + 1,
+                subject_ids=[env.ids["subject_id"]],
+            )
+
+        # Branches with active fields must not silently fall back to branch-wide scope.
+        with pytest.raises(ScopeError, match="field of study is required"):
+            await multi_grade_rag.resolve_curriculum_book_ids(
+                session,
+                grade_numbers=[10, 11, 12],
+                branch_code="technical_scope_test",
+                field_code=None,
+                academic_year_id=year.id,
                 subject_ids=[env.ids["subject_id"]],
             )
 
