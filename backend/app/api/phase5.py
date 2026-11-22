@@ -32,7 +32,7 @@ class AnswerBody(BaseModel):
 
 class LearningEvidenceBody(BaseModel):
     objective_id: int = Field(gt=0)
-    book_id: int | None = Field(default=None, gt=0)
+    book_id: int = Field(gt=0)
     pdf_page_index: int | None = Field(default=None, ge=0)
     source_type: Literal["self_assessment", "performance_task", "reading"]
     source_ref: str | None = Field(default=None, max_length=128)
@@ -137,8 +137,7 @@ async def record_mastery_evidence(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    if body.book_id is not None:
-        await enforce_student_book_grade_level(session, current_user, body.book_id)
+    await enforce_student_book_grade_level(session, current_user, body.book_id)
     await check_capability_access(session, "mastery_path", current_user)
     row = await mastery_service.record_objective_evidence(
         session,
