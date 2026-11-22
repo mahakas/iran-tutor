@@ -664,9 +664,13 @@ async def test_single_book_tutor_and_exam_respect_student_grade_level(env):
                 "exam_type": "konkoor",
             },
         )
+        reader_response = await client.get(f"/api/v1/immersive/books/{env.ids['book12']}")
+        mastery_response = await client.get(f"/api/v1/mastery/books/{env.ids['book12']}")
 
     assert tutor_response.status_code == 422
     assert exam_response.status_code == 422
+    assert reader_response.status_code == 422
+    assert mastery_response.status_code == 422
 
 
 @pytest.mark.asyncio
