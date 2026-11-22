@@ -3167,6 +3167,11 @@ async def upsert_feature_route(
 
     if body.feature_key not in ROUTABLE_FEATURE_KEYS:
         raise HTTPException(status_code=422, detail="کلید قابلیت انتخاب‌شده معتبر نیست.")
+    if body.fallback_provider_id is not None and body.fallback_provider_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="برای سازگاری، از فیلد قدیمی fallback_provider_id و زنجیرهٔ جدید هم‌زمان استفاده نکنید.",
+        )
     if body.provider_id in body.fallback_provider_ids:
         raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ اصلی نمی‌تواند در زنجیرهٔ جایگزین تکرار شود.")
     if len(set(body.fallback_provider_ids)) != len(body.fallback_provider_ids):
