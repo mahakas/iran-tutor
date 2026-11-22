@@ -397,6 +397,7 @@ async def record_objective_evidence(
                 link.branch_id == unit.branch_id
                 and (
                     (link.field_of_study_id is None and unit.field_of_study_id is None)
+                    or unit.field_of_study_id is None
                     or link.field_of_study_id == unit.field_of_study_id
                 )
                 for link in book_links
@@ -490,7 +491,12 @@ async def objective_tree(
         if link.field_of_study_id is None:
             branch_conditions.append(CurriculumUnit.field_of_study_id.is_(None))
         else:
-            branch_conditions.append(CurriculumUnit.field_of_study_id == link.field_of_study_id)
+            branch_conditions.append(
+                or_(
+                    CurriculumUnit.field_of_study_id == link.field_of_study_id,
+                    CurriculumUnit.field_of_study_id.is_(None),
+                )
+            )
         branch_terms.append(and_(*branch_conditions))
     branch_scope_condition = (
         or_(
