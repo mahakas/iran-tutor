@@ -121,7 +121,7 @@ export default function MasteryWorkspace() {
         setNotice(phase5ErrorMessage(payload, "ثبت خودارزیابی انجام نشد."));
         return;
       }
-      setNotice("خودارزیابی ثبت شد؛ تا زمان بازبینی معلم یا مدیر، تسلط قطعی محسوب نمی‌شود.");
+      setNotice("خودارزیابی ثبت شد؛ تا زمان بازبینی مدیر سامانه، تسلط قطعی محسوب نمی‌شود.");
       setSelectedObjective(null);
       setScore("");
       setQualitativeLevel("");
