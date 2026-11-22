@@ -436,7 +436,7 @@ async def objective_tree(
 ) -> dict[str, Any]:
     """Objective-level mastery, respecting academic-year scope and prerequisite edges."""
     book = await session.get(Book, book_id)
-    if book is None or book.status != BookStatus.ready or book.catalog_status == "pending_review":
+    if not is_student_visible_book(book):
         raise HTTPException(status_code=404, detail="کتاب آماده و منتشرشده یافت نشد.")
 
     year_code = None

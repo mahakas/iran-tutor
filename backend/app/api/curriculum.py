@@ -333,23 +333,31 @@ async def list_books(
             }
             for book in books
         ]
-    return [
-        {
-            "id": book.id,
-            "title": book.title,
-            "grade_number": grade_number,
-            "major_code": major_code or (selected_field.code if selected_field else "general"),
-            "branch_code": selected_branch.code if selected_branch else None,
-            "field_code": selected_field.code if selected_field else None,
-            "academic_year_code": academic_year_code or None,
-            "edition_label": getattr(book, "edition_label", None),
-            "print_year": getattr(book, "print_year", None),
-            "publisher": getattr(book, "publisher", None),
-            "catalog_status": getattr(book, "catalog_status", "legacy_unverified"),
-            "status": book.status.value,
-        }
-        for book in books
-    ]
+    result: list[dict[str, object]] = []
+    for book in books:
+        book_year_code = academic_year_code
+        book_year_id = getattr(book, "academic_year_id", None)
+        if book_year_id is not None and hasattr(session, "get"):
+            book_year = await session.get(AcademicYear, book_year_id)
+            if book_year is not None:
+                book_year_code = book_year.code
+        result.append(
+            {
+                "id": book.id,
+                "title": book.title,
+                "grade_number": grade_number,
+                "major_code": major_code or (selected_field.code if selected_field else "general"),
+                "branch_code": selected_branch.code if selected_branch else None,
+                "field_code": selected_field.code if selected_field else None,
+                "academic_year_code": book_year_code,
+                "edition_label": getattr(book, "edition_label", None),
+                "print_year": getattr(book, "print_year", None),
+                "publisher": getattr(book, "publisher", None),
+                "catalog_status": getattr(book, "catalog_status", "legacy_unverified"),
+                "status": book.status.value,
+            }
+        )
+    return result
 
 
 @router.get("/search")
@@ -438,7 +446,7 @@ async def student_figure_image(
     """Read-only figure image for students. Only for books with status=ready."""
     await check_capability_access(session, "immersive_reader", current_user)
     book = await session.get(Book, book_id)
-    if book is None or book.status != BookStatus.ready or book.catalog_status == "pending_review":
+    if not is_student_visible_book(book):
         raise HTTPException(status_code=404, detail="کتاب آماده‌ای با این شناسه یافت نشد.")
     figure = await session.get(SourceFigure, figure_id)
     if figure is None or figure.book_id != book_id:
