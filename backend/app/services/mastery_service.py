@@ -317,6 +317,7 @@ def _evidence_progress(
                 "source_type": latest.source_type,
                 "score": latest.score,
                 "qualitative_level": level,
+                "verification_status": getattr(latest, "verification_status", "unverified"),
                 "feedback": latest.feedback,
                 "observed_at": latest.observed_at.isoformat() if latest.observed_at else None,
             }
