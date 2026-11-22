@@ -43,17 +43,8 @@ export default function MasteryWorkspace() {
   }, [authFetch]);
 
   useEffect(() => {
-    if (!bookId) {
-      setTree(null);
-      setObjectiveTree(null);
-      setError(null);
-      return;
-    }
+    if (!bookId) return;
     let cancelled = false;
-    setTree(null);
-    setObjectiveTree(null);
-    setError(null);
-    setNotice(null);
     void (async () => {
       const [chapterResult, objectiveResult] = await Promise.allSettled([
         authFetch(`/api/v1/mastery/books/${bookId}`),
