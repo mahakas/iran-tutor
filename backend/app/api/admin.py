@@ -631,7 +631,8 @@ async def import_curriculum_catalog(
             branch_match = any(
                 link.branch_id == unit.branch_id
                 and (
-                    (link.field_of_study_id is None and unit.field_of_study_id is None)
+                    link.field_of_study_id is None
+                    or unit.field_of_study_id is None
                     or link.field_of_study_id == unit.field_of_study_id
                 )
                 for link in book_links
