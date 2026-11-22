@@ -61,7 +61,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --no-audit --no-fund
       - name: ESLint (existing hook migration warnings are non-blocking)
-        run: npm run lint -- --rule 'react-hooks/set-state-in-effect: warn'
+        run: >-
+          npm run lint -- --rule "react-hooks/set-state-in-effect: warn"
       - name: TypeScript
         run: npx tsc --noEmit
       - name: Next.js production build
