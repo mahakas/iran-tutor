@@ -549,10 +549,10 @@ async def objective_tree(
     # edition's completed pages. Subject-only fallback is used only when no page
     # mappings exist, never OR-ed with mappings (which previously widened scope).
     relevance_condition = (
-        LearningObjective.id.in_(mapped_objective_ids)
-        if mapped_objective_ids
-        else CurriculumUnit.subject_id.in_(subject_ids)
+        CurriculumUnit.subject_id.in_(subject_ids)
         if subject_ids
+        else LearningObjective.id.in_(mapped_objective_ids)
+        if mapped_objective_ids
         else None
     )
     if relevance_condition is None:
