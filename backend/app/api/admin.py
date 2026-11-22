@@ -298,6 +298,65 @@ class LearningEvidenceReviewBody(BaseModel):
     review_note: str | None = Field(default=None, max_length=2000)
 
 
+@protected_router.get("/mastery/evidence")
+async def list_learning_evidence(
+    user_id: str | None = Query(default=None, max_length=36),
+    book_id: int | None = Query(default=None, ge=1),
+    verification_status: Literal["unverified", "verified", "rejected", "all"] = Query(default="unverified"),
+    limit: int = Query(default=100, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Admin queue for reviewing student-submitted evidence, scoped to its edition."""
+    statement = (
+        select(LearningEvidence, User, Book, LearningObjective, CurriculumUnit, Subject, BookPage)
+        .join(User, LearningEvidence.user_id == User.id)
+        .join(LearningObjective, LearningEvidence.objective_id == LearningObjective.id)
+        .join(CurriculumUnit, LearningObjective.unit_id == CurriculumUnit.id)
+        .join(Subject, CurriculumUnit.subject_id == Subject.id)
+        .outerjoin(Book, LearningEvidence.book_id == Book.id)
+        .outerjoin(BookPage, LearningEvidence.book_page_id == BookPage.id)
+        .order_by(LearningEvidence.observed_at.desc(), LearningEvidence.id.desc())
+        .limit(limit)
+    )
+    if user_id:
+        statement = statement.where(LearningEvidence.user_id == user_id)
+    if book_id is not None:
+        statement = statement.where(LearningEvidence.book_id == book_id)
+    if verification_status != "all":
+        statement = statement.where(LearningEvidence.verification_status == verification_status)
+
+    rows = (await session.execute(statement)).all()
+    items = []
+    for evidence, student, book, objective, unit, subject, page in rows:
+        items.append({
+            "id": evidence.id,
+            "user_id": student.id,
+            "student_name": student.full_name or student.phone_number,
+            "student_grade": student.grade_level,
+            "book_id": evidence.book_id,
+            "book_title": book.title if book is not None else None,
+            "academic_year_id": book.academic_year_id if book is not None else None,
+            "edition_label": book.edition_label if book is not None else None,
+            "objective_id": objective.id,
+            "objective_code": objective.code,
+            "objective_title": objective.title,
+            "unit_title": unit.title,
+            "subject_title": subject.title,
+            "source_type": evidence.source_type,
+            "source_ref": evidence.source_ref,
+            "score": evidence.score,
+            "qualitative_level": evidence.qualitative_level,
+            "rubric": dict(evidence.rubric_json or {}),
+            "verification_status": evidence.verification_status,
+            "feedback": evidence.feedback,
+            "pdf_page_index": page.pdf_page_index if page is not None else None,
+            "printed_page_number": page.printed_page_number if page is not None else None,
+            "observed_at": evidence.observed_at.isoformat() if evidence.observed_at else None,
+            "reviewed_at": evidence.reviewed_at.isoformat() if evidence.reviewed_at else None,
+        })
+    return {"total": len(items), "items": items}
+
+
 @protected_router.patch("/mastery/evidence/{evidence_id}/review")
 async def review_learning_evidence(
     evidence_id: int,

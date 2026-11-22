@@ -194,6 +194,15 @@ export const MASTERY_STATUS_LABEL: Record<MasteryChapter["status"], string> = {
   not_started: "شروع‌نشده",
 };
 
+export const OBJECTIVE_MASTERY_STATUS_LABEL: Record<ObjectiveMasteryStatus, string> = {
+  locked: "قفل؛ پیش‌نیاز تکمیل نشده",
+  mastered: "تأییدشده و مسلط",
+  developing: "در حال پیشرفت",
+  needs_support: "نیازمند پشتیبانی",
+  submitted_for_review: "ارسال‌شده برای بازبینی",
+  not_started: "شروع‌نشده",
+};
+
 
 export type ObjectiveEvidenceStatus =
   | "not_started"

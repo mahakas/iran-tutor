@@ -858,3 +858,67 @@ async def test_deep_solve_does_not_claim_unrelated_pages_as_sources(env):
         )
     assert response.status_code == 409
     assert await _count(env.factory, DeepSolveSession) == 0
+
+
+
+@pytest.mark.asyncio
+async def test_admin_can_list_and_review_student_learning_evidence(env):
+    async with env.factory() as session:
+        book = await session.get(Book, env.ids["book_id"])
+        grade = await session.get(Grade, book.grade_id)
+        subject = Subject(code="admin_evidence_review_subject", title="درس بازبینی شواهد", is_active=True)
+        session.add(subject)
+        await session.flush()
+        unit = CurriculumUnit(
+            grade_id=grade.id, subject_id=subject.id, scope_code="unspecified",
+            code="admin-evidence-review-unit", title="واحد بازبینی",
+            unit_type="chapter", is_active=True,
+        )
+        session.add(unit)
+        await session.flush()
+        objective = LearningObjective(
+            unit_id=unit.id, code="admin-evidence-review-objective",
+            title="هدف نیازمند بازبینی", assessment_profile="written", is_active=True,
+        )
+        session.add(objective)
+        await session.flush()
+        evidence = LearningEvidence(
+            user_id=env.ids["student_id"], objective_id=objective.id, book_id=book.id,
+            source_type="self_assessment", source_ref="admin-review-test", score=86,
+            qualitative_level=None, rubric_json={}, verification_status="unverified",
+            feedback="پاسخ خودارزیابی دانش‌آموز",
+        )
+        session.add(evidence)
+        await session.commit()
+        evidence_id = evidence.id
+        objective_id = objective.id
+
+    async with _client() as client:
+        unauthenticated = await client.get("/api/v1/admin/mastery/evidence")
+        pending = await client.get(
+            "/api/v1/admin/mastery/evidence",
+            params={"book_id": env.ids["book_id"], "verification_status": "unverified"},
+            headers=ADMIN_HEADERS,
+        )
+        reviewed = await client.patch(
+            f"/api/v1/admin/mastery/evidence/{evidence_id}/review",
+            json={"verification_status": "verified", "review_note": "شاهد بررسی شد."},
+            headers=ADMIN_HEADERS,
+        )
+        verified = await client.get(
+            "/api/v1/admin/mastery/evidence",
+            params={"user_id": env.ids["student_id"], "verification_status": "verified"},
+            headers=ADMIN_HEADERS,
+        )
+
+    assert unauthenticated.status_code in (401, 403)
+    assert pending.status_code == 200
+    assert pending.json()["total"] == 1
+    assert pending.json()["items"][0]["objective_id"] == objective_id
+    assert pending.json()["items"][0]["book_id"] == env.ids["book_id"]
+    assert reviewed.status_code == 200
+    assert reviewed.json()["verification_status"] == "verified"
+    assert verified.status_code == 200
+    assert verified.json()["total"] == 1
+    assert verified.json()["items"][0]["verification_status"] == "verified"
+    assert "شاهد بررسی شد" in verified.json()["items"][0]["feedback"]
