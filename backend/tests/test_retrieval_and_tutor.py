@@ -72,6 +72,32 @@ def test_source_reference_discloses_missing_printed_page_number():
     assert "صفحهٔ PDF 8" in reference
 
 
+def test_source_reference_includes_edition_scope_and_publisher():
+    reference = tutor_service._source_reference(
+        {
+            "book_title": "فیزیک ۳",
+            "grade_number": 12,
+            "branch_titles": ["نظری"],
+            "field_titles": ["ریاضی‌فیزیک"],
+            "academic_year_code": "1405",
+            "edition_label": "چاپ سوم",
+            "print_year": 1405,
+            "publisher": "شرکت چاپ و نشر کتاب‌های درسی",
+            "chapter_number": 1,
+            "chapter_title": "حرکت بر خط راست",
+            "pdf_page_index": 8,
+            "printed_page_number": 14,
+        }
+    )
+    assert "شاخه نظری" in reference
+    assert "رشته ریاضی‌فیزیک" in reference
+    assert "سال تحصیلی 1405" in reference
+    assert "چاپ سوم" in reference
+    assert "چاپ 1405" in reference
+    assert "ناشر شرکت چاپ و نشر کتاب‌های درسی" in reference
+    assert "صفحهٔ 14" in reference
+
+
 @pytest.mark.asyncio
 async def test_tutor_returns_no_guess_when_no_textbook_matches(monkeypatch):
     async def no_pages(*args, **kwargs):
