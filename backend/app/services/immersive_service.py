@@ -114,7 +114,7 @@ async def page_image_path(session: AsyncSession, book_id: int, pdf_page_index: i
     page = await session.scalar(
         select(BookPage).where(BookPage.book_id == book_id, BookPage.pdf_page_index == pdf_page_index)
     )
-    if page is None or not page.page_image_path:
+    if page is None or page.status != PageStatus.done or not page.page_image_path:
         raise HTTPException(status_code=404, detail="تصویر صفحه موجود نیست.")
     return page.page_image_path
 
