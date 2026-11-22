@@ -166,6 +166,10 @@ def _get_client() -> AsyncOpenAI:
         return _get_routed_client(override)
     if _client is None:
         settings = get_settings()
+        if not settings.llm_base_url or not settings.llm_api_key:
+            raise RuntimeError(
+                "No legacy LLM endpoint is configured; configure an active provider route in the admin panel."
+            )
         _client = AsyncOpenAI(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
@@ -367,9 +371,15 @@ def _get_embedding_client() -> AsyncOpenAI:
         return _get_routed_client(override)
     if _embedding_client is None:
         settings = get_settings()
+        base_url = settings.embedding_base_url or settings.llm_base_url
+        api_key = settings.embedding_api_key or settings.llm_api_key
+        if not base_url or not api_key:
+            raise RuntimeError(
+                "No legacy embedding endpoint is configured; configure an embedding provider route."
+            )
         _embedding_client = AsyncOpenAI(
-            base_url=settings.embedding_base_url or settings.llm_base_url,
-            api_key=settings.embedding_api_key or settings.llm_api_key,
+            base_url=base_url,
+            api_key=api_key,
             timeout=settings.llm_timeout,
             max_retries=0,
         )
@@ -605,9 +615,15 @@ def _get_audio_client() -> AsyncOpenAI:
         return _get_routed_client(override)
     if _audio_client is None:
         settings = get_settings()
+        base_url = settings.audio_base_url or settings.llm_base_url
+        api_key = settings.audio_api_key or settings.llm_api_key
+        if not base_url or not api_key:
+            raise RuntimeError(
+                "No legacy audio endpoint is configured; configure an STT/TTS provider route."
+            )
         _audio_client = AsyncOpenAI(
-            base_url=settings.audio_base_url or settings.llm_base_url,
-            api_key=settings.audio_api_key or settings.llm_api_key,
+            base_url=base_url,
+            api_key=api_key,
             timeout=settings.llm_timeout,
             max_retries=0,
         )
