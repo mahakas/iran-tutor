@@ -76,6 +76,8 @@ export default function DeepSolveWorkspace() {
         return;
       }
       setSession(payload as DeepSolveSession);
+    } catch {
+      setError("ارتباط با سرویس حل گام‌به‌گام برقرار نشد.");
     } finally {
       setBusy(false);
     }
@@ -97,6 +99,8 @@ export default function DeepSolveWorkspace() {
       }
       setError(null);
       setSession(payload as DeepSolveSession);
+    } catch {
+      setError("ارتباط با سرویس به‌روزرسانی حل برقرار نشد.");
     } finally {
       setBusy(false);
     }
@@ -109,8 +113,16 @@ export default function DeepSolveWorkspace() {
           مسئلهٔ چندمرحله‌ای (ریاضی، فیزیک یا شیمی)
           <textarea rows={4} value={problem} onChange={(e) => setProblem(e.target.value)} placeholder="مسئله را با نمادهای LaTeX یا متن ساده بنویسید…" />
         </label>
-        <BookGradePicker value={bookId} onChange={setBookId} />
-        <button type="button" className="btn-primary" disabled={busy || !problem.trim()} onClick={() => void create()}>
+        <BookGradePicker
+          value={bookId}
+          onChange={(nextBookId) => {
+            setBookId(nextBookId);
+            setSession(null);
+            setError(null);
+          }}
+        />
+        {!bookId ? <p style={{ fontSize: 13 }}>برای حل مستند، ابتدا کتاب رسمی را انتخاب کنید.</p> : null}
+        <button type="button" className="btn-primary" disabled={busy || !problem.trim() || !bookId} onClick={() => void create()}>
           شروع حل گام‌به‌گام
         </button>
         {error ? <div role="alert">{error}</div> : null}

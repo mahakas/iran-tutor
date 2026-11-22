@@ -780,7 +780,16 @@ async def update_chat_session(
     if body.mode is not None:
         chat.mode = body.mode
     if body.branch_code is not None:
+        _book, chat_grade, resolved_major = await resolve_book_scope(
+            session,
+            book_id=chat.book_id,
+            grade_number=chat.grade_number,
+            major_code=chat.major_code,
+            branch_code=body.branch_code,
+        )
+        enforce_student_grade_level(current_user, chat_grade.number)
         chat.branch_code = body.branch_code
+        chat.major_code = resolved_major or "general"
     chat.messages = [item.model_dump() for item in body.messages]
     chat.updated_at = datetime.now(timezone.utc)
     await session.commit()

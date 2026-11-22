@@ -243,6 +243,13 @@ async def test_otp_auth_flow_cooldown_attempts_and_starter_tokens(tmp_path, monk
             assert v_data["user"]["tokens_remaining"] == 15_000
             assert v_data["user"]["full_name"] == "علی رضایی"
             token = v_data["token"]
+            async with factory() as profile_session:
+                profile_student = await profile_session.scalar(
+                    select(User).where(User.phone_number == "09123456789")
+                )
+                assert profile_student is not None
+                profile_student.grade_level = 12
+                await profile_session.commit()
 
             # Test X-User-Token header without cookies (iframe proxy safe)
             headers = {"X-User-Token": token}

@@ -419,6 +419,13 @@ async def test_storage_quotas_ownership_isolation_and_tutor_attachment_flag(tmp_
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             token_a, _ = await _login_student(client, "09125550001")
             token_b, _ = await _login_student(client, "09125550002")
+            async with factory() as db:
+                student_a = await db.scalar(
+                    select(User).where(User.phone_number == "09125550001")
+                )
+                assert student_a is not None
+                student_a.grade_level = 12
+                await db.commit()
 
             # Upload 1 image and 1 markdown document for user A (both small)
             png_bytes = _make_png_bytes()

@@ -39,6 +39,7 @@ export type AdminFeatureRoute = {
   max_tokens: number | null;
   fallback_provider_id: number | null;
   fallback_model_name: string | null;
+  fallback_chain?: { provider_id: number; model_name: string | null }[];
   is_active: boolean;
 };
 
@@ -245,6 +246,7 @@ export default function AdminProvidersPanel({
     providerId: number,
     modelName: string,
     temperature: number,
+    fallbackChain: { provider_id: number; model_name: string | null }[],
   ) {
     setError("");
     setMessage("");
@@ -257,6 +259,7 @@ export default function AdminProvidersPanel({
         provider_id: providerId,
         model_name: modelName,
         temperature,
+        fallback_chain: fallbackChain,
         is_active: true,
       }),
     });
@@ -265,7 +268,7 @@ export default function AdminProvidersPanel({
       setError(detail?.detail ?? "ذخیرهٔ مسیر مدل ناموفق بود.");
       return;
     }
-    setMessage("مسیر مدل ذخیره شد.");
+    setMessage("مسیر اصلی و زنجیرهٔ جایگزین ذخیره شد.");
     await load();
   }
 
@@ -524,21 +527,44 @@ function RouteMatrix({
 }: {
   payload: RouteListPayload | null;
   providers: AdminProvider[];
-  onSave: (featureKey: string, providerId: number, modelName: string, temperature: number) => Promise<void>;
+  onSave: (
+    featureKey: string,
+    providerId: number,
+    modelName: string,
+    temperature: number,
+    fallbackChain: { provider_id: number; model_name: string | null }[],
+  ) => Promise<void>;
 }) {
-  const [drafts, setDrafts] = useState<
-    Record<string, { providerId: string; modelName: string; temperature: string }>
-  >({});
+  type FallbackDraft = { providerId: string; modelName: string };
+  type RouteDraft = {
+    providerId: string;
+    modelName: string;
+    temperature: string;
+    fallbackChain: FallbackDraft[];
+  };
+  const [drafts, setDrafts] = useState<Record<string, RouteDraft>>({});
 
   useEffect(() => {
     if (!payload) return;
-    const next: Record<string, { providerId: string; modelName: string; temperature: string }> = {};
+    const next: Record<string, RouteDraft> = {};
     for (const feature of payload.feature_keys) {
       const existing = payload.routes.find((route) => route.feature_key === feature.key);
+      const fallbackChain = existing?.fallback_chain?.length
+        ? existing.fallback_chain.map((item) => ({
+            providerId: String(item.provider_id),
+            modelName: item.model_name ?? "",
+          }))
+        : existing?.fallback_provider_id
+          ? [{
+              providerId: String(existing.fallback_provider_id),
+              modelName: existing.fallback_model_name ?? "",
+            }]
+          : [];
       next[feature.key] = {
         providerId: existing ? String(existing.provider_id) : "",
         modelName: existing?.model_name ?? "",
         temperature: existing ? String(existing.temperature) : "0.2",
+        fallbackChain,
       };
     }
     const timer = window.setTimeout(() => setDrafts(next), 0);
@@ -556,8 +582,9 @@ function RouteMatrix({
         <thead>
           <tr>
             <th>قابلیت</th>
-            <th>ارائه‌دهنده</th>
-            <th>نام مدل</th>
+            <th>ارائه‌دهندهٔ اصلی</th>
+            <th>مدل اصلی</th>
+            <th>زنجیرهٔ جایگزین (به‌ترتیب)</th>
             <th>دما</th>
             <th />
           </tr>
@@ -568,14 +595,18 @@ function RouteMatrix({
               providerId: "",
               modelName: "",
               temperature: "0.2",
+              fallbackChain: [],
             };
+            const fallbackOptions = providers.filter(
+              (provider) =>
+                String(provider.id) !== draft.providerId &&
+                !draft.fallbackChain.some((item) => item.providerId === String(provider.id)),
+            );
             return (
               <tr key={feature.key}>
                 <td>
                   <b>{feature.label_fa}</b>
-                  <div className="admin-muted" dir="ltr">
-                    {feature.key}
-                  </div>
+                  <div className="admin-muted" dir="ltr">{feature.key}</div>
                 </td>
                 <td>
                   <select
@@ -583,15 +614,19 @@ function RouteMatrix({
                     onChange={(event) =>
                       setDrafts((prev) => ({
                         ...prev,
-                        [feature.key]: { ...draft, providerId: event.target.value },
+                        [feature.key]: {
+                          ...draft,
+                          providerId: event.target.value,
+                          fallbackChain: draft.fallbackChain.filter(
+                            (item) => item.providerId !== event.target.value,
+                          ),
+                        },
                       }))
                     }
                   >
                     <option value="">— انتخاب کنید —</option>
                     {providers.map((provider) => (
-                      <option key={provider.id} value={provider.id}>
-                        {provider.name}
-                      </option>
+                      <option key={provider.id} value={provider.id}>{provider.name}</option>
                     ))}
                   </select>
                 </td>
@@ -607,6 +642,94 @@ function RouteMatrix({
                     }
                     placeholder="gpt-4o"
                   />
+                </td>
+                <td>
+                  <div className="admin-billing-stack">
+                    {draft.fallbackChain.map((item, index) => (
+                      <div key={index} className="admin-chip-row">
+                        <span className="admin-muted">{index + 1}.</span>
+                        <select
+                          value={item.providerId}
+                          onChange={(event) =>
+                            setDrafts((prev) => ({
+                              ...prev,
+                              [feature.key]: {
+                                ...draft,
+                                fallbackChain: draft.fallbackChain.map((entry, itemIndex) =>
+                                  itemIndex === index ? { ...entry, providerId: event.target.value } : entry,
+                                ),
+                              },
+                            }))
+                          }
+                        >
+                          {providers
+                            .filter((provider) =>
+                              String(provider.id) === item.providerId ||
+                              (String(provider.id) !== draft.providerId &&
+                                !draft.fallbackChain.some((entry, itemIndex) =>
+                                  itemIndex !== index && entry.providerId === String(provider.id),
+                                )),
+                            )
+                            .map((provider) => (
+                              <option key={provider.id} value={provider.id}>{provider.name}</option>
+                            ))}
+                        </select>
+                        <input
+                          dir="ltr"
+                          value={item.modelName}
+                          onChange={(event) =>
+                            setDrafts((prev) => ({
+                              ...prev,
+                              [feature.key]: {
+                                ...draft,
+                                fallbackChain: draft.fallbackChain.map((entry, itemIndex) =>
+                                  itemIndex === index ? { ...entry, modelName: event.target.value } : entry,
+                                ),
+                              },
+                            }))
+                          }
+                          placeholder={draft.modelName || "مدل جایگزین"}
+                          aria-label={`مدل جایگزین ${index + 1} برای ${feature.key}`}
+                        />
+                        <button
+                          type="button"
+                          className="admin-logout-btn"
+                          aria-label="حذف ارائه‌دهندهٔ جایگزین"
+                          onClick={() =>
+                            setDrafts((prev) => ({
+                              ...prev,
+                              [feature.key]: {
+                                ...draft,
+                                fallbackChain: draft.fallbackChain.filter((_, itemIndex) => itemIndex !== index),
+                              },
+                            }))
+                          }
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                    {fallbackOptions.length > 0 && draft.fallbackChain.length < 8 && (
+                      <button
+                        type="button"
+                        className="admin-theme-chip"
+                        onClick={() =>
+                          setDrafts((prev) => ({
+                            ...prev,
+                            [feature.key]: {
+                              ...draft,
+                              fallbackChain: [
+                                ...draft.fallbackChain,
+                                { providerId: String(fallbackOptions[0].id), modelName: "" },
+                              ],
+                            },
+                          }))
+                        }
+                      >
+                        <Plus size={14} /> افزودن جایگزین
+                      </button>
+                    )}
+                  </div>
                 </td>
                 <td>
                   <input
@@ -635,6 +758,12 @@ function RouteMatrix({
                         Number(draft.providerId),
                         draft.modelName.trim(),
                         Number(draft.temperature) || 0.2,
+                        draft.fallbackChain
+                          .filter((item) => item.providerId)
+                          .map((item) => ({
+                            provider_id: Number(item.providerId),
+                            model_name: item.modelName.trim() || null,
+                          })),
                       )
                     }
                   >

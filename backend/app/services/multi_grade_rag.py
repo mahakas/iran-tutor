@@ -260,7 +260,9 @@ async def search_multi_grade(
     if not scopes:
         return {"results": [], "scopes": [], "expanded": 0}
 
-    primary = await search_textbook_scopes(query, scopes=scopes, top_k=top_k)
+    primary = await search_textbook_scopes(
+        query, scopes=scopes, top_k=top_k, route_session=session
+    )
     for item in primary:
         item["via_concept_link"] = False
 
@@ -275,7 +277,9 @@ async def search_multi_grade(
             allowed_book_ids=authorized_book_ids,
         )
         if link_scopes:
-            expanded = await search_textbook_scopes(query, scopes=link_scopes, top_k=max(2, top_k // 2))
+            expanded = await search_textbook_scopes(
+                query, scopes=link_scopes, top_k=max(2, top_k // 2), route_session=session
+            )
             for item in expanded:
                 item["via_concept_link"] = True
 

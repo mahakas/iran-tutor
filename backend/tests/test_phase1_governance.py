@@ -493,8 +493,9 @@ async def test_gateway_uses_admin_route_model_over_env_default(tmp_path, monkeyp
             )
             seen: dict[str, str] = {}
 
-            async def fake_complete_text(model, messages):
+            async def fake_complete_text(model, messages, **kwargs):
                 seen["model"] = model
+                seen["base_url"] = kwargs["base_url"]
                 return "ok"
 
             monkeypatch.setattr(ai_gateway, "complete_text", fake_complete_text)
@@ -512,6 +513,7 @@ async def test_gateway_uses_admin_route_model_over_env_default(tmp_path, monkeyp
                 ctx=ctx, messages=[{"role": "user", "content": "x"}], session=session
             )
             assert seen["model"] == "admin-routed-model"
+            assert seen["base_url"] == "https://router.invalid/v1"
     finally:
         app.dependency_overrides.clear()
         await rate_limiter.close_rate_limiter()
@@ -883,6 +885,7 @@ async def test_tutor_ask_writes_audit_row_end_to_end(tmp_path, monkeypatch):
 
                 row.plan_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
                 row.tokens_remaining = 50_000
+                row.grade_level = 12
                 await session.commit()
             response = await client.post(
                 "/api/v1/tutor/ask",

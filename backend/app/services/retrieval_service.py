@@ -394,6 +394,18 @@ def _scope_sql_clause(scopes: Sequence[TextbookScope]):
     return or_(*clauses)
 
 
+async def _uses_postgresql_database() -> bool:
+    """Detect the active SQL dialect instead of assuming demo_mode means SQLite."""
+    async with async_session_factory() as session:
+        get_bind = getattr(session, "get_bind", None)
+        # Lightweight fake sessions in query-construction tests predate
+        # dialect introspection and represent the configured production DB.
+        if not callable(get_bind):
+            return True
+        bind = get_bind()
+        return bool(bind is not None and bind.dialect.name == "postgresql")
+
+
 async def _search_postgres_scopes(
     query: str, *, scopes: Sequence[TextbookScope], limit: int
 ) -> list[dict[str, Any]]:
@@ -403,7 +415,7 @@ async def _search_postgres_scopes(
     be explored with SQLite and no PostgreSQL/Qdrant/embedding credentials.
     """
     scope_clause = _scope_sql_clause(scopes)
-    if get_settings().demo_mode:
+    if get_settings().demo_mode or not await _uses_postgresql_database():
         def _terms(value: str) -> set[str]:
             normalized = normalize_persian_text(value).casefold()
             tokens = re.findall(r"[\w۰-۹]+", normalized)
@@ -505,7 +517,7 @@ async def _search_postgres(
     The exact book id is the authoritative edition boundary. major_code remains
     in the signature for compatibility but is not a retrieval filter.
     """
-    if get_settings().demo_mode:
+    if get_settings().demo_mode or not await _uses_postgresql_database():
 
         def _terms(value: str) -> set[str]:
             normalized = normalize_persian_text(value).casefold()
@@ -640,11 +652,13 @@ def merge_hybrid_results(
 
 
 async def _search_pgvector_scopes(
-    query: str, *, scopes: Sequence[TextbookScope], limit: int
+    query: str, *, scopes: Sequence[TextbookScope], limit: int,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
         texts=[query],
+        session=route_session,
     )
     vector = embedding_result.content[0]
     embedding_model = (
@@ -727,10 +741,12 @@ async def _search_pgvector(
     major_code: str | None,
     book_id: int,
     limit: int,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=book_id),
         texts=[query],
+        session=route_session,
     )
     vector = embedding_result.content[0]
     embedding_model = (
@@ -902,11 +918,13 @@ async def _filter_qdrant_points(
 
 
 async def _search_qdrant_scopes(
-    query: str, *, scopes: Sequence[TextbookScope], limit: int
+    query: str, *, scopes: Sequence[TextbookScope], limit: int,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
         texts=[query],
+        session=route_session,
     )
     vector = embedding_result.content[0]
     settings = get_settings()
@@ -953,10 +971,12 @@ async def _search_qdrant(
     major_code: str | None,
     book_id: int,
     limit: int,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=book_id),
         texts=[query],
+        session=route_session,
     )
     vector = embedding_result.content[0]
     settings = get_settings()
@@ -1002,6 +1022,7 @@ async def search_textbook_scopes(
     *,
     scopes: Sequence[TextbookScope],
     top_k: int = 5,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search across one or more exact (book, grade[, chapters]) scopes.
 
@@ -1025,11 +1046,11 @@ async def search_textbook_scopes(
         try:
             if get_settings().vector_backend == "pgvector":
                 vector_results = await _search_pgvector_scopes(
-                    query, scopes=scopes, limit=candidate_limit
+                    query, scopes=scopes, limit=candidate_limit, route_session=route_session
                 )
             else:
                 vector_results = await _search_qdrant_scopes(
-                    query, scopes=scopes, limit=candidate_limit
+                    query, scopes=scopes, limit=candidate_limit, route_session=route_session
                 )
         except Exception:  # noqa: BLE001 - lexical fallback is intentional
             logger.exception("vector search unavailable; using PostgreSQL lexical results")
@@ -1045,6 +1066,7 @@ async def search_textbook(
     major_code: str | None,
     book_id: int,
     top_k: int = 5,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search, always scoped to the exact selected grade and book edition.
 
@@ -1077,6 +1099,7 @@ async def search_textbook(
                     major_code=major_code,
                     book_id=book_id,
                     limit=candidate_limit,
+                    route_session=route_session,
                 )
             else:
                 vector_results = await _search_qdrant(
@@ -1085,6 +1108,7 @@ async def search_textbook(
                     major_code=major_code,
                     book_id=book_id,
                     limit=candidate_limit,
+                    route_session=route_session,
                 )
         except Exception:  # noqa: BLE001 - lexical fallback is intentional
             logger.exception("vector search unavailable; using PostgreSQL lexical results")

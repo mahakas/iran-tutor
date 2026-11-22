@@ -26,11 +26,36 @@ def _fake_student() -> SimpleNamespace:
         tokens_remaining=15000,
         tokens_used_total=0,
         plan_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        grade_level=12,
         is_active=True,
     )
 
 
 class FakeSession:
+    async def scalar(self, statement):
+        sql = str(statement)
+        params = statement.compile().params
+        if "education_branches" in sql:
+            return SimpleNamespace(
+                id=3, code="theoretical", min_grade=10, max_grade=12, is_active=True
+            )
+        if "fields_of_study" in sql:
+            if "fields_of_study.code" not in sql:
+                return 5
+            code = next(
+                (value for value in params.values() if value in {"math_physics", "experimental"}),
+                None,
+            )
+            if code == "math_physics":
+                return SimpleNamespace(
+                    id=5, code="math_physics", branch_id=3, is_active=True
+                )
+            return None
+        if "book_curriculum_links" in sql:
+            # This legacy fixture has major_id metadata but no normalized link rows.
+            return None
+        return None
+
     async def get(self, model, identity):
         if model is Book and identity == 1:
             return SimpleNamespace(
@@ -74,7 +99,7 @@ async def test_tutor_rejects_major_that_does_not_match_selected_book(monkeypatch
         app.dependency_overrides.clear()
 
     assert response.status_code == 422
-    assert "selected major" in response.json()["detail"]
+    assert "field of study" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -107,17 +132,21 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
     finally:
         app.dependency_overrides.clear()
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert response.json()["answer"] == "پاسخ مستند"
 
 
 @pytest.mark.asyncio
 async def test_chat_sessions_roundtrip_crud(tmp_path):
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
     from app.db.base import Base
     from app.db.seed import seed_curriculum_taxonomy, seed_grades, seed_majors
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chat_test.sqlite3'}")
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'chat_test.sqlite3'}",
+        poolclass=NullPool,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -146,6 +175,7 @@ async def test_chat_sessions_roundtrip_crud(tmp_path):
             tokens_total=15000,
             tokens_remaining=15000,
             plan_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            grade_level=12,
         )
         session.add_all([book, user])
         await session.commit()

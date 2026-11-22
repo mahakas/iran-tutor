@@ -289,9 +289,10 @@ class LearningEvidence(Base):
         UniqueConstraint(
             "user_id",
             "objective_id",
+            "book_id",
             "source_type",
             "source_ref",
-            name="uq_learning_evidence_source",
+            name="uq_learning_evidence_book_source",
         ),
     )
 
@@ -319,6 +320,8 @@ class LearningEvidence(Base):
         String(24), nullable=False, default="unverified", server_default="unverified"
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     observed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

@@ -131,6 +131,7 @@ def serialize_route(route: FeatureModelRoute) -> dict[str, Any]:
         "max_tokens": route.max_tokens,
         "fallback_provider_id": route.fallback_provider_id,
         "fallback_model_name": route.fallback_model_name,
+        "fallback_chain": list(route.fallback_chain_json or []),
         "is_active": route.is_active,
     }
 
@@ -144,6 +145,89 @@ async def get_active_route(session: AsyncSession, feature_key: str) -> FeatureMo
         )
         .order_by(FeatureModelRoute.id.desc())
     )
+
+
+async def resolve_feature_route_candidates(
+    session: AsyncSession,
+    feature_key: str,
+) -> list[ResolvedRoute] | None:
+    """Resolve a primary provider followed by all configured fallbacks.
+
+    None means no DB route exists and legacy .env configuration may be used.
+    An empty list means the route exists but no provider is usable; callers must
+    fail closed rather than silently switch to an unrelated environment key.
+    """
+    route = await get_active_route(session, feature_key)
+    if route is None:
+        return None
+
+    if feature_key in {"vision_ocr", "ingest_ocr", "immersive_reader_vision"}:
+        required_capability = "vision"
+    elif feature_key in {"stt", "audio_stt", "speech_to_text"}:
+        required_capability = "stt"
+    elif feature_key in {"tts", "audio_tts", "speech_synthesis"}:
+        required_capability = "tts"
+    elif feature_key in {"embedding", "embeddings", "embedding_query"}:
+        required_capability = "embedding"
+    else:
+        required_capability = "chat"
+
+    fallbacks = [
+        item for item in (getattr(route, "fallback_chain_json", None) or [])
+        if isinstance(item, dict)
+    ]
+    if not fallbacks and route.fallback_provider_id is not None:
+        fallbacks = [{
+            "provider_id": route.fallback_provider_id,
+            "model_name": route.fallback_model_name,
+        }]
+    ordered = [(route.provider_id, route.model_name, "route")]
+    ordered.extend(
+        (item.get("provider_id"), item.get("model_name") or route.model_name, "fallback")
+        for item in fallbacks
+    )
+    if route.fallback_provider_id is not None and all(
+        item[0] != route.fallback_provider_id for item in ordered
+    ):
+        ordered.append((
+            route.fallback_provider_id,
+            route.fallback_model_name or route.model_name,
+            "fallback",
+        ))
+
+    candidates: list[ResolvedRoute] = []
+    seen: set[int] = set()
+    for provider_id, model_name, source in ordered:
+        if provider_id is None or provider_id in seen or not model_name:
+            continue
+        seen.add(provider_id)
+        provider = await session.get(AiProvider, provider_id)
+        if provider is None or not provider.is_active or not (provider.base_url or "").strip():
+            continue
+        declared = set(provider.capabilities or [])
+        if declared and required_capability not in declared:
+            logger.warning(
+                "ai_route.provider_capability_mismatch feature=%s provider=%s required=%s",
+                feature_key,
+                provider.id,
+                required_capability,
+            )
+            continue
+        candidates.append(
+            ResolvedRoute(
+                feature_key=feature_key,
+                provider_id=provider.id,
+                provider_name=provider.name,
+                provider_type=provider.provider_type,
+                base_url=provider.base_url,
+                model_name=model_name,
+                temperature=route.temperature,
+                max_tokens=route.max_tokens,
+                api_key=decrypt_secret(provider.encrypted_api_key),
+                source=source,
+            )
+        )
+    return candidates
 
 
 async def resolve_feature_route(session: AsyncSession, feature_key: str) -> ResolvedRoute | None:

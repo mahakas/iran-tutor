@@ -193,3 +193,72 @@ export const MASTERY_STATUS_LABEL: Record<MasteryChapter["status"], string> = {
   in_progress: "در حال یادگیری",
   not_started: "شروع‌نشده",
 };
+
+export type ObjectiveMasteryStatus =
+  | "locked"
+  | "mastered"
+  | "developing"
+  | "needs_support"
+  | "submitted_for_review"
+  | "not_started";
+
+export const OBJECTIVE_MASTERY_STATUS_LABEL: Record<ObjectiveMasteryStatus, string> = {
+  locked: "قفل؛ پیش‌نیاز تکمیل نشده",
+  mastered: "تأییدشده و مسلط",
+  developing: "در حال پیشرفت",
+  needs_support: "نیازمند پشتیبانی",
+  submitted_for_review: "ارسال‌شده برای بازبینی",
+  not_started: "شروع‌نشده",
+};
+
+
+export type ObjectiveEvidenceStatus = ObjectiveMasteryStatus;
+
+export type ObjectiveEvidenceItem = {
+  id: number;
+  source_type: string;
+  score: number | null;
+  qualitative_level: string | null;
+  verification_status: "unverified" | "verified" | "rejected" | string;
+  reviewed_at: string | null;
+  review_note: string | null;
+  rubric: Record<string, unknown>;
+  feedback: string | null;
+  observed_at: string | null;
+};
+
+export type ObjectiveMasteryItem = {
+  id: number;
+  code: string;
+  title: string;
+  description: string | null;
+  competency_type: string | null;
+  assessment_profile: "written" | "qualitative_descriptive" | "performance" | "mixed" | string;
+  unit: { id: number; code: string; title: string; type: string };
+  subject: { code: string; title: string };
+  status: ObjectiveEvidenceStatus;
+  score: number | null;
+  qualitative_level: string | null;
+  evidence_count: number;
+  latest_evidence: {
+    source_type: string;
+    score: number | null;
+    qualitative_level: string | null;
+    verification_status: "unverified" | "verified" | "rejected" | string;
+    review_note: string | null;
+    reviewed_at: string | null;
+    feedback: string | null;
+    observed_at: string | null;
+  } | null;
+  evidence: ObjectiveEvidenceItem[];
+  prerequisites: Array<{ code: string; title: string; status: ObjectiveEvidenceStatus }>;
+};
+
+export type ObjectiveMasteryTree = {
+  book: { id: number; title: string };
+  academic_year_code: string | null;
+  threshold: number | null;
+  mastered_count: number;
+  objectives: ObjectiveMasteryItem[];
+  message?: string;
+};

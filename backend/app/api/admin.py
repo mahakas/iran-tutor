@@ -35,6 +35,7 @@ from app.core.runtime_config import (
     set_runtime_overrides,
 )
 from app.db.session import async_session_factory
+from app.services.curriculum_access import is_student_visible_book
 from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User, UserFile, UserSession
 from app.models.chat import ChatSession
 from app.models.curriculum import (
@@ -298,25 +299,184 @@ class LearningEvidenceReviewBody(BaseModel):
     review_note: str | None = Field(default=None, max_length=2000)
 
 
+@protected_router.get("/mastery/evidence")
+async def list_learning_evidence(
+    user_id: str | None = Query(default=None, max_length=36),
+    book_id: int | None = Query(default=None, ge=1),
+    verification_status: Literal["unverified", "verified", "rejected", "all"] = Query(default="unverified"),
+    limit: int = Query(default=100, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Admin queue for reviewing student-submitted evidence, scoped to its edition."""
+    statement = (
+        select(LearningEvidence, User, Book, LearningObjective, CurriculumUnit, Subject, BookPage)
+        .join(User, LearningEvidence.user_id == User.id)
+        .join(LearningObjective, LearningEvidence.objective_id == LearningObjective.id)
+        .join(CurriculumUnit, LearningObjective.unit_id == CurriculumUnit.id)
+        .join(Subject, CurriculumUnit.subject_id == Subject.id)
+        .outerjoin(Book, LearningEvidence.book_id == Book.id)
+        .outerjoin(BookPage, LearningEvidence.book_page_id == BookPage.id)
+        .order_by(LearningEvidence.observed_at.desc(), LearningEvidence.id.desc())
+        .limit(limit)
+    )
+    if user_id:
+        statement = statement.where(LearningEvidence.user_id == user_id)
+    if book_id is not None:
+        statement = statement.where(LearningEvidence.book_id == book_id)
+    if verification_status != "all":
+        statement = statement.where(LearningEvidence.verification_status == verification_status)
+
+    rows = (await session.execute(statement)).all()
+    items = []
+    for evidence, student, book, objective, unit, subject, page in rows:
+        items.append({
+            "id": evidence.id,
+            "user_id": student.id,
+            "student_name": student.full_name or student.phone_number,
+            "student_grade": student.grade_level,
+            "book_id": evidence.book_id,
+            "book_title": book.title if book is not None else None,
+            "academic_year_id": book.academic_year_id if book is not None else None,
+            "edition_label": book.edition_label if book is not None else None,
+            "objective_id": objective.id,
+            "objective_code": objective.code,
+            "objective_title": objective.title,
+            "unit_title": unit.title,
+            "subject_title": subject.title,
+            "source_type": evidence.source_type,
+            "source_ref": evidence.source_ref,
+            "score": evidence.score,
+            "qualitative_level": evidence.qualitative_level,
+            "rubric": dict(evidence.rubric_json or {}),
+            "verification_status": evidence.verification_status,
+            "feedback": evidence.feedback,
+            "review_note": evidence.review_note,
+            "reviewed_by": evidence.reviewed_by,
+            "pdf_page_index": page.pdf_page_index if page is not None else None,
+            "printed_page_number": page.printed_page_number if page is not None else None,
+            "observed_at": evidence.observed_at.isoformat() if evidence.observed_at else None,
+            "reviewed_at": evidence.reviewed_at.isoformat() if evidence.reviewed_at else None,
+        })
+    return {"total": len(items), "items": items}
+
+
 @protected_router.patch("/mastery/evidence/{evidence_id}/review")
 async def review_learning_evidence(
     evidence_id: int,
     body: LearningEvidenceReviewBody,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    evidence = await session.get(LearningEvidence, evidence_id)
+    evidence = await session.scalar(
+        select(LearningEvidence)
+        .where(LearningEvidence.id == evidence_id)
+        .with_for_update()
+    )
     if evidence is None:
         raise HTTPException(status_code=404, detail="learning evidence not found")
+    if evidence.verification_status != "unverified":
+        raise HTTPException(
+            status_code=409,
+            detail="این شاهد قبلاً بازبینی شده است و بازبینی مجدد آن از این مسیر مجاز نیست.",
+        )
+    review_note = (body.review_note or "").strip()
+    if body.verification_status == "rejected" and not review_note:
+        raise HTTPException(
+            status_code=422,
+            detail="برای رد شاهد یادگیری، ثبت دلیل بازبینی الزامی است.",
+        )
+
+    # A positive decision is possible only for evidence attached to an
+    # approved edition and an active curriculum objective in the same scope.
+    book = await session.get(Book, evidence.book_id) if evidence.book_id is not None else None
+    objective = await session.get(LearningObjective, evidence.objective_id)
+    unit = await session.get(CurriculumUnit, objective.unit_id) if objective is not None else None
+    if body.verification_status == "verified":
+        if not is_student_visible_book(book) or objective is None or unit is None:
+            raise HTTPException(
+                status_code=409,
+                detail="برای تأیید شاهد، کتاب رسمیِ منتشرشده و هدف برنامهٔ درسی معتبر الزامی است.",
+            )
+        if not objective.is_active or not unit.is_active or unit.grade_id != book.grade_id:
+            raise HTTPException(
+                status_code=409,
+                detail="هدف یادگیری با پایه یا وضعیت کتاب انتخاب‌شده سازگار نیست.",
+            )
+        if unit.academic_year_id not in {None, book.academic_year_id}:
+            raise HTTPException(
+                status_code=409,
+                detail="هدف یادگیری متعلق به سال تحصیلی این نسخهٔ کتاب نیست.",
+            )
+        academic_year = (
+            await session.get(AcademicYear, book.academic_year_id)
+            if book.academic_year_id is not None
+            else None
+        )
+        if academic_year is not None and unit.scope_code not in {academic_year.code, "unspecified"}:
+            raise HTTPException(
+                status_code=409,
+                detail="دامنهٔ سال تحصیلی هدف یادگیری با نسخهٔ کتاب سازگار نیست.",
+            )
+        book_links = (
+            await session.scalars(
+                select(BookCurriculumLink).where(BookCurriculumLink.book_id == book.id)
+            )
+        ).all()
+        subject_ids = {link.subject_id for link in book_links if link.subject_id is not None}
+        if not subject_ids or unit.subject_id not in subject_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="برای تأیید شاهد، درس هدف باید صریحاً به همین نسخهٔ کتاب متصل شده باشد.",
+            )
+        scoped_links = [link for link in book_links if link.branch_id is not None]
+        if scoped_links and not (
+            (unit.branch_id is None and unit.field_of_study_id is None)
+            or any(
+                link.branch_id == unit.branch_id
+                and (
+                    link.field_of_study_id is None
+                    or link.field_of_study_id == unit.field_of_study_id
+                )
+                for link in scoped_links
+            )
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="شاخه یا رشتهٔ هدف یادگیری با نسخهٔ کتاب سازگار نیست.",
+            )
+        page = await session.get(BookPage, evidence.book_page_id) if evidence.book_page_id else None
+        if evidence.book_page_id is not None:
+            if page is None or page.book_id != book.id or page.status != PageStatus.done:
+                raise HTTPException(
+                    status_code=409,
+                    detail="صفحهٔ منبع شاهد در کتاب انتخاب‌شده آماده یا معتبر نیست.",
+                )
+            mapped = await session.scalar(
+                select(BookPageObjective.id).where(
+                    BookPageObjective.book_page_id == page.id,
+                    BookPageObjective.objective_id == objective.id,
+                )
+            )
+            if mapped is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="هدف یادگیری به صفحهٔ منبع این شاهد متصل نیست.",
+                )
+
+    identity = getattr(request.state, "admin_identity", None) or {}
+    reviewer_id = identity.get("user_id")
+    reviewer_kind = str(identity.get("kind") or "admin")
     evidence.verification_status = body.verification_status
     evidence.reviewed_at = datetime.now(timezone.utc)
-    if body.review_note:
-        prior = (evidence.feedback or "").strip()
-        evidence.feedback = (prior + "\n\nبازبینی مدیر: " + body.review_note.strip()).strip()
+    evidence.reviewed_by = (f"user:{reviewer_id}" if reviewer_id else reviewer_kind)[:128]
+    evidence.review_note = review_note or None
     await session.commit()
     return {
         "evidence_id": evidence.id,
         "verification_status": evidence.verification_status,
         "reviewed_at": evidence.reviewed_at.isoformat() if evidence.reviewed_at else None,
+        "reviewed_by": evidence.reviewed_by,
+        "review_note": evidence.review_note,
     }
 
 
@@ -2944,6 +3104,13 @@ class AiProviderUpdateBody(BaseModel):
     is_active: bool | None = None
 
 
+class FallbackRouteProviderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: int = Field(gt=0)
+    model_name: str | None = Field(default=None, max_length=255)
+
+
 class FeatureRouteBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2952,6 +3119,8 @@ class FeatureRouteBody(BaseModel):
     model_name: str = Field(min_length=1, max_length=255)
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1, le=200_000)
+    fallback_chain: list[FallbackRouteProviderBody] | None = Field(default=None, max_length=8)
+    # Backward-compatible single-fallback fields.
     fallback_provider_id: int | None = Field(default=None, gt=0)
     fallback_model_name: str | None = Field(default=None, max_length=255)
     is_active: bool = True
@@ -3153,10 +3322,34 @@ async def upsert_feature_route(
 
     if body.feature_key not in ROUTABLE_FEATURE_KEYS:
         raise HTTPException(status_code=422, detail="کلید قابلیت انتخاب‌شده معتبر نیست.")
-    if await session.get(AiProvider, body.provider_id) is None:
-        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ انتخاب‌شده پیدا نشد.")
-    if body.fallback_provider_id is not None and await session.get(AiProvider, body.fallback_provider_id) is None:
-        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ جایگزین پیدا نشد.")
+    primary = await session.get(AiProvider, body.provider_id)
+    if primary is None or not primary.is_active:
+        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ اصلی وجود ندارد یا غیرفعال است.")
+
+    if body.fallback_chain is None:
+        fallback_chain = (
+            [FallbackRouteProviderBody(
+                provider_id=body.fallback_provider_id,
+                model_name=body.fallback_model_name,
+            )]
+            if body.fallback_provider_id is not None
+            else []
+        )
+    else:
+        fallback_chain = list(body.fallback_chain)
+
+    fallback_ids = [item.provider_id for item in fallback_chain]
+    if len(fallback_chain) > 8:
+        raise HTTPException(status_code=422, detail="حداکثر ۸ ارائه‌دهندهٔ جایگزین قابل ثبت است.")
+    if body.provider_id in fallback_ids or len(set(fallback_ids)) != len(fallback_ids):
+        raise HTTPException(status_code=422, detail="ارائه‌دهنده‌های جایگزین باید یکتا و متفاوت از ارائه‌دهندهٔ اصلی باشند.")
+    for fallback in fallback_chain:
+        provider = await session.get(AiProvider, fallback.provider_id)
+        if provider is None or not provider.is_active:
+            raise HTTPException(
+                status_code=422,
+                detail=f"ارائه‌دهندهٔ جایگزین {fallback.provider_id} وجود ندارد یا غیرفعال است.",
+            )
 
     route = await session.scalar(
         select(FeatureModelRoute).where(FeatureModelRoute.feature_key == body.feature_key)
@@ -3168,8 +3361,20 @@ async def upsert_feature_route(
     route.model_name = body.model_name.strip()
     route.temperature = body.temperature
     route.max_tokens = body.max_tokens
-    route.fallback_provider_id = body.fallback_provider_id
-    route.fallback_model_name = (body.fallback_model_name or "").strip() or None
+    route.fallback_chain_json = [
+        {
+            "provider_id": item.provider_id,
+            "model_name": (item.model_name or "").strip() or None,
+        }
+        for item in fallback_chain
+    ]
+    # Mirror the first fallback into legacy columns for older API clients.
+    route.fallback_provider_id = fallback_chain[0].provider_id if fallback_chain else None
+    route.fallback_model_name = (
+        (fallback_chain[0].model_name or "").strip() or None
+        if fallback_chain
+        else None
+    )
     route.is_active = body.is_active
     await session.commit()
     await session.refresh(route)

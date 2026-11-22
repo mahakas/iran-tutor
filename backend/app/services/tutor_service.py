@@ -317,6 +317,7 @@ async def answer_from_textbook(
             major_code=major_code,
             book_id=book_id,
             top_k=top_k,
+            route_session=db_session,
         )
         scope_count = 1
         expanded_count = 0

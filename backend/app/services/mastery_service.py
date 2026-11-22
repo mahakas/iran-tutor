@@ -314,13 +314,29 @@ def _evidence_progress(
         "evidence_count": len(ordered),
         "latest_evidence": (
             {
-                "source_type": latest.source_type,
-                "score": latest.score,
-                "qualitative_level": level,
-                "feedback": latest.feedback,
-                "observed_at": latest.observed_at.isoformat() if latest.observed_at else None,
+                # Display the latest submission, even when an older verified
+                # submission continues to determine the mastery score/status.
+                "source_type": latest_submission.source_type,
+                "score": latest_submission.score,
+                "qualitative_level": (
+                    latest_submission.qualitative_level
+                    or (latest_submission.rubric_json or {}).get("overall_level")
+                ),
+                "verification_status": getattr(latest_submission, "verification_status", "unverified"),
+                "review_note": getattr(latest_submission, "review_note", None),
+                "reviewed_at": (
+                    latest_submission.reviewed_at.isoformat()
+                    if getattr(latest_submission, "reviewed_at", None)
+                    else None
+                ),
+                "feedback": latest_submission.feedback,
+                "observed_at": (
+                    latest_submission.observed_at.isoformat()
+                    if latest_submission.observed_at
+                    else None
+                ),
             }
-            if latest is not None
+            if latest_submission is not None
             else None
         ),
         "evidence": [
@@ -331,6 +347,7 @@ def _evidence_progress(
                 "qualitative_level": row.qualitative_level,
                 "verification_status": getattr(row, "verification_status", "unverified"),
                 "reviewed_at": row.reviewed_at.isoformat() if getattr(row, "reviewed_at", None) else None,
+                "review_note": getattr(row, "review_note", None),
                 "rubric": dict(row.rubric_json or {}),
                 "feedback": row.feedback,
                 "observed_at": row.observed_at.isoformat() if row.observed_at else None,
@@ -366,6 +383,9 @@ async def record_objective_evidence(
         raise HTTPException(status_code=422, detail="برای این هدف، نمرهٔ ارزیابی لازم است.")
     if profile == "mixed" and score is None and qualitative_level is None and not rubric:
         raise HTTPException(status_code=422, detail="حداقل یک شاهد کمی، توصیفی یا عملکردی لازم است.")
+
+    if book_id is None:
+        raise HTTPException(status_code=422, detail="برای ثبت شاهد یادگیری، انتخاب کتاب رسمی الزامی است.")
 
     page_id = None
     if book_id is not None:
@@ -429,7 +449,9 @@ async def record_objective_evidence(
                 select(BookPageObjective.objective_id).where(BookPageObjective.book_page_id == page.id)
             )
         ).all()
-        if mapped_objectives and objective_id not in mapped_objectives:
+        if not mapped_objectives:
+            raise HTTPException(status_code=422, detail="برای این صفحه هنوز نگاشت هدف یادگیری تأیید نشده است.")
+        if objective_id not in mapped_objectives:
             raise HTTPException(status_code=422, detail="این هدف به صفحهٔ انتخاب‌شده متصل نیست.")
         page_id = page.id
 
@@ -439,11 +461,23 @@ async def record_objective_evidence(
             select(LearningEvidence).where(
                 LearningEvidence.user_id == user_id,
                 LearningEvidence.objective_id == objective_id,
+                LearningEvidence.book_id == book_id,
                 LearningEvidence.source_type == source_type,
                 LearningEvidence.source_ref == source_ref,
             )
         )
-    if row is None:
+    if row is not None:
+        if row.book_page_id != page_id:
+            raise HTTPException(
+                status_code=409,
+                detail="این شناسهٔ شاهد قبلاً برای صفحهٔ دیگری از همین کتاب استفاده شده است.",
+            )
+        if row.verification_status != "unverified":
+            raise HTTPException(
+                status_code=409,
+                detail="شاهد بازبینی‌شده قابل ویرایش مجدد نیست؛ برای ارسال جدید شناسهٔ تازه بسازید.",
+            )
+    else:
         row = LearningEvidence(
             user_id=user_id,
             objective_id=objective_id,
@@ -525,15 +559,30 @@ async def objective_tree(
                     BookPage.book_id == book_id,
                     BookPage.status == PageStatus.done,
                     CurriculumUnit.grade_id == book.grade_id,
+                    CurriculumUnit.is_active.is_(True),
+                    LearningObjective.is_active.is_(True),
+                    scope_condition,
+                    branch_scope_condition,
+                    CurriculumUnit.subject_id.in_(subject_ids) if subject_ids else True,
+                    (
+                        or_(
+                            CurriculumUnit.academic_year_id.is_(None),
+                            CurriculumUnit.academic_year_id == book.academic_year_id,
+                        )
+                        if book.academic_year_id is not None
+                        else CurriculumUnit.academic_year_id.is_(None)
+                    ),
                 )
             )
         ).all()
     )
     relevance_terms = []
-    if subject_ids:
-        relevance_terms.append(CurriculumUnit.subject_id.in_(subject_ids))
+    # Page-to-objective mappings are authoritative when present. An OR with
+    # subject-wide objectives would nullify these mappings and widen mastery.
     if mapped_objective_ids:
         relevance_terms.append(LearningObjective.id.in_(mapped_objective_ids))
+    elif subject_ids:
+        relevance_terms.append(CurriculumUnit.subject_id.in_(subject_ids))
     if not relevance_terms:
         return {
             "book": {"id": book.id, "title": book.title},
@@ -554,6 +603,20 @@ async def objective_tree(
                 CurriculumUnit.is_active.is_(True),
                 LearningObjective.is_active.is_(True),
                 scope_condition,
+                (
+                    and_(
+                        CurriculumUnit.academic_year_id.is_(None),
+                        CurriculumUnit.scope_code == "unspecified",
+                    )
+                    if book.academic_year_id is None
+                    else and_(
+                        or_(
+                            CurriculumUnit.academic_year_id.is_(None),
+                            CurriculumUnit.academic_year_id == book.academic_year_id,
+                        ),
+                        scope_condition,
+                    )
+                ),
                 branch_scope_condition,
                 or_(*relevance_terms),
             )
@@ -585,8 +648,20 @@ async def objective_tree(
             .where(
                 ObjectivePrerequisite.objective_id.in_(objective_ids),
                 CurriculumUnit.grade_id == book.grade_id,
+                CurriculumUnit.is_active.is_(True),
                 LearningObjective.is_active.is_(True),
                 scope_condition,
+                (
+                    and_(
+                        CurriculumUnit.academic_year_id.is_(None),
+                        CurriculumUnit.scope_code == "unspecified",
+                    )
+                    if book.academic_year_id is None
+                    else or_(
+                        CurriculumUnit.academic_year_id.is_(None),
+                        CurriculumUnit.academic_year_id == book.academic_year_id,
+                    )
+                ),
                 branch_scope_condition,
             )
         )
@@ -598,6 +673,7 @@ async def objective_tree(
             select(LearningEvidence)
             .where(
                 LearningEvidence.user_id == user_id,
+                LearningEvidence.book_id == book_id,
                 LearningEvidence.objective_id.in_(all_evidence_ids),
             )
             .order_by(LearningEvidence.observed_at.desc(), LearningEvidence.id.desc())
