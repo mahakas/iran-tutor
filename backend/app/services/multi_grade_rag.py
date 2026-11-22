@@ -20,7 +20,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.concepts import ConceptLink
@@ -34,6 +34,7 @@ from app.models.curriculum import (
     Grade,
     Major,
     PageStatus,
+    Subject,
 )
 from app.services.curriculum_access import student_book_catalog_clause
 from app.services.retrieval_service import TextbookScope, search_textbook_scopes
@@ -106,21 +107,28 @@ async def resolve_curriculum_book_ids(
         )
         if selected_field is None:
             raise ScopeError("selected field does not belong to the selected branch")
-    elif branch.code == "theoretical":
-        raise ScopeError("a theoretical field of study is required")
+    elif (
+        await session.scalar(
+            select(FieldOfStudy.id)
+            .where(
+                FieldOfStudy.branch_id == branch.id,
+                FieldOfStudy.is_active.is_(True),
+            )
+            .limit(1)
+        )
+    ) is not None:
+        raise ScopeError("a field of study is required for this branch")
 
+    # Every candidate edition must have an explicit active subject link.
+    # A NULL subject is not an authorization wildcard for multi-grade retrieval.
+    subject_match = BookCurriculumLink.subject_id.in_(subject_ids)
     applicable_links = [
         exists(
             select(BookCurriculumLink.id).where(
                 BookCurriculumLink.book_id == Book.id,
                 BookCurriculumLink.branch_id.is_(None),
                 BookCurriculumLink.field_of_study_id.is_(None),
-                or_(
-                    BookCurriculumLink.subject_id.is_(None),
-                    BookCurriculumLink.subject_id.in_(list(subject_ids or []))
-                    if subject_ids
-                    else BookCurriculumLink.subject_id.is_(None),
-                ),
+                subject_match,
             )
         ),
         exists(
@@ -128,12 +136,7 @@ async def resolve_curriculum_book_ids(
                 BookCurriculumLink.book_id == Book.id,
                 BookCurriculumLink.branch_id == branch.id,
                 BookCurriculumLink.field_of_study_id.is_(None),
-                or_(
-                    BookCurriculumLink.subject_id.is_(None),
-                    BookCurriculumLink.subject_id.in_(list(subject_ids or []))
-                    if subject_ids
-                    else BookCurriculumLink.subject_id.is_(None),
-                ),
+                subject_match,
             )
         ),
     ]
@@ -144,28 +147,10 @@ async def resolve_curriculum_book_ids(
                     BookCurriculumLink.book_id == Book.id,
                     BookCurriculumLink.branch_id == branch.id,
                     BookCurriculumLink.field_of_study_id == selected_field.id,
-                    or_(
-                        BookCurriculumLink.subject_id.is_(None),
-                        BookCurriculumLink.subject_id.in_(list(subject_ids or []))
-                        if subject_ids
-                        else BookCurriculumLink.subject_id.is_(None),
-                    ),
+                    subject_match,
                 )
             )
         )
-
-        # Compatibility for legacy theoretical editions that still use Major.
-        if branch.code == "theoretical" and not subject_ids:
-            legacy_major_id = await session.scalar(
-                select(Major.id).where(Major.code == selected_field.code)
-            )
-            legacy_field_match = (
-                Book.major_id == legacy_major_id if legacy_major_id is not None else None
-            )
-        else:
-            legacy_field_match = None
-    else:
-        legacy_field_match = None
 
     year_condition = (
         Book.academic_year_id == academic_year_id
