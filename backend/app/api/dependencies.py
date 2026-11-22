@@ -139,7 +139,7 @@ async def resolve_book_scope(
                 FieldOfStudy.is_active.is_(True),
             )
         )
-        if selected_field is None:
+        if selected_field is None or selected_field.branch_id != branch.id:
             raise HTTPException(status_code=422, detail="field of study does not belong to the selected branch")
     elif branch.code == "theoretical":
         raise HTTPException(status_code=422, detail="a theoretical field of study is required")
