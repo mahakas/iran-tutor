@@ -42,7 +42,9 @@ async def test_list_books_for_high_school_requires_and_scopes_major():
         title="فیزیک ۳",
         status=BookStatus.ready,
     )
-    session = FakeSession(grade, major, [book])
+    theoretical = SimpleNamespace(id=1, code="theoretical", min_grade=10, max_grade=12, is_active=True)
+    field = SimpleNamespace(id=2, code="math_physics", branch_id=1, is_active=True)
+    session = FakeSession(grade, scalar_values=[major, theoretical, 2, field], books=[book])
 
     response = await list_books(
         12,
@@ -124,7 +126,7 @@ async def test_resolve_book_scope_accepts_approved_technical_branch_book():
     branch = SimpleNamespace(id=3, code="technical_vocational", min_grade=10, max_grade=12, is_active=True)
     session = FakeSession(
         grade,
-        scalar_values=[branch, 501],  # matching branch and BookCurriculumLink
+        scalar_values=[branch, None, 501],  # no fields on branch, matching applicability link
     )
     # resolve_book_scope loads the grade via get(), so its first scalar is the branch.
     async def fake_scalar(statement):
