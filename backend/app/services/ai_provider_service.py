@@ -185,8 +185,13 @@ async def resolve_feature_route_chain(
     model_names = [route.model_name]
     configured_fallback_models = list(route.fallback_model_names or [])
     for index, provider_id in enumerate(provider_ids[1:]):
-        if index < len(configured_fallback_models) and configured_fallback_models[index]:
-            model_names.append(str(configured_fallback_models[index]).strip())
+        configured_name = (
+            str(configured_fallback_models[index]).strip()
+            if index < len(configured_fallback_models)
+            else ""
+        )
+        if configured_name:
+            model_names.append(configured_name)
         elif provider_id == route.fallback_provider_id and route.fallback_model_name:
             model_names.append(route.fallback_model_name)
         else:
