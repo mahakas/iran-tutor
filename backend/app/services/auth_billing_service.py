@@ -102,6 +102,12 @@ def verify_otp_hash(otp_id: str, phone_number: str, code: str, expected_hash: st
     return constant_time_equal(actual, expected_hash)
 
 
+def hash_phone_verification_token(otp_id: str, phone_number: str, token: str) -> str:
+    """Bind a one-time registration challenge to the verified phone and OTP row."""
+    message = f"registration:{otp_id}:{phone_number}:{token}".encode("utf-8")
+    return hmac.new(_user_signing_key(), message, hashlib.sha256).hexdigest()
+
+
 def _utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
