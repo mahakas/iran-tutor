@@ -781,6 +781,100 @@ async def _search_pgvector(
     return results
 
 
+async def _filter_qdrant_points(
+    points: Sequence[Any], *, scopes: Sequence[TextbookScope]
+) -> list[dict[str, Any]]:
+    """Reconcile vector hits with the current, approved textbook page rows.
+
+    Qdrant is an index, not the source of truth. A page may have been edited or
+    moved to needs_review since it was indexed. Keep a vector hit only when the
+    corresponding database page is still approved and its indexed text exactly
+    matches the current text; return the current database metadata/content.
+    """
+    from sqlalchemy import and_, or_
+
+    requested: set[tuple[int, int]] = set()
+    point_payloads: list[tuple[Any, dict[str, Any], tuple[int, int]]] = []
+    for point in points:
+        payload = dict(getattr(point, "payload", None) or {})
+        book_id = payload.get("book_id")
+        page_index = payload.get("pdf_page_index")
+        if (
+            isinstance(book_id, bool)
+            or not isinstance(book_id, int)
+            or book_id <= 0
+            or isinstance(page_index, bool)
+            or not isinstance(page_index, int)
+            or page_index < 0
+        ):
+            continue
+        identity = (book_id, page_index)
+        requested.add(identity)
+        point_payloads.append((point, payload, identity))
+
+    if not requested:
+        return []
+
+    identity_clause = or_(
+        *(
+            and_(BookPage.book_id == book_id, BookPage.pdf_page_index == page_index)
+            for book_id, page_index in requested
+        )
+    )
+    async with async_session_factory() as session:
+        rows = (
+            await session.execute(
+                select(
+                    BookPage,
+                    Book.title,
+                    Grade.number,
+                    func.coalesce(Major.code, "general"),
+                )
+                .join(Book, BookPage.book_id == Book.id)
+                .join(Grade, Book.grade_id == Grade.id)
+                .outerjoin(Major, Book.major_id == Major.id)
+                .where(
+                    _scope_sql_clause(scopes),
+                    identity_clause,
+                    BookPage.status == PageStatus.done,
+                )
+            )
+        ).all()
+
+    current: dict[tuple[int, int], tuple[BookPage, str, int, str]] = {
+        (page.book_id, page.pdf_page_index): (page, title, grade_number, major_code)
+        for page, title, grade_number, major_code in rows
+    }
+
+    verified: list[dict[str, Any]] = []
+    for point, payload, identity in point_payloads:
+        record = current.get(identity)
+        if record is None:
+            continue
+        page, title, grade_number, major_code = record
+        current_text = page_embedding_text(page.markdown_content or "", page.visual_elements or [])
+        # Old or stale payloads without an exact source snapshot must be re-indexed.
+        if not current_text or payload.get("full_text") != current_text:
+            continue
+        verified.append(
+            {
+                "book_id": page.book_id,
+                "book_title": title,
+                "grade_number": grade_number,
+                "major_code": major_code,
+                "pdf_page_index": page.pdf_page_index,
+                "printed_page_number": page.printed_page_number,
+                "chapter_number": page.chapter_number,
+                "chapter_title": page.chapter_title,
+                "full_text": current_text,
+                "markdown_content": page.markdown_content,
+                "visual_elements": page.visual_elements or [],
+                "score": float(point.score),
+            }
+        )
+    return verified
+
+
 async def _search_qdrant_scopes(
     query: str, *, scopes: Sequence[TextbookScope], limit: int
 ) -> list[dict[str, Any]]:
@@ -799,9 +893,7 @@ async def _search_qdrant_scopes(
         with_payload=True,
         score_threshold=0.15,
     )
-    return [
-        {**(point.payload or {}), "score": float(point.score)} for point in response.points
-    ]
+    return await _filter_qdrant_points(response.points, scopes=scopes)
 
 
 async def _search_qdrant(
@@ -829,9 +921,16 @@ async def _search_qdrant(
         with_payload=True,
         score_threshold=0.15,
     )
-    return [
-        {**(point.payload or {}), "score": float(point.score)} for point in response.points
-    ]
+    return await _filter_qdrant_points(
+        response.points,
+        scopes=[
+            TextbookScope(
+                book_id=book_id,
+                grade_number=grade_number,
+                major_code=major_code,
+            )
+        ],
+    )
 
 
 async def search_textbook_scopes(
