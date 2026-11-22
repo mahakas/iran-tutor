@@ -8,6 +8,8 @@ import pytest
 from app.core import llm_client
 from app.services import ai_gateway, ai_provider_service
 from app.services.ai_provider_service import ResolvedRoute
+from app.services import ingestion_service
+import pymupdf
 
 
 def _route(provider_id: int, model_name: str) -> ResolvedRoute:
@@ -23,6 +25,40 @@ def _route(provider_id: int, model_name: str) -> ResolvedRoute:
         api_key=f"key-{provider_id}",
         source="route" if provider_id == 1 else "fallback",
     )
+
+
+@pytest.mark.asyncio
+async def test_book_ingestion_accepts_managed_vision_route_without_legacy_model(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "managed-route.pdf"
+    document = pymupdf.open()
+    document.new_page()
+    document.save(pdf_path)
+    document.close()
+
+    monkeypatch.setattr(
+        ingestion_service,
+        "get_settings",
+        lambda: SimpleNamespace(max_concurrency=1),
+    )
+
+    result = await ingestion_service.ingest_book_pages(
+        pdf_path=pdf_path,
+        book_id="managed-route-book",
+        grade_number=10,
+        major_code="math_physics",
+        book_title="Managed vision route test",
+        start_page=1,
+        end_page=1,
+        model_primary=None,
+        use_db=False,
+        dry_run=True,
+    )
+
+    assert result["dry_run"] is True
+    assert result["processed"] == 1
+    assert result["plan"] == [
+        {"pdf_page_index": 1, "decision": True, "reason": "process"}
+    ]
 
 
 @pytest.mark.asyncio
