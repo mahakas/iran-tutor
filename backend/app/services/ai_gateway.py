@@ -359,13 +359,17 @@ async def complete_text_via_gateway(
         effective_model = (route.model_name if route else None) or model or settings.tutor_model
         if not effective_model:
             raise RuntimeError("no model is configured for this feature")
+        if route is None:
+            # Preserve the original provider-agnostic API contract when no admin
+            # route is configured; legacy adapters and .env clients remain valid.
+            return await complete_text(effective_model, messages)
         return await complete_text(
             effective_model,
             messages,
-            base_url=route.base_url if route else None,
-            api_key=route.api_key if route else None,
-            temperature=route.temperature if route else (temperature if temperature is not None else 0.2),
-            max_tokens=route.max_tokens if route else None,
+            base_url=route.base_url,
+            api_key=route.api_key,
+            temperature=route.temperature,
+            max_tokens=route.max_tokens,
         )
 
     started = time.perf_counter()
@@ -421,15 +425,18 @@ async def stream_text_via_gateway(
             await on_chunk(chunk)
 
         try:
-            content = await stream_text(
-                effective_model,
-                messages,
-                forward_chunk,
-                base_url=candidate.base_url if candidate else None,
-                api_key=candidate.api_key if candidate else None,
-                temperature=candidate.temperature if candidate else 0.2,
-                max_tokens=candidate.max_tokens if candidate else None,
-            )
+            if candidate is None:
+                content = await stream_text(effective_model, messages, forward_chunk)
+            else:
+                content = await stream_text(
+                    effective_model,
+                    messages,
+                    forward_chunk,
+                    base_url=candidate.base_url,
+                    api_key=candidate.api_key,
+                    temperature=candidate.temperature,
+                    max_tokens=candidate.max_tokens,
+                )
             route = candidate
             break
         except Exception as error:  # noqa: BLE001
@@ -492,11 +499,14 @@ async def complete_json_via_gateway(
         effective_model = (route.model_name if route else None) or model or settings.tutor_model
         if not effective_model:
             raise RuntimeError("no model is configured for this feature")
+        if route is None:
+            return await complete_json(effective_model, messages)
         return await complete_json(
-            effective_model, messages,
-            base_url=route.base_url if route else None,
-            api_key=route.api_key if route else None,
-            max_tokens=route.max_tokens if route else None,
+            effective_model,
+            messages,
+            base_url=route.base_url,
+            api_key=route.api_key,
+            max_tokens=route.max_tokens,
         )
 
     started = time.perf_counter()
@@ -548,11 +558,15 @@ async def vision_json_via_gateway(
         effective_model = (route.model_name if route else None) or model or settings.vision_model_primary
         if not effective_model:
             raise RuntimeError("no vision model is configured for this feature")
+        if route is None:
+            return await vision_json(
+                effective_model, system_prompt, user_text, image_bytes, image_mime_type
+            )
         return await vision_json(
             effective_model, system_prompt, user_text, image_bytes, image_mime_type,
-            base_url=route.base_url if route else None,
-            api_key=route.api_key if route else None,
-            max_tokens=route.max_tokens if route else None,
+            base_url=route.base_url,
+            api_key=route.api_key,
+            max_tokens=route.max_tokens,
         )
 
     started = time.perf_counter()
@@ -603,10 +617,17 @@ async def transcribe_audio_via_gateway(
         effective_model = (route.model_name if route else None) or model or settings.speech_to_text_model
         if not effective_model:
             raise RuntimeError("no speech-to-text model is configured")
+        if route is None:
+            return await transcribe_audio(
+                audio_bytes, filename=filename, content_type=content_type, model=effective_model
+            )
         return await transcribe_audio(
-            audio_bytes, filename=filename, content_type=content_type, model=effective_model,
-            base_url=route.base_url if route else None,
-            api_key=route.api_key if route else None,
+            audio_bytes,
+            filename=filename,
+            content_type=content_type,
+            model=effective_model,
+            base_url=route.base_url,
+            api_key=route.api_key,
         )
 
     started = time.perf_counter()
@@ -653,10 +674,14 @@ async def speech_via_gateway(
         )
         if not effective_model:
             raise RuntimeError("no speech synthesis model is configured")
+        if route is None:
+            return await synthesize_speech(text, voice=voice, model=effective_model)
         return await synthesize_speech(
-            text, voice=voice, model=effective_model,
-            base_url=route.base_url if route else None,
-            api_key=route.api_key if route else None,
+            text,
+            voice=voice,
+            model=effective_model,
+            base_url=route.base_url,
+            api_key=route.api_key,
         )
 
     started = time.perf_counter()
@@ -698,10 +723,13 @@ async def embed_via_gateway(
         effective_model = (route.model_name if route else None) or model or settings.embedding_model
         if not effective_model:
             raise RuntimeError("no embedding model is configured")
+        if route is None:
+            return await embed_texts(texts, model=effective_model)
         return await embed_texts(
-            texts, model=effective_model,
-            base_url=route.base_url if route else None,
-            api_key=route.api_key if route else None,
+            texts,
+            model=effective_model,
+            base_url=route.base_url,
+            api_key=route.api_key,
         )
 
     started = time.perf_counter()
