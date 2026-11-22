@@ -112,7 +112,13 @@ function sourceText(source: Source, lang: "fa" | "en") {
       : source.chapter_number != null
         ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}`
         : source.chapter_title ?? null;
-  return [bookLabel, scopeLabel, editionLabel, chapterLabel]
+  const pageLabel =
+    source.printed_page_number != null
+      ? `${lang === "en" ? "Page" : "صفحه"} ${source.printed_page_number}`
+      : source.pdf_page_index != null
+        ? `${lang === "en" ? "PDF page" : "صفحه PDF"} ${source.pdf_page_index}`
+        : null;
+  return [bookLabel, scopeLabel, editionLabel, chapterLabel, pageLabel]
     .filter(Boolean)
     .join(lang === "en" ? " · " : "، ");
 }
