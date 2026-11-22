@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.base import Base
-from app.db.seed import seed_billing_settings, seed_grades, seed_majors, seed_plans
+from app.db.seed import seed_billing_settings, seed_curriculum_taxonomy, seed_grades, seed_majors, seed_plans
 from app.db.session import get_session
 from app.main import app
 from app.models.capabilities import Capability, KbIngestionJob, Skill, SkillVersion, SourceFigure
@@ -51,6 +51,7 @@ async def _build_db(tmp_path, monkeypatch, *, seed_phase2: bool = True):
     async with factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await seed_curriculum_taxonomy(session)
         await seed_plans(session)
         await seed_billing_settings(session)
         if seed_phase2:
@@ -423,6 +424,7 @@ async def _seed_book(session: AsyncSession, pdf_path: Path, pages: int) -> Book:
         pdf_file_path=str(pdf_path),
         total_pdf_pages=pages,
         status=BookStatus.ready,
+        catalog_status="approved",
     )
     session.add(book)
     await session.flush()
