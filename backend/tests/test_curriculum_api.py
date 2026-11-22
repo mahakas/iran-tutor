@@ -44,7 +44,14 @@ async def test_list_books_for_high_school_requires_and_scopes_major():
     )
     session = FakeSession(grade, major, [book])
 
-    response = await list_books(12, "math_physics", session)
+    response = await list_books(
+        12,
+        "math_physics",
+        session,
+        branch_code=None,
+        field_code=None,
+        academic_year_code=None,
+    )
 
     assert response == [
         {
@@ -63,7 +70,14 @@ async def test_list_books_rejects_high_school_without_major():
     session = FakeSession(grade)
 
     with pytest.raises(HTTPException) as error:
-        await list_books(12, None, session)
+        await list_books(
+            12,
+            None,
+            session,
+            branch_code=None,
+            field_code=None,
+            academic_year_code=None,
+        )
 
     assert error.value.status_code == 422
     assert session.scalar_calls == 1
@@ -88,6 +102,8 @@ async def test_list_books_for_technical_branch_uses_branch_scope():
         None,
         session,
         branch_code="technical_vocational",
+        field_code=None,
+        academic_year_code=None,
     )
 
     assert response[0]["id"] == 21
