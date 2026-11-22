@@ -26,6 +26,32 @@ def _route(provider_id: int, model_name: str) -> ResolvedRoute:
 
 
 @pytest.mark.asyncio
+async def test_sessionless_internal_call_resolves_managed_provider_route(monkeypatch):
+    candidates = [_route(1, "model-a")]
+    seen: list[str] = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def resolve(session, feature_key):
+        assert session is not None
+        seen.append(feature_key)
+        return candidates
+
+    monkeypatch.setattr(ai_gateway, "async_session_factory", lambda: SessionContext())
+    monkeypatch.setattr(ai_gateway, "resolve_feature_route_chain", resolve)
+
+    result = await ai_gateway._resolve_candidates("embedding", None)
+
+    assert result == candidates
+    assert seen == ["embedding"]
+
+
+@pytest.mark.asyncio
 async def test_gateway_tries_ordered_fallback_after_provider_availability_error(monkeypatch):
     monkeypatch.setattr(ai_gateway, "is_provider_failover_error", lambda _error: True)
     candidates = [_route(1, "model-a"), _route(2, "model-b"), _route(3, "model-c")]
@@ -157,7 +183,28 @@ async def test_route_chain_preserves_order_models_and_skips_native_protocols(mon
     assert candidates[1].api_key == "local-no-auth"
 
 
-def test_route_aware_client_retry_is_delegated_to_gateway(monkeypatch):
-    monkeypatch.setattr(llm_client, "get_settings", lambda: SimpleNamespace())
+def test_route_aware_client_retry_is_delegated_to_gateway():
     with llm_client.use_provider("https://provider.invalid/v1", "key"):
         assert llm_client._is_retryable(RuntimeError("transient")) is False
+
+
+def test_routed_openai_client_uses_context_endpoint_and_credential(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm_client, "AsyncOpenAI", FakeClient)
+    llm_client._routed_clients.clear()
+
+    try:
+        with llm_client.use_provider("https://provider.invalid/v1", "provider-secret"):
+            client = llm_client._get_client()
+
+        assert isinstance(client, FakeClient)
+        assert captured["base_url"] == "https://provider.invalid/v1"
+        assert captured["api_key"] == "provider-secret"
+        assert captured["max_retries"] == 0
+    finally:
+        llm_client._routed_clients.clear()
