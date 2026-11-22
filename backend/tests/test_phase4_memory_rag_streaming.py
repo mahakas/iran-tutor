@@ -634,6 +634,42 @@ async def test_audio_tutor_accepts_and_validates_education_branch(env, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_single_book_tutor_and_exam_respect_student_grade_level(env):
+    async with env.factory() as session:
+        student = await session.get(User, env.ids["student_id"])
+        student.grade_level = 10
+        await session.commit()
+
+    async with _client() as client:
+        tutor_response = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "قانون دوم نیوتون",
+                "grade_number": 12,
+                "book_id": env.ids["book12"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+                "mode": "tutor",
+            },
+        )
+        exam_response = await client.post(
+            "/api/v1/exams",
+            json={
+                "grade_number": 12,
+                "book_id": env.ids["book12"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+                "question_count": 5,
+                "time_limit_minutes": 15,
+                "exam_type": "konkoor",
+            },
+        )
+
+    assert tutor_response.status_code == 422
+    assert exam_response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_multi_grade_endpoint_enforces_student_grade_ceiling(env):
     async with env.factory() as session:
         student = await session.get(User, env.ids["student_id"])
