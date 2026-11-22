@@ -307,6 +307,73 @@ async def test_provider_crud_never_returns_plaintext_api_key(tmp_path, monkeypat
                 assert resolved.model_name == "gpt-route-model"
                 assert resolved.api_key == "sk-live-abcdefghijklmnop"
 
+                # --- ordered multi-provider failover chain -------------------
+                backup_ids = []
+                for name, key in (
+                    ("Fallback A", "sk-backup-aaaaaaaaaaaa"),
+                    ("Fallback B", "sk-backup-bbbbbbbbbbbb"),
+                ):
+                    backup_response = await client.post(
+                        "/api/v1/admin/providers",
+                        headers=ADMIN_HEADERS,
+                        json={
+                            "name": name,
+                            "provider_type": "openai_compatible",
+                            "base_url": "https://backup.example.invalid/v1",
+                            "api_key": key,
+                            "capabilities": ["chat"],
+                        },
+                    )
+                    assert backup_response.status_code == 200, backup_response.text
+                    backup_ids.append(backup_response.json()["provider"]["id"])
+
+                chain_response = await client.put(
+                    "/api/v1/admin/routes",
+                    headers=ADMIN_HEADERS,
+                    json={
+                        "feature_key": "chat",
+                        "provider_id": provider_id,
+                        "model_name": "gpt-route-model",
+                        "fallback_provider_ids": backup_ids,
+                        "fallback_model_names": ["backup-model-a", "backup-model-b"],
+                    },
+                )
+                assert chain_response.status_code == 200, chain_response.text
+                assert chain_response.json()["route"]["fallback_provider_ids"] == backup_ids
+                assert chain_response.json()["route"]["fallback_model_names"] == [
+                    "backup-model-a",
+                    "backup-model-b",
+                ]
+
+                duplicate_response = await client.put(
+                    "/api/v1/admin/routes",
+                    headers=ADMIN_HEADERS,
+                    json={
+                        "feature_key": "chat",
+                        "provider_id": provider_id,
+                        "model_name": "gpt-route-model",
+                        "fallback_provider_ids": [backup_ids[0], backup_ids[0]],
+                        "fallback_model_names": ["one", "two"],
+                    },
+                )
+                assert duplicate_response.status_code == 422
+
+                async with factory() as route_session:
+                    chain = await ai_provider_service.resolve_feature_route_chain(route_session, "chat")
+                    assert chain is not None
+                    assert [candidate.provider_id for candidate in chain] == [provider_id, *backup_ids]
+                    assert [candidate.model_name for candidate in chain] == [
+                        "gpt-route-model",
+                        "backup-model-a",
+                        "backup-model-b",
+                    ]
+
+                # A provider referenced only by the new fallback list cannot be deleted.
+                blocked_fallback = await client.delete(
+                    f"/api/v1/admin/providers/{backup_ids[0]}", headers=ADMIN_HEADERS
+                )
+                assert blocked_fallback.status_code == 409
+
                 # --- deleting a provider that routes use is blocked ----------
                 blocked = await client.delete(
                     f"/api/v1/admin/providers/{provider_id}", headers=ADMIN_HEADERS
@@ -489,6 +556,7 @@ async def test_gateway_uses_admin_route_model_over_env_default(tmp_path, monkeyp
                 name="Router",
                 provider_type="openai_compatible",
                 base_url="https://router.invalid/v1",
+                encrypted_api_key=crypto.encrypt_secret("route-test-api-key"),
                 capabilities=["chat"],
             )
             seen: dict[str, str] = {}

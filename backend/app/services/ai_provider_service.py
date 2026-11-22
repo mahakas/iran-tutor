@@ -131,6 +131,8 @@ def serialize_route(route: FeatureModelRoute) -> dict[str, Any]:
         "max_tokens": route.max_tokens,
         "fallback_provider_id": route.fallback_provider_id,
         "fallback_model_name": route.fallback_model_name,
+        "fallback_provider_ids": list(route.fallback_provider_ids or []),
+        "fallback_model_names": list(route.fallback_model_names or []),
         "is_active": route.is_active,
     }
 
@@ -146,57 +148,99 @@ async def get_active_route(session: AsyncSession, feature_key: str) -> FeatureMo
     )
 
 
-async def resolve_feature_route(session: AsyncSession, feature_key: str) -> ResolvedRoute | None:
-    """Resolve the effective provider+model for a feature, applying fallbacks.
+def _required_capability(feature_key: str) -> str | None:
+    if feature_key in {"vision_ocr", "ingest_ocr"}:
+        return "vision"
+    if feature_key == "stt":
+        return "stt"
+    if feature_key == "audio_tts":
+        return "tts"
+    if feature_key == "embedding":
+        return "embedding"
+    return "chat"
 
-    Returns `None` when no active route exists, so callers can keep using the
-    legacy `.env`-based provider configuration.
+
+async def resolve_feature_route_chain(
+    session: AsyncSession, feature_key: str
+) -> list[ResolvedRoute] | None:
+    """Return ordered, usable provider candidates for one feature.
+
+    None means that no admin route exists (callers may use legacy .env settings).
+    An empty list means a route exists but none of its providers is usable.
+    Native Anthropic/Gemini protocols are intentionally not sent through the
+    OpenAI-compatible client; they need dedicated adapters before they can be routed.
     """
     route = await get_active_route(session, feature_key)
     if route is None:
         return None
 
-    provider = await session.get(AiProvider, route.provider_id)
-    if provider is not None and provider.is_active:
-        return ResolvedRoute(
-            feature_key=feature_key,
-            provider_id=provider.id,
-            provider_name=provider.name,
-            provider_type=provider.provider_type,
-            base_url=provider.base_url,
-            model_name=route.model_name,
-            temperature=route.temperature,
-            max_tokens=route.max_tokens,
-            api_key=decrypt_secret(provider.encrypted_api_key),
-            source="route",
-        )
-
+    provider_ids = [route.provider_id]
+    fallback_ids = list(route.fallback_provider_ids or [])
     if route.fallback_provider_id is not None:
-        fallback = await session.get(AiProvider, route.fallback_provider_id)
-        if fallback is not None and fallback.is_active:
-            return ResolvedRoute(
+        fallback_ids.append(route.fallback_provider_id)
+    for provider_id in fallback_ids:
+        if provider_id not in provider_ids:
+            provider_ids.append(provider_id)
+
+    model_names = [route.model_name]
+    configured_fallback_models = list(route.fallback_model_names or [])
+    for index, provider_id in enumerate(provider_ids[1:]):
+        configured_name = (
+            str(configured_fallback_models[index]).strip()
+            if index < len(configured_fallback_models)
+            else ""
+        )
+        if configured_name:
+            model_names.append(configured_name)
+        elif provider_id == route.fallback_provider_id and route.fallback_model_name:
+            model_names.append(route.fallback_model_name)
+        else:
+            model_names.append(route.model_name)
+
+    required = _required_capability(feature_key)
+    candidates: list[ResolvedRoute] = []
+    for index, provider_id in enumerate(provider_ids):
+        provider = await session.get(AiProvider, provider_id)
+        if provider is None or not provider.is_active:
+            continue
+        if provider.provider_type not in {"openai", "openai_compatible", "local"}:
+            logger.warning(
+                "ai_route.provider_protocol_unsupported feature=%s provider_id=%s provider_type=%s",
+                feature_key, provider.id, provider.provider_type,
+            )
+            continue
+        capabilities = set(provider.capabilities or [])
+        if required and capabilities and required not in capabilities:
+            continue
+        api_key = decrypt_secret(provider.encrypted_api_key)
+        if not provider.base_url:
+            continue
+        if provider.provider_type != "local" and not api_key:
+            continue
+        candidates.append(
+            ResolvedRoute(
                 feature_key=feature_key,
-                provider_id=fallback.id,
-                provider_name=fallback.name,
-                provider_type=fallback.provider_type,
-                base_url=fallback.base_url,
-                model_name=route.fallback_model_name or route.model_name,
+                provider_id=provider.id,
+                provider_name=provider.name,
+                provider_type=provider.provider_type,
+                base_url=provider.base_url,
+                model_name=model_names[index],
                 temperature=route.temperature,
                 max_tokens=route.max_tokens,
-                api_key=decrypt_secret(fallback.encrypted_api_key),
-                source="fallback",
+                api_key=api_key or "local-no-auth",
+                source="route" if index == 0 else "fallback",
             )
+        )
 
-    logger.warning("ai_route.unavailable feature=%s provider=%s", feature_key, route.provider_id)
-    return ResolvedRoute(
-        feature_key=feature_key,
-        provider_id=route.provider_id,
-        provider_name=provider.name if provider else None,
-        provider_type=provider.provider_type if provider else None,
-        base_url=None,
-        model_name=None,
-        temperature=route.temperature,
-        max_tokens=route.max_tokens,
-        api_key=None,
-        source="unset",
-    )
+    if not candidates:
+        logger.warning(
+            "ai_route.no_usable_provider feature=%s primary_provider_id=%s",
+            feature_key, route.provider_id,
+        )
+    return candidates
+
+
+async def resolve_feature_route(session: AsyncSession, feature_key: str) -> ResolvedRoute | None:
+    """Backward-compatible single-route resolver; returns the first usable candidate."""
+    candidates = await resolve_feature_route_chain(session, feature_key)
+    return candidates[0] if candidates else None

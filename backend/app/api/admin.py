@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 from sqlalchemy import delete, func, or_, select, text as sql_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2918,6 +2918,13 @@ FEATURE_ROUTE_LABELS: dict[str, str] = {
     "ingest_ocr": "پردازش کتاب (OCR)",
     "memory": "حافظهٔ یادگیرنده (L2/L3)",
     "intent_router": "مسیریاب هوشمند حالت‌ها",
+    "immersive_reader": "مطالعهٔ تعاملی",
+    "deep_solve": "حل عمیق تمرین",
+    "quiz_validator": "اعتبارسنجی آزمون",
+    "learning_notebook": "دفتر یادگیری",
+    "web_visualize": "تجسم و نمودار",
+    "living_book": "کتاب زنده",
+    "audio_tts": "تبدیل متن به گفتار",
 }
 
 
@@ -2954,6 +2961,8 @@ class FeatureRouteBody(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=200_000)
     fallback_provider_id: int | None = Field(default=None, gt=0)
     fallback_model_name: str | None = Field(default=None, max_length=255)
+    fallback_provider_ids: list[PositiveInt] = Field(default_factory=list, max_length=8)
+    fallback_model_names: list[str] = Field(default_factory=list, max_length=8)
     is_active: bool = True
 
 
@@ -3075,15 +3084,14 @@ async def delete_ai_provider(
     provider = await session.get(AiProvider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="ارائه‌دهنده پیدا نشد.")
-    in_use = await session.scalar(
-        select(func.count())
-        .select_from(FeatureModelRoute)
-        .where(
-            or_(
-                FeatureModelRoute.provider_id == provider_id,
-                FeatureModelRoute.fallback_provider_id == provider_id,
-            )
-        )
+    referenced_routes = (
+        await session.scalars(select(FeatureModelRoute))
+    ).all()
+    in_use = any(
+        route.provider_id == provider_id
+        or route.fallback_provider_id == provider_id
+        or provider_id in (route.fallback_provider_ids or [])
+        for route in referenced_routes
     )
     if in_use:
         raise HTTPException(
@@ -3136,7 +3144,13 @@ async def list_feature_routes(session: AsyncSession = Depends(get_session)) -> d
     return {
         "routes": [serialize_route(route) for route in rows],
         "providers": [
-            {"id": p.id, "name": p.name, "is_active": p.is_active, "capabilities": list(p.capabilities or [])}
+            {
+                "id": p.id,
+                "name": p.name,
+                "provider_type": p.provider_type,
+                "is_active": p.is_active,
+                "capabilities": list(p.capabilities or []),
+            }
             for p in providers
         ],
         "feature_keys": [
@@ -3153,10 +3167,33 @@ async def upsert_feature_route(
 
     if body.feature_key not in ROUTABLE_FEATURE_KEYS:
         raise HTTPException(status_code=422, detail="کلید قابلیت انتخاب‌شده معتبر نیست.")
-    if await session.get(AiProvider, body.provider_id) is None:
-        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ انتخاب‌شده پیدا نشد.")
-    if body.fallback_provider_id is not None and await session.get(AiProvider, body.fallback_provider_id) is None:
-        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ جایگزین پیدا نشد.")
+    if body.fallback_provider_id is not None and body.fallback_provider_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="برای سازگاری، از فیلد قدیمی fallback_provider_id و زنجیرهٔ جدید هم‌زمان استفاده نکنید.",
+        )
+    if body.provider_id in body.fallback_provider_ids:
+        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ اصلی نمی‌تواند در زنجیرهٔ جایگزین تکرار شود.")
+    if len(set(body.fallback_provider_ids)) != len(body.fallback_provider_ids):
+        raise HTTPException(status_code=422, detail="ارائه‌دهنده‌های جایگزین نباید تکراری باشند.")
+    if body.fallback_model_names and len(body.fallback_model_names) != len(body.fallback_provider_ids):
+        raise HTTPException(status_code=422, detail="برای هر ارائه‌دهندهٔ جایگزین باید دقیقاً یک نام مدل وارد شود.")
+
+    provider_ids = [body.provider_id, *body.fallback_provider_ids]
+    if body.fallback_provider_id is not None:
+        if body.fallback_provider_id in provider_ids:
+            raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ جایگزین قدیمی در زنجیره تکرار شده است.")
+        provider_ids.append(body.fallback_provider_id)
+
+    for provider_id in provider_ids:
+        provider = await session.get(AiProvider, provider_id)
+        if provider is None:
+            raise HTTPException(status_code=422, detail="یکی از ارائه‌دهنده‌های انتخاب‌شده پیدا نشد.")
+        if provider.provider_type not in {"openai", "openai_compatible", "local"}:
+            raise HTTPException(
+                status_code=422,
+                detail="این مسیر فعلاً فقط از APIهای سازگار با OpenAI و سرورهای Local پشتیبانی می‌کند؛ برای پروتکل بومی این ارائه‌دهنده Adapter جداگانه لازم است.",
+            )
 
     route = await session.scalar(
         select(FeatureModelRoute).where(FeatureModelRoute.feature_key == body.feature_key)
@@ -3170,6 +3207,10 @@ async def upsert_feature_route(
     route.max_tokens = body.max_tokens
     route.fallback_provider_id = body.fallback_provider_id
     route.fallback_model_name = (body.fallback_model_name or "").strip() or None
+    route.fallback_provider_ids = list(body.fallback_provider_ids)
+    route.fallback_model_names = [
+        name.strip() for name in body.fallback_model_names
+    ]
     route.is_active = body.is_active
     await session.commit()
     await session.refresh(route)

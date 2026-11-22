@@ -78,6 +78,13 @@ class FeatureModelRoute(Base):
         ForeignKey("ai_providers.id"), nullable=True
     )
     fallback_model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Ordered failover chain. The legacy single fallback columns remain supported.
+    fallback_provider_ids: Mapped[list[int]] = mapped_column(
+        _json_type, default=list, server_default="[]", nullable=False
+    )
+    fallback_model_names: Mapped[list[str]] = mapped_column(
+        _json_type, default=list, server_default="[]", nullable=False
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="1", nullable=False
     )
