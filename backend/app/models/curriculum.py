@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Float,
     JSON,
@@ -19,6 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -204,22 +206,19 @@ class CurriculumUnit(Base):
 
     __tablename__ = "curriculum_units"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_curriculum_unit_code_scope",
             "grade_id",
             "subject_id",
             "scope_code",
-            "branch_id",
-            "field_of_study_id",
+            text("COALESCE(branch_id, 0)"),
+            text("COALESCE(field_of_study_id, 0)"),
             "code",
-            name="uq_curriculum_unit_code",
+            unique=True,
         ),
         CheckConstraint(
             "field_of_study_id IS NULL OR branch_id IS NOT NULL",
             name="ck_curriculum_unit_field_requires_branch",
-        ),
-        CheckConstraint(
-            "branch_id IS NULL OR grade_id >= 10",
-            name="ck_curriculum_unit_branch_upper_secondary",
         ),
     )
 
