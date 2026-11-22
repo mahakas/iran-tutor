@@ -155,14 +155,19 @@ def _citations_payload(citations: list[dict[str, Any]] | None) -> list[dict[str,
 async def _resolve_candidates(
     feature_key: str, session: AsyncSession | None
 ) -> list[ResolvedRoute] | None:
-    """Resolve an ordered provider chain; None means use legacy environment settings."""
-    if session is None:
-        return None
+    """Resolve the provider chain, opening a short-lived session for internal calls.
+
+    None means no managed route exists (legacy .env fallback remains available).
+    An empty list means a managed route exists but has no usable provider.
+    """
     try:
-        return await resolve_feature_route_chain(session, feature_key)
-    except Exception:  # noqa: BLE001 - routing lookup must not break inference
+        if session is not None:
+            return await resolve_feature_route_chain(session, feature_key)
+        async with async_session_factory() as own_session:
+            return await resolve_feature_route_chain(own_session, feature_key)
+    except Exception:  # noqa: BLE001 - routing lookup failure must be visible, not hide a route
         logger.exception("ai_gateway.route_lookup_failed feature=%s", feature_key)
-        return None
+        raise
 
 
 async def _invoke_with_failover(
