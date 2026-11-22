@@ -140,7 +140,20 @@ export default function MasteryWorkspace() {
 
   return (
     <div dir="rtl" style={{ display: "grid", gap: 16 }}>
-      {newPickerUse}
+      <BookGradePicker
+        value={bookId}
+        onChange={(nextBookId) => {
+          setBookId(nextBookId);
+          setTree(null);
+          setObjectiveTree(null);
+          setError(null);
+          setNotice(null);
+          setSelectedObjective(null);
+          setScore("");
+          setQualitativeLevel("");
+          setFeedback("");
+        }}
+      />
       {!bookId ? <div className="glass-panel" style={{ padding: 20 }}>برای مشاهدهٔ مسیر یادگیری، یک کتاب رسمی را انتخاب کنید.</div> : null}
       {error ? <div className="glass-panel" role="alert" style={{ padding: 14 }}>{error}</div> : null}
       {notice ? <div className="glass-panel" role="status" style={{ padding: 14 }}>{notice}</div> : null}

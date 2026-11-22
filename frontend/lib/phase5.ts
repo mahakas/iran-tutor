@@ -194,6 +194,14 @@ export const MASTERY_STATUS_LABEL: Record<MasteryChapter["status"], string> = {
   not_started: "شروع‌نشده",
 };
 
+export type ObjectiveMasteryStatus =
+  | "locked"
+  | "mastered"
+  | "developing"
+  | "needs_support"
+  | "submitted_for_review"
+  | "not_started";
+
 export const OBJECTIVE_MASTERY_STATUS_LABEL: Record<ObjectiveMasteryStatus, string> = {
   locked: "قفل؛ پیش‌نیاز تکمیل نشده",
   mastered: "تأییدشده و مسلط",
@@ -204,13 +212,7 @@ export const OBJECTIVE_MASTERY_STATUS_LABEL: Record<ObjectiveMasteryStatus, stri
 };
 
 
-export type ObjectiveEvidenceStatus =
-  | "not_started"
-  | "submitted_for_review"
-  | "needs_support"
-  | "developing"
-  | "mastered"
-  | "locked";
+export type ObjectiveEvidenceStatus = ObjectiveMasteryStatus;
 
 export type ObjectiveEvidenceItem = {
   id: number;
@@ -241,6 +243,7 @@ export type ObjectiveMasteryItem = {
     source_type: string;
     score: number | null;
     qualitative_level: string | null;
+    verification_status: "unverified" | "verified" | "rejected" | string;
     feedback: string | null;
     observed_at: string | null;
   } | null;
