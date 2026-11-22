@@ -464,10 +464,17 @@ async def test_qdrant_hits_must_match_current_approved_page_snapshot(phase2_env,
 
     indexed_text = page_embedding_text("متن", [])
     point = SimpleNamespace(
-        payload={"book_id": book_id, "pdf_page_index": 1, "full_text": indexed_text},
+        payload={
+            "book_id": book_id,
+            "pdf_page_index": 1,
+            "full_text": indexed_text,
+            "embedding_model": "test-embedding",
+        },
         score=0.91,
     )
-    accepted = await retrieval_service._filter_qdrant_points([point], scopes=[scope])
+    accepted = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="test-embedding"
+    )
     assert len(accepted) == 1
     assert accepted[0]["full_text"] == "متن"
     assert accepted[0]["printed_page_number"] == 10
@@ -479,14 +486,24 @@ async def test_qdrant_hits_must_match_current_approved_page_snapshot(phase2_env,
         )
         page.markdown_content = "متن جدید"
         await session.commit()
-    stale = await retrieval_service._filter_qdrant_points([point], scopes=[scope])
+    stale = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="test-embedding"
+    )
     assert stale == []
 
     # Once re-indexed, the same page is usable again with current database content.
     point.payload["full_text"] = page_embedding_text("متن جدید", [])
-    refreshed = await retrieval_service._filter_qdrant_points([point], scopes=[scope])
+    refreshed = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="test-embedding"
+    )
     assert len(refreshed) == 1
     assert refreshed[0]["full_text"] == "متن جدید"
+
+    # Vectors built by another embedding model are not compared with this query.
+    wrong_model = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="different-model"
+    )
+    assert wrong_model == []
 
     # Approval status is checked independently from text equality.
     async with phase2_env() as session:
@@ -495,7 +512,9 @@ async def test_qdrant_hits_must_match_current_approved_page_snapshot(phase2_env,
         )
         page.status = PageStatus.needs_review
         await session.commit()
-    unapproved = await retrieval_service._filter_qdrant_points([point], scopes=[scope])
+    unapproved = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="test-embedding"
+    )
     assert unapproved == []
 
 
