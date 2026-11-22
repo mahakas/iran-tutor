@@ -47,7 +47,7 @@ from app.services import (
 from app.services.multi_grade_rag import ScopeError
 
 ADMIN_HEADERS = {"X-Admin-Username": "admin", "X-Admin-Password": "123"}
-NOW = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)
 ANSWER = "نیرو عاملی است که حرکت را تغییر می‌دهد. " * 6
 
 
