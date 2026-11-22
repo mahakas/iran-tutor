@@ -725,7 +725,7 @@ async def test_multi_grade_unknown_profile_uses_anchor_grade_as_ceiling(env):
             },
         )
 
-    assert resp.status_code == 403
+    assert resp.status_code == 409
 
 
 @pytest.mark.asyncio

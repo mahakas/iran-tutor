@@ -172,7 +172,7 @@ def test_missing_student_grade_fails_closed_in_production(monkeypatch):
     )
     with pytest.raises(HTTPException) as blocked:
         dependencies.enforce_student_grade_level(SimpleNamespace(grade_level=None), 12)
-    assert getattr(blocked.value, "status_code", None) == 403
+    assert getattr(blocked.value, "status_code", None) == 409
 
 
 def test_demo_student_may_use_demo_grade_selection(monkeypatch):

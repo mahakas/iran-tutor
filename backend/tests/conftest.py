@@ -9,6 +9,7 @@ import os
 # placeholders: unit tests do not make network or database calls.
 _TEST_SETTINGS = {
     "DEMO_MODE": "false",
+    "REQUIRE_STUDENT_GRADE_PROFILE": "false",
     "LLM_BASE_URL": "https://example.invalid/v1",
     "LLM_API_KEY": "unit-test-key",
     "VISION_MODEL_A": "unit-test-model-a",

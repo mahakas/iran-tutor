@@ -32,6 +32,30 @@ def _fake_student() -> SimpleNamespace:
 
 
 class FakeSession:
+    async def scalar(self, statement):
+        sql = str(statement)
+        params = statement.compile().params
+        if "education_branches" in sql:
+            return SimpleNamespace(
+                id=3, code="theoretical", min_grade=10, max_grade=12, is_active=True
+            )
+        if "field_of_study" in sql:
+            if "field_of_study.code" not in sql:
+                return 5
+            code = next(
+                (value for value in params.values() if value in {"math_physics", "experimental"}),
+                None,
+            )
+            if code == "math_physics":
+                return SimpleNamespace(
+                    id=5, code="math_physics", branch_id=3, is_active=True
+                )
+            return None
+        if "book_curriculum_links" in sql:
+            # This legacy fixture has major_id metadata but no normalized link rows.
+            return None
+        return None
+
     async def get(self, model, identity):
         if model is Book and identity == 1:
             return SimpleNamespace(
@@ -75,7 +99,7 @@ async def test_tutor_rejects_major_that_does_not_match_selected_book(monkeypatch
         app.dependency_overrides.clear()
 
     assert response.status_code == 422
-    assert "selected major" in response.json()["detail"]
+    assert "field of study" in response.json()["detail"]
 
 
 @pytest.mark.asyncio

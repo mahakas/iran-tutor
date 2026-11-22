@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # Number of reverse proxies in front of the API (0 = ignore X-Forwarded-For).
     trusted_proxy_hops: int = Field(default=0, ge=0, le=10)
     user_session_ttl_seconds: int = Field(default=2592000, gt=0)
+    # Production textbook access fails closed until an administrator assigns
+    # the learner's current grade. Demo environments can still use unprofiled users.
+    require_student_grade_profile: bool = True
     otp_ttl_seconds: int = Field(default=180, gt=0)
     otp_resend_seconds: int = Field(default=60, ge=0)
     otp_max_attempts: int = Field(default=5, ge=1)

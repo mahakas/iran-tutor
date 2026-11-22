@@ -449,7 +449,18 @@ async def record_objective_evidence(
                 LearningEvidence.source_ref == source_ref,
             )
         )
-    if row is None:
+    if row is not None:
+        if row.book_page_id != page_id:
+            raise HTTPException(
+                status_code=409,
+                detail="این شناسهٔ شاهد قبلاً برای صفحهٔ دیگری از همین کتاب استفاده شده است.",
+            )
+        if row.verification_status != "unverified":
+            raise HTTPException(
+                status_code=409,
+                detail="شاهد بازبینی‌شده قابل ویرایش مجدد نیست؛ برای ارسال جدید شناسهٔ تازه بسازید.",
+            )
+    else:
         row = LearningEvidence(
             user_id=user_id,
             objective_id=objective_id,
@@ -531,6 +542,19 @@ async def objective_tree(
                     BookPage.book_id == book_id,
                     BookPage.status == PageStatus.done,
                     CurriculumUnit.grade_id == book.grade_id,
+                    CurriculumUnit.is_active.is_(True),
+                    LearningObjective.is_active.is_(True),
+                    scope_condition,
+                    branch_scope_condition,
+                    CurriculumUnit.subject_id.in_(subject_ids) if subject_ids else True,
+                    (
+                        or_(
+                            CurriculumUnit.academic_year_id.is_(None),
+                            CurriculumUnit.academic_year_id == book.academic_year_id,
+                        )
+                        if book.academic_year_id is not None
+                        else CurriculumUnit.academic_year_id.is_(None)
+                    ),
                 )
             )
         ).all()

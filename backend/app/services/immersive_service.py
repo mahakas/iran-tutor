@@ -7,6 +7,8 @@ with textbook strictness and cite the exact page the student is viewing.
 
 from __future__ import annotations
 
+import html
+import re
 from typing import Any
 
 from fastapi import HTTPException
@@ -36,6 +38,18 @@ ASSIST_INSTRUCTIONS = {
     "summarize": "این بخش از کتاب درسی را در چند نکتهٔ کوتاه خلاصه کن.",
     "explain": "مفهوم اصلی این بخش از کتاب درسی را ساده و گام‌به‌گام توضیح بده.",
 }
+
+
+def _normalize_selected_text(value: str) -> str:
+    """Normalize rendered textbook text and Markdown for safe page-substring checks."""
+    text = html.unescape(value or "")
+    text = re.sub(r"<[^>]*>", " ", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r" \1 ", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r" \1 ", text)
+    text = text.replace("ي", "ی").replace("ك", "ک").replace("ة", "ه")
+    text = re.sub(r"[\u200c\u200f\u202a-\u202e\u0640]", "", text)
+    text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).casefold()
+    return " ".join(text.split())
 
 
 async def _ready_book(session: AsyncSession, book_id: int) -> Book:
@@ -205,7 +219,19 @@ async def assist(
     )
     if page is None or page.status != PageStatus.done:
         raise HTTPException(status_code=404, detail="صفحه یافت نشد.")
-    context = (selection or "").strip() or (page.markdown_content or "").strip()
+    page_text = (page.markdown_content or "").strip()
+    selected_text = (selection or "").strip()
+    if selected_text:
+        normalized_page = _normalize_selected_text(page_text)
+        normalized_selection = _normalize_selected_text(selected_text)
+        if not normalized_selection or normalized_selection not in normalized_page:
+            raise HTTPException(
+                status_code=422,
+                detail="متن انتخاب‌شده بخشی از متن ثبت‌شدهٔ همین صفحهٔ کتاب نیست.",
+            )
+        context = selected_text
+    else:
+        context = page_text
     if not context:
         raise HTTPException(status_code=409, detail="متنی برای این صفحه ثبت نشده است.")
     metadata = await _book_scope_metadata(session, book)

@@ -8,8 +8,8 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_session
 from app.core.config import get_settings
+from app.db.session import get_session
 from app.models.auth import User, UserSession
 from app.models.curriculum import Book, BookCurriculumLink, BookStatus, EducationBranch, FieldOfStudy, Grade, Major
 from app.services.auth_billing_service import USER_COOKIE_NAME, parse_user_session_token
@@ -42,14 +42,22 @@ async def _resolve_user_from_request(
         return None
     user_id, nonce, _ = parsed
 
-    # Verify session has not been revoked on the server
+    # A valid signature is not sufficient: every issued token must still have
+    # a live server-side row so deletion/revocation takes effect immediately.
+    now = datetime.now(timezone.utc)
     session_row = await session.scalar(
         select(UserSession).where(
             UserSession.user_id == user_id,
             UserSession.token_nonce == nonce,
         )
     )
-    if session_row is not None and session_row.revoked_at is not None:
+    if session_row is None or session_row.revoked_at is not None:
+        return None
+
+    expires_at = session_row.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
         return None
 
     user = await session.get(User, user_id)
@@ -57,14 +65,12 @@ async def _resolve_user_from_request(
         return None
 
     request.state.user_session_nonce = nonce
-    if session_row is not None:
-        now = datetime.now(timezone.utc)
-        last_seen = session_row.last_seen_at
-        if last_seen.tzinfo is None:
-            last_seen = last_seen.replace(tzinfo=timezone.utc)
-        if (now - last_seen).total_seconds() >= 60:
-            session_row.last_seen_at = now
-            await session.commit()
+    last_seen = session_row.last_seen_at
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    if (now - last_seen).total_seconds() >= 60:
+        session_row.last_seen_at = now
+        await session.commit()
     return user
 
 
@@ -84,20 +90,33 @@ async def require_student(
         raise HTTPException(status_code=401, detail="برای ادامه لطفاً با شماره موبایل وارد شوید.")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال شده است.")
+    # Teachers/admins may use student-facing preview tools; guardians and
+    # unknown roles must fail closed rather than being normalized to "student".
+    role = (getattr(user, "role", None) or "").strip().lower()
+    if role not in {"student", "teacher", "admin"}:
+        raise HTTPException(status_code=403, detail="این بخش برای نقش کاربری شما در دسترس نیست.")
+    request.state.current_user = user
     return user
 
 
 def enforce_student_grade_level(user: User, grade_number: int) -> None:
-    """Enforce a hard upper-grade boundary for every production student."""
+    """Prevent a profiled student from accessing content above their assigned grade.
+
+    A missing grade_level is deliberately not guessed here; deployments should
+    complete student grade profiles to activate this restriction.
+    """
+    settings = get_settings()
     assigned_grade = getattr(user, "grade_level", None)
     if assigned_grade is None:
-        if get_settings().demo_mode:
-            return
-        raise HTTPException(
-            status_code=403,
-            detail="current student grade is not assigned; ask the school administrator to complete the student profile",
-        )
-    if grade_number > assigned_grade:
+        if not settings.demo_mode and getattr(settings, "require_student_grade_profile", True):
+            raise HTTPException(
+                status_code=409,
+                detail="student grade profile must be assigned by an administrator before using grade-scoped learning",
+            )
+        return
+    if not 1 <= int(assigned_grade) <= 12:
+        raise HTTPException(status_code=409, detail="student grade profile is invalid; contact an administrator")
+    if grade_number > int(assigned_grade):
         raise HTTPException(
             status_code=422,
             detail="the selected textbook is above the student's assigned grade level",
@@ -144,6 +163,13 @@ async def resolve_book_scope(
     book_major = await session.get(Major, book.major_id) if book.major_id is not None else None
     expected_major = book_major.code if book_major is not None else None
 
+    if branch_code is None and grade.number >= 10:
+        # Legacy clients only know theoretical major_code. Resolve it into the
+        # normalized branch/field model instead of bypassing applicability links.
+        if not major_code:
+            raise HTTPException(status_code=422, detail="an education branch and field are required for grades 10-12")
+        branch_code = "theoretical"
+
     if branch_code is None:
         major_error = validate_major_code(grade.has_major, major_code)
         if major_error:
@@ -164,6 +190,14 @@ async def resolve_book_scope(
     if branch is None or not branch.min_grade <= grade.number <= branch.max_grade:
         raise HTTPException(status_code=422, detail="invalid education branch for this grade")
 
+    active_field_id = await session.scalar(
+        select(FieldOfStudy.id)
+        .where(
+            FieldOfStudy.branch_id == branch.id,
+            FieldOfStudy.is_active.is_(True),
+        )
+        .limit(1)
+    )
     selected_field = None
     if major_code:
         selected_field = await session.scalar(
@@ -173,10 +207,10 @@ async def resolve_book_scope(
                 FieldOfStudy.is_active.is_(True),
             )
         )
-        if selected_field is None or selected_field.branch_id != branch.id:
+        if selected_field is None:
             raise HTTPException(status_code=422, detail="field of study does not belong to the selected branch")
-    elif branch.code == "theoretical":
-        raise HTTPException(status_code=422, detail="a theoretical field of study is required")
+    elif active_field_id is not None:
+        raise HTTPException(status_code=422, detail="a field of study is required for the selected branch")
 
     if expected_major is not None and expected_major != major_code:
         raise HTTPException(status_code=422, detail="book does not belong to the selected field")
@@ -202,7 +236,13 @@ async def resolve_book_scope(
         ).limit(1)
     )
     if applicability is None:
-        # Compatibility for older theoretical books that still only have major_id.
-        if expected_major is None or expected_major != major_code:
+        # Legacy major_id compatibility is safe only when the edition has no normalized
+        # applicability links. Never let a stale major_id override a conflicting link.
+        any_normalized_link = await session.scalar(
+            select(BookCurriculumLink.id)
+            .where(BookCurriculumLink.book_id == book.id)
+            .limit(1)
+        )
+        if any_normalized_link is not None or expected_major is None or expected_major != major_code:
             raise HTTPException(status_code=422, detail="book is not available for the selected curriculum")
     return book, grade, selected_field.code if selected_field is not None else expected_major
