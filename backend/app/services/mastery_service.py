@@ -351,7 +351,7 @@ async def record_objective_evidence(
     qualitative_level: str | None,
     rubric: dict[str, Any],
     feedback: str | None,
-    book_id: int | None = None,
+    book_id: int,
     pdf_page_index: int | None = None,
 ) -> LearningEvidence:
     objective = await session.get(LearningObjective, objective_id)
@@ -443,7 +443,18 @@ async def record_objective_evidence(
                 LearningEvidence.source_ref == source_ref,
             )
         )
-    if row is None:
+    if row is not None:
+        if row.book_id != book_id or row.book_page_id != page_id:
+            raise HTTPException(
+                status_code=409,
+                detail="این شناسهٔ شاهد قبلاً برای کتاب یا صفحهٔ دیگری استفاده شده است.",
+            )
+        if row.verification_status != "unverified":
+            raise HTTPException(
+                status_code=409,
+                detail="شاهد بازبینی‌شده قابل ویرایش مجدد نیست؛ برای ارسال جدید شناسهٔ تازه بسازید.",
+            )
+    else:
         row = LearningEvidence(
             user_id=user_id,
             objective_id=objective_id,
@@ -525,16 +536,26 @@ async def objective_tree(
                     BookPage.book_id == book_id,
                     BookPage.status == PageStatus.done,
                     CurriculumUnit.grade_id == book.grade_id,
+                    CurriculumUnit.is_active.is_(True),
+                    LearningObjective.is_active.is_(True),
+                    scope_condition,
+                    branch_scope_condition,
+                    CurriculumUnit.subject_id.in_(subject_ids) if subject_ids else True,
                 )
             )
         ).all()
     )
-    relevance_terms = []
-    if subject_ids:
-        relevance_terms.append(CurriculumUnit.subject_id.in_(subject_ids))
-    if mapped_objective_ids:
-        relevance_terms.append(LearningObjective.id.in_(mapped_objective_ids))
-    if not relevance_terms:
+    # A page mapping narrows the tree to objectives explicitly attached to this
+    # edition's completed pages. Subject-only fallback is used only when no page
+    # mappings exist, never OR-ed with mappings (which previously widened scope).
+    relevance_condition = (
+        LearningObjective.id.in_(mapped_objective_ids)
+        if mapped_objective_ids
+        else CurriculumUnit.subject_id.in_(subject_ids)
+        if subject_ids
+        else None
+    )
+    if relevance_condition is None:
         return {
             "book": {"id": book.id, "title": book.title},
             "academic_year_code": year_code,
@@ -555,7 +576,7 @@ async def objective_tree(
                 LearningObjective.is_active.is_(True),
                 scope_condition,
                 branch_scope_condition,
-                or_(*relevance_terms),
+                relevance_condition,
             )
             .order_by(Subject.title, CurriculumUnit.sort_order, LearningObjective.code)
         )
@@ -598,6 +619,7 @@ async def objective_tree(
             select(LearningEvidence)
             .where(
                 LearningEvidence.user_id == user_id,
+                LearningEvidence.book_id == book_id,
                 LearningEvidence.objective_id.in_(all_evidence_ids),
             )
             .order_by(LearningEvidence.observed_at.desc(), LearningEvidence.id.desc())
