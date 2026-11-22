@@ -243,6 +243,131 @@ async def test_multi_grade_search_returns_pages_from_at_least_two_grades(env):
 
 
 @pytest.mark.asyncio
+async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalog(env):
+    async with env.factory() as session:
+        year = await session.scalar(
+            select(AcademicYear).where(AcademicYear.code == "1405-1406")
+        )
+        grade10 = await session.scalar(select(Grade).where(Grade.number == 10))
+        foreign_branch = EducationBranch(
+            code="technical_scope_test",
+            title="شاخهٔ فنی آزمون",
+            min_grade=10,
+            max_grade=12,
+            is_active=True,
+        )
+        session.add(foreign_branch)
+        await session.flush()
+        foreign_field = FieldOfStudy(
+            branch_id=foreign_branch.id,
+            code="electronics_scope_test",
+            title="الکترونیک آزمون",
+            is_active=True,
+        )
+        session.add(foreign_field)
+        await session.flush()
+
+        foreign_book = Book(
+            title="کتاب فنی خارج از رشتهٔ انتخابی",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/foreign.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="approved",
+        )
+        hidden_book = Book(
+            title="کتاب قدیمی تأییدنشده",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/hidden.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="legacy_unverified",
+        )
+        pending_book = Book(
+            title="کتاب در انتظار بررسی",
+            grade_id=grade10.id,
+            academic_year_id=year.id,
+            pdf_file_path="/tmp/pending.pdf",
+            total_pdf_pages=1,
+            status=BookStatus.ready,
+            catalog_status="pending_review",
+        )
+        session.add_all([foreign_book, hidden_book, pending_book])
+        await session.flush()
+        session.add(
+            BookCurriculumLink(
+                book_id=foreign_book.id,
+                branch_id=foreign_branch.id,
+                field_of_study_id=foreign_field.id,
+                scope_code="field:electronics_scope_test",
+            )
+        )
+        session.add_all(
+            [
+                BookCurriculumLink(
+                    book_id=hidden_book.id,
+                    branch_id=(await session.scalar(
+                        select(EducationBranch).where(EducationBranch.code == "theoretical")
+                    )).id,
+                    field_of_study_id=(await session.scalar(
+                        select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+                    )).id,
+                    scope_code="field:legacy_hidden",
+                ),
+                BookCurriculumLink(
+                    book_id=pending_book.id,
+                    branch_id=(await session.scalar(
+                        select(EducationBranch).where(EducationBranch.code == "theoretical")
+                    )).id,
+                    field_of_study_id=(await session.scalar(
+                        select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+                    )).id,
+                    scope_code="field:pending_hidden",
+                ),
+            ]
+        )
+        await session.commit()
+
+        resolved = await multi_grade_rag.resolve_curriculum_book_ids(
+            session,
+            grade_numbers=[10, 11, 12],
+            branch_code="theoretical",
+            field_code="math_physics",
+            academic_year_id=year.id,
+        )
+
+        assert set(resolved) == {
+            env.ids["book10"],
+            env.ids["book11"],
+            env.ids["book12"],
+        }
+        assert foreign_book.id not in resolved
+        assert hidden_book.id not in resolved
+        assert pending_book.id not in resolved
+
+        with pytest.raises(ScopeError):
+            await multi_grade_rag.resolve_curriculum_book_ids(
+                session,
+                grade_numbers=[10, 11, 12],
+                branch_code="theoretical",
+                field_code="math_physics",
+                academic_year_id=year.id,
+                requested_book_ids=[foreign_book.id],
+            )
+
+        with pytest.raises(ScopeError):
+            await multi_grade_rag.resolve_curriculum_book_ids(
+                session,
+                grade_numbers=[10, 11, 12],
+                branch_code="theoretical",
+                field_code="math_physics",
+                academic_year_id=year.id + 1,
+            )
+
+
+@pytest.mark.asyncio
 async def test_grade_filter_is_strict_and_never_widened(env):
     async with env.factory() as session:
         result = await multi_grade_rag.search_multi_grade(
