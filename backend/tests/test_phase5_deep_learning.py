@@ -466,6 +466,34 @@ async def test_deep_solve_ladder_hides_answer_until_full_and_records_mastery(env
 
 
 @pytest.mark.asyncio
+async def test_deep_solve_repairs_one_invalid_structured_plan(env):
+    calls = 0
+
+    def malformed_then_valid(messages):
+        nonlocal calls
+        calls += 1
+        return {"steps": "not a list"} if calls == 1 else PLAN
+
+    env.fake.json_reply = malformed_then_valid
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/deep-solve/sessions",
+            json={
+                "problem_text": "جسمی ۲ کیلوگرمی با نیروی ۱۰ نیوتون",
+                "book_id": env.ids["book_id"],
+                "chapter_number": 2,
+            },
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "active"
+    assert calls == 2
+    assert await _count(
+        env.factory, AiAuditLog, AiAuditLog.feature_key == "deep_solve"
+    ) == 2
+    assert await _count(env.factory, DeepSolveSession) == 1
+
+
+@pytest.mark.asyncio
 async def test_deep_solve_invalid_model_plan_creates_no_orphan_row(env):
     env.fake.json_reply = lambda messages: {"steps": "not a list"}
     async with _client() as client:
