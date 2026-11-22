@@ -322,6 +322,56 @@ async def review_learning_evidence(
 
 
 
+def _validate_objective_unit_reuse(
+    existing_unit: CurriculumUnit | None,
+    target_unit: CurriculumUnit,
+) -> None:
+    """Never move a globally-coded objective away from its existing curriculum edition."""
+    if existing_unit is None or existing_unit.id != target_unit.id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "کد هدف یادگیری قبلاً به واحد یا نسخهٔ برنامهٔ درسی دیگری متصل شده است؛ "
+                "برای نسخهٔ جدید، کد یکتای نسخه‌دار تعریف کنید."
+            ),
+        )
+
+
+def _prerequisite_scope_is_compatible(
+    objective_unit: CurriculumUnit,
+    prerequisite_unit: CurriculumUnit,
+) -> bool:
+    """A prerequisite may be shared upward, but cannot be narrower than its objective."""
+    if objective_unit.grade_id != prerequisite_unit.grade_id:
+        return False
+
+    if objective_unit.scope_code == "unspecified":
+        if prerequisite_unit.scope_code != "unspecified":
+            return False
+    elif prerequisite_unit.scope_code not in {objective_unit.scope_code, "unspecified"}:
+        return False
+
+    if objective_unit.academic_year_id is None:
+        if prerequisite_unit.academic_year_id is not None:
+            return False
+    elif prerequisite_unit.academic_year_id not in {None, objective_unit.academic_year_id}:
+        return False
+
+    if objective_unit.branch_id is None:
+        if prerequisite_unit.branch_id is not None:
+            return False
+    elif prerequisite_unit.branch_id not in {None, objective_unit.branch_id}:
+        return False
+
+    if objective_unit.field_of_study_id is None:
+        if prerequisite_unit.field_of_study_id is not None:
+            return False
+    elif prerequisite_unit.field_of_study_id not in {None, objective_unit.field_of_study_id}:
+        return False
+
+    return True
+
+
 @protected_router.post("/curriculum/catalog/import")
 async def import_curriculum_catalog(
     body: CurriculumCatalogImportBody,
@@ -510,6 +560,9 @@ async def import_curriculum_catalog(
                     title=objective_input.title,
                 )
                 session.add(objective)
+            else:
+                existing_unit = await session.get(CurriculumUnit, objective.unit_id)
+                _validate_objective_unit_reuse(existing_unit, unit)
             objective.unit_id = unit.id
             objective.title = objective_input.title
             objective.description = objective_input.description
@@ -561,6 +614,20 @@ async def import_curriculum_catalog(
             )
         if objective.id == prerequisite.id:
             raise HTTPException(status_code=422, detail="هدف یادگیری نمی‌تواند پیش‌نیاز خودش باشد.")
+        objective_unit = await session.get(CurriculumUnit, objective.unit_id)
+        prerequisite_unit = await session.get(CurriculumUnit, prerequisite.unit_id)
+        if (
+            objective_unit is None
+            or prerequisite_unit is None
+            or not _prerequisite_scope_is_compatible(objective_unit, prerequisite_unit)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"پیش‌نیاز {prerequisite_code} از نظر پایه، شاخه، رشته یا سال تحصیلی "
+                    f"برای هدف {objective_code} قابل استفاده نیست."
+                ),
+            )
         exists_link = await session.scalar(
             select(ObjectivePrerequisite.id).where(
                 ObjectivePrerequisite.objective_id == objective.id,
