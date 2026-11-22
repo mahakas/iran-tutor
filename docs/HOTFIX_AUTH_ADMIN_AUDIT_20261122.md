@@ -214,6 +214,19 @@ brief; frontend gates lint/typecheck/build.
 - Frontend: `npx tsc --noEmit` clean, `npm run lint` → 0 errors (14 pre-existing warnings),
   `npm run build` succeeds (23 routes), `npm test` → **26 passed** across 3 files
   (`apiClient.test.ts` 10, `AuthFlowModal.test.tsx` 8, `AdminUsersPanel.test.tsx` 8).
+- CI (`.github/workflows/ci.yml`, run on the draft PR) → **both jobs green**:
+  `Backend tests and migrations` (pytest against PostgreSQL + `alembic upgrade head` on a fresh
+  database) and `Frontend lint and build`. The workflow now also runs `npm test` between lint
+  and build, and `npm test` is a documented `package.json` script.
+
+## 9.1 Delivery
+
+| Item | Value |
+| --- | --- |
+| Branch | `arena/69c88cea-iran-tutor` (cut from `main` @ `9e22108`) |
+| Commits | `abc2a76` implementation · `fbe35e5` CI wiring |
+| Pull request | https://github.com/mahakas/iran-tutor/pull/33 (**Draft**, base `main`) |
+| Merged / deployed | No — intentionally left as a draft |
 
 ## 10. Manual test script
 
