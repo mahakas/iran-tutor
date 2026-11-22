@@ -213,23 +213,25 @@ async def list_books(
     selected_branch: EducationBranch | None = None
     selected_field: FieldOfStudy | None = None
     selected_major: Major | None = None
+    legacy_major_only = bool(major_code and branch_code is None and field_code is None)
 
-    if major_code:
-        if not grade.has_major:
+    # major_code is an older name for field_code. When branch_code is supplied,
+    # normalize it into the new selector instead of querying only Book.major_id.
+    if major_code and branch_code is not None:
+        if field_code is not None and field_code != major_code:
+            raise HTTPException(status_code=422, detail="major_code and field_code must identify the same field")
+        field_code = field_code or major_code
+    elif major_code and branch_code is None:
+        if grade.number < 10:
             raise HTTPException(status_code=422, detail="major selection is only valid for upper secondary grades")
         selected_major = await session.scalar(select(Major).where(Major.code == major_code))
         if selected_major is None:
             raise HTTPException(status_code=404, detail="major not found")
-        # Legacy clients pass a Major.code without branch_code/field_code.
-        if branch_code is None and field_code is None:
-            branch = await session.scalar(
-                select(EducationBranch).where(EducationBranch.code == "theoretical")
-            )
-            field = await session.scalar(
-                select(FieldOfStudy).where(FieldOfStudy.code == major_code)
-            )
-            selected_branch, selected_field = branch, field
-    elif grade.number >= 10:
+        # Compatibility path: older clients sent only a theoretical Major.code.
+        branch_code = "theoretical"
+        field_code = major_code
+
+    if grade.number >= 10:
         if not branch_code:
             raise HTTPException(status_code=422, detail="برای پایه‌های دهم تا دوازدهم باید شاخهٔ تحصیلی انتخاب شود.")
         selected_branch = await session.scalar(
@@ -242,6 +244,15 @@ async def list_books(
             raise HTTPException(status_code=404, detail="education branch not found")
         if not selected_branch.min_grade <= grade.number <= selected_branch.max_grade:
             raise HTTPException(status_code=422, detail="این شاخه برای پایهٔ انتخاب‌شده تعریف نشده است.")
+
+        active_field_id = await session.scalar(
+            select(FieldOfStudy.id)
+            .where(
+                FieldOfStudy.branch_id == selected_branch.id,
+                FieldOfStudy.is_active.is_(True),
+            )
+            .limit(1)
+        )
         if field_code:
             selected_field = await session.scalar(
                 select(FieldOfStudy).where(
@@ -250,10 +261,10 @@ async def list_books(
                     FieldOfStudy.is_active.is_(True),
                 )
             )
-            if selected_field is None or selected_field.branch_id != selected_branch.id:
+            if selected_field is None:
                 raise HTTPException(status_code=404, detail="field of study not found")
-        elif selected_branch.code == "theoretical":
-            raise HTTPException(status_code=422, detail="برای شاخهٔ نظری باید رشتهٔ تحصیلی نیز انتخاب شود.")
+        elif active_field_id is not None:
+            raise HTTPException(status_code=422, detail="برای شاخهٔ انتخاب‌شده باید رشتهٔ تحصیلی نیز انتخاب شود.")
     elif branch_code or field_code:
         raise HTTPException(status_code=422, detail="انتخاب شاخه یا رشته برای پایه‌های ۱ تا ۹ مجاز نیست.")
 
@@ -276,10 +287,7 @@ async def list_books(
     link_exists = exists(
         select(BookCurriculumLink.id).where(BookCurriculumLink.book_id == Book.id)
     )
-    if selected_major is not None:
-        # Keep exact behaviour for older consumers while the new UI uses branch/field codes.
-        conditions.append(Book.major_id == selected_major.id)
-    elif selected_branch is not None:
+    if selected_branch is not None:
         scope_terms = [
             and_(
                 BookCurriculumLink.branch_id == selected_branch.id,
@@ -322,7 +330,7 @@ async def list_books(
     books = (
         await session.scalars(select(Book).where(*conditions).order_by(Book.title, Book.id.desc()))
     ).all()
-    if major_code and branch_code is None and field_code is None and academic_year_code is None:
+    if legacy_major_only and academic_year_code is None:
         return [
             {
                 "id": book.id,
