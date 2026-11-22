@@ -92,7 +92,8 @@ def enforce_student_grade_level(user: User, grade_number: int) -> None:
     A missing grade_level is deliberately not guessed here; deployments should
     complete student grade profiles to activate this restriction.
     """
-    if user.grade_level is not None and grade_number > user.grade_level:
+    assigned_grade = getattr(user, "grade_level", None)
+    if assigned_grade is not None and grade_number > assigned_grade:
         raise HTTPException(
             status_code=422,
             detail="the selected textbook is above the student's assigned grade level",
