@@ -806,6 +806,19 @@ async def probe_provider(
     """Live connectivity check for one stored provider (`POST /admin/providers/{id}/test`)."""
     from app.core.crypto import decrypt_secret
 
+    if provider.provider_type not in {"openai", "openai_compatible", "local"}:
+        return {
+            "ok": False,
+            "provider_id": provider.id,
+            "provider_type": provider.provider_type,
+            "base_url": provider.base_url or "",
+            "status_code": None,
+            "models_count": 0,
+            "latency_ms": 0,
+            "error": "Native protocol adapter is not implemented for this provider type yet.",
+            "prompt_test": None,
+        }
+
     api_key = decrypt_secret(provider.encrypted_api_key)
     probe = await probe_endpoint(
         base_url=provider.base_url or "",
