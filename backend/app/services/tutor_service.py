@@ -48,6 +48,9 @@ def _format_context(pages: list[dict[str, Any]], max_chars: int = 24_000) -> str
         print_year = page.get("print_year")
         if print_year:
             scope_labels.append("سال چاپ: " + str(print_year))
+        publisher = page.get("publisher")
+        if publisher:
+            scope_labels.append("ناشر: " + str(publisher))
         edition_context = " | " + " | ".join(scope_labels) if scope_labels else ""
         block = (
             f"[کتاب: {page.get('book_title', 'نامشخص')} | پایه: {page.get('grade_number', '?')} | "
@@ -232,6 +235,8 @@ def _source_reference(page: dict[str, Any]) -> str:
         labels.append(str(page["edition_label"]))
     if page.get("print_year"):
         labels.append("چاپ " + str(page["print_year"]))
+    if page.get("publisher"):
+        labels.append("ناشر " + str(page["publisher"]))
     edition = "، " + "، ".join(labels) if labels else ""
     return f"{title}{edition}، {chapter}، {page_ref}"
 
