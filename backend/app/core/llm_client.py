@@ -114,7 +114,7 @@ def is_provider_failover_error(error: Exception) -> bool:
     if isinstance(error, (APITimeoutError, APIConnectionError, InvalidJSONError)):
         return True
     if isinstance(error, APIStatusError):
-        return error.status_code in {401, 403, 408, 409, 425, 429} or error.status_code >= 500
+        return error.status_code in {401, 402, 403, 404, 408, 409, 425, 429} or error.status_code >= 500
     return False
 
 
