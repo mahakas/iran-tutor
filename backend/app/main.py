@@ -12,6 +12,7 @@ from app.core.runtime_config import load_runtime_overrides_from_db
 from app.db.seed import seed_database
 from app.db.session import engine, get_session
 from app.services.retrieval_service import close_qdrant
+from app.db.seed_test_user import seed_mahdi_test_user
 
 
 @asynccontextmanager
@@ -22,6 +23,7 @@ async def lifespan(_: FastAPI):
     enforce_production_settings(get_settings())  # raises in production with weak secrets
     _warn_insecure_admin_defaults()
     await seed_database()
+    await seed_mahdi_test_user()
     await load_runtime_overrides_from_db()
     try:
         yield
