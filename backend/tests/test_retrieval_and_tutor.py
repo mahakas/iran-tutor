@@ -25,22 +25,28 @@ def test_page_embedding_text_includes_scientific_visual_description():
     assert "محور افقی زمان" in text
 
 
-def test_curriculum_filter_always_scopes_grade_major_and_book():
+def test_curriculum_filter_uses_exact_book_edition_as_the_hard_scope():
     query_filter = retrieval_service.make_textbook_filter(
-        grade_number=12, major_code="math_physics", book_id=7
+        grade_number=12, major_code="electronics", book_id=7
     )
     conditions = {condition.key: condition.match.value for condition in query_filter.must}
-    assert conditions == {"grade_number": 12, "major_code": "math_physics", "book_id": 7}
+    assert conditions == {"grade_number": 12, "book_id": 7}
 
 
-def test_general_grades_use_explicit_general_major_filter():
+def test_general_grade_filter_uses_exact_book_edition_without_legacy_major():
     query_filter = retrieval_service.make_textbook_filter(
         grade_number=5, major_code=None, book_id=3
     )
     conditions = {condition.key: condition.match.value for condition in query_filter.must}
-    assert conditions["grade_number"] == 5
-    assert conditions["major_code"] == "general"
-    assert conditions["book_id"] == 3
+    assert conditions == {"grade_number": 5, "book_id": 3}
+
+
+def test_major_filter_remains_available_only_for_legacy_unbound_search():
+    query_filter = retrieval_service.make_textbook_filter(
+        grade_number=12, major_code="math_physics", book_id=None
+    )
+    conditions = {condition.key: condition.match.value for condition in query_filter.must}
+    assert conditions == {"grade_number": 12, "major_code": "math_physics"}
 
 
 def test_tutor_prompt_includes_grade_and_source_context():
@@ -192,8 +198,8 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
                     payload={
                         "book_id": 8,
                         "grade_number": 12,
-                        "major_code": "math_physics",
-                        "book_title": "فیزیک ۳",
+                        "major_code": "general",
+                        "book_title": "کتاب فنی",
                         "pdf_page_index": 1,
                         "embedding_model": settings.embedding_model,
                     },
@@ -260,13 +266,14 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
         results = await retrieval_service.search_textbook(
             "شتاب چیست؟",
             grade_number=12,
-            major_code="math_physics",
+            major_code="electronics",
             book_id=8,
             top_k=1,
         )
         assert len(results) == 1
         assert results[0]["book_id"] == 8
-        assert results[0]["major_code"] == "math_physics"
+        assert results[0]["major_code"] == "general"
+        assert results[0]["pdf_page_index"] == 1
         assert results[0]["pdf_page_index"] == 1
     finally:
         await client.close()
