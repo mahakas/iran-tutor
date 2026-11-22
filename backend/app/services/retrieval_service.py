@@ -295,12 +295,15 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
             async with async_session_factory() as write_session:
                 for start in range(0, len(documents), batch_size):
                     batch = documents[start : start + batch_size]
-                    vectors = (
-                        await embed_via_gateway(
-                            ctx=CallContext(feature_key="embedding", book_id=book_id),
-                            texts=[text for _, text in batch],
-                        )
-                    ).content
+                    embedding_result = await embed_via_gateway(
+                        ctx=CallContext(feature_key="embedding", book_id=book_id),
+                        texts=[text for _, text in batch],
+                    )
+                    vectors = embedding_result.content
+                    embedding_model = (
+                        getattr(embedding_result, "model_name", None)
+                        or settings.embedding_model
+                    )
                     for (page, _text), vector in zip(batch, vectors, strict=True):
                         await write_session.execute(
                             upsert_sql,
@@ -309,7 +312,7 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
                                 "book_id": book.id,
                                 "grade_number": grade.number,
                                 "major_code": payload_base["major_code"],
-                                "embedding_model": settings.embedding_model,
+                                "embedding_model": embedding_model,
                                 "embedding": json.dumps(vector),
                             },
                         )
@@ -325,12 +328,15 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
         points: list[models.PointStruct] = []
         for start in range(0, len(documents), batch_size):
             batch = documents[start : start + batch_size]
-            vectors = (
-                await embed_via_gateway(
-                    ctx=CallContext(feature_key="embedding", book_id=book_id),
-                    texts=[text for _, text in batch],
-                )
-            ).content
+            embedding_result = await embed_via_gateway(
+                ctx=CallContext(feature_key="embedding", book_id=book_id),
+                texts=[text for _, text in batch],
+            )
+            vectors = embedding_result.content
+            embedding_model = (
+                getattr(embedding_result, "model_name", None)
+                or settings.embedding_model
+            )
             for (page, text), vector in zip(batch, vectors, strict=True):
                 points.append(
                     models.PointStruct(
@@ -338,6 +344,7 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
                         vector=vector,
                         payload={
                             **payload_base,
+                            "embedding_model": embedding_model,
                             "pdf_page_index": page.pdf_page_index,
                             "printed_page_number": page.printed_page_number,
                             "chapter_number": page.chapter_number,
@@ -631,13 +638,19 @@ def merge_hybrid_results(
 async def _search_pgvector_scopes(
     query: str, *, scopes: Sequence[TextbookScope], limit: int
 ) -> list[dict[str, Any]]:
-    vector = (
-        await embed_via_gateway(
-            ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
-            texts=[query],
-        )
-    ).content[0]
-    params: dict[str, Any] = {"query_vector": json.dumps(vector), "limit": limit}
+    embedding_result = await embed_via_gateway(
+        ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
+        texts=[query],
+    )
+    vector = embedding_result.content[0]
+    embedding_model = (
+        getattr(embedding_result, "model_name", None) or get_settings().embedding_model
+    )
+    params: dict[str, Any] = {
+        "query_vector": json.dumps(vector),
+        "embedding_model": embedding_model,
+        "limit": limit,
+    }
     clauses: list[str] = []
     for index, scope in enumerate(scopes):
         clause = (
@@ -672,6 +685,7 @@ async def _search_pgvector_scopes(
         + " OR ".join(clauses)
         + """)
           AND bp.status = 'done'
+          AND e.embedding_model = :embedding_model
           AND (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) >= 0.15
         ORDER BY e.embedding <=> CAST(:query_vector AS vector) ASC, bp.pdf_page_index ASC
         LIMIT :limit
@@ -711,12 +725,14 @@ async def _search_pgvector(
     book_id: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    vector = (
-        await embed_via_gateway(
-            ctx=CallContext(feature_key="embedding_query", book_id=book_id),
-            texts=[query],
-        )
-    ).content[0]
+    embedding_result = await embed_via_gateway(
+        ctx=CallContext(feature_key="embedding_query", book_id=book_id),
+        texts=[query],
+    )
+    vector = embedding_result.content[0]
+    embedding_model = (
+        getattr(embedding_result, "model_name", None) or get_settings().embedding_model
+    )
     selected_major = major_code or "general"
     statement = sql_text(
         """
@@ -739,6 +755,7 @@ async def _search_pgvector(
           AND e.grade_number = :grade_number
           AND e.major_code = :major_code
           AND bp.status = 'done'
+          AND e.embedding_model = :embedding_model
           AND (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) >= 0.15
         ORDER BY e.embedding <=> CAST(:query_vector AS vector) ASC, bp.pdf_page_index ASC
         LIMIT :limit
@@ -753,6 +770,7 @@ async def _search_pgvector(
                     "book_id": book_id,
                     "grade_number": grade_number,
                     "major_code": selected_major,
+                    "embedding_model": embedding_model,
                     "limit": limit,
                 },
             )
@@ -782,7 +800,10 @@ async def _search_pgvector(
 
 
 async def _filter_qdrant_points(
-    points: Sequence[Any], *, scopes: Sequence[TextbookScope]
+    points: Sequence[Any],
+    *,
+    scopes: Sequence[TextbookScope],
+    expected_embedding_model: str | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile vector hits with the current, approved textbook page rows.
 
@@ -852,6 +873,8 @@ async def _filter_qdrant_points(
         if record is None:
             continue
         page, title, grade_number, major_code = record
+        if expected_embedding_model and payload.get("embedding_model") != expected_embedding_model:
+            continue
         current_text = page_embedding_text(page.markdown_content or "", page.visual_elements or [])
         # Old or stale payloads without an exact source snapshot must be re-indexed.
         if not current_text or payload.get("full_text") != current_text:
@@ -878,13 +901,15 @@ async def _filter_qdrant_points(
 async def _search_qdrant_scopes(
     query: str, *, scopes: Sequence[TextbookScope], limit: int
 ) -> list[dict[str, Any]]:
-    vector = (
-        await embed_via_gateway(
-            ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
-            texts=[query],
-        )
-    ).content[0]
+    embedding_result = await embed_via_gateway(
+        ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
+        texts=[query],
+    )
+    vector = embedding_result.content[0]
     settings = get_settings()
+    expected_embedding_model = (
+        getattr(embedding_result, "model_name", None) or settings.embedding_model
+    )
     response = await _get_qdrant().query_points(
         collection_name=settings.qdrant_collection,
         query=vector,
@@ -893,7 +918,11 @@ async def _search_qdrant_scopes(
         with_payload=True,
         score_threshold=0.15,
     )
-    return await _filter_qdrant_points(response.points, scopes=scopes)
+    return await _filter_qdrant_points(
+        response.points,
+        scopes=scopes,
+        expected_embedding_model=expected_embedding_model,
+    )
 
 
 async def _search_qdrant(
@@ -904,13 +933,15 @@ async def _search_qdrant(
     book_id: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    vector = (
-        await embed_via_gateway(
-            ctx=CallContext(feature_key="embedding_query", book_id=book_id),
-            texts=[query],
-        )
-    ).content[0]
+    embedding_result = await embed_via_gateway(
+        ctx=CallContext(feature_key="embedding_query", book_id=book_id),
+        texts=[query],
+    )
+    vector = embedding_result.content[0]
     settings = get_settings()
+    expected_embedding_model = (
+        getattr(embedding_result, "model_name", None) or settings.embedding_model
+    )
     response = await _get_qdrant().query_points(
         collection_name=settings.qdrant_collection,
         query=vector,
@@ -930,6 +961,7 @@ async def _search_qdrant(
                 major_code=major_code,
             )
         ],
+        expected_embedding_model=expected_embedding_model,
     )
 
 
