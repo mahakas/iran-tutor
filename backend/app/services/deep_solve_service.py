@@ -95,17 +95,24 @@ async def _load_official_book_context(
             detail="برای این کتاب و فصل، صفحهٔ پردازش‌شده و تأییدشده‌ای برای استناد وجود ندارد.",
         )
 
+    stopwords = {
+        "برای", "چیست", "چگونه", "می‌شود", "می‌کنند", "است", "هست", "بود",
+        "این", "آن", "یک", "با", "در", "از", "به", "را", "که", "و", "یا",
+        "چرا", "آیا", "اگر", "اما", "هم", "تا", "بر", "روی", "پس",
+    }
     tokens = {
         token for token in re.findall(r"[\w۰-۹]{2,}", problem.casefold())
-        if token not in {"برای", "چیست", "چگونه", "می‌شود", "است", "این", "آن"}
+        if token not in stopwords
     }
     ranked: list[tuple[int, BookPage, str]] = []
     for page in pages:
         page_text = (page.markdown_content or "").strip()
         if not page_text:
             continue
-        lowered = page_text.casefold()
-        score = sum(lowered.count(token) for token in tokens)
+        page_tokens = set(re.findall(r"[\w۰-۹]{2,}", page_text.casefold()))
+        # Exact token overlap avoids substring false positives such as query
+        # token "در" matching the word "ضربدر".
+        score = len(tokens & page_tokens)
         ranked.append((score, page, page_text))
     if not ranked:
         raise HTTPException(status_code=409, detail="محتوای متنیِ قابل استناد در صفحات انتخاب‌شده موجود نیست.")

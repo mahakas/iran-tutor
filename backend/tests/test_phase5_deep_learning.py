@@ -504,7 +504,7 @@ async def test_deep_solve_repairs_one_invalid_structured_plan(env):
 async def test_deep_solve_invalid_model_plan_creates_no_orphan_row(env):
     env.fake.json_reply = lambda messages: {"steps": "not a list"}
     async with _client() as client:
-        response = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله", "book_id": env.ids["book_id"]})
+        response = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "قانون دوم نیوتون: نیروی خالص برابر جرم ضربدر شتاب است", "book_id": env.ids["book_id"]})
     assert response.status_code == 502
     assert await _count(env.factory, DeepSolveSession) == 0
 
@@ -518,7 +518,7 @@ async def test_disabled_capability_blocks_student_and_admin_edit_is_logged(env):
         off = await client.put("/api/v1/admin/capabilities/deep_solve",
                                json={"is_enabled": False}, headers=ADMIN_HEADERS)
         assert off.status_code == 200
-        blocked = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله", "book_id": env.ids["book_id"]})
+        blocked = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "قانون دوم نیوتون: نیروی خالص برابر جرم ضربدر شتاب است", "book_id": env.ids["book_id"]})
         assert blocked.status_code == 403
         logs = await client.get("/api/v1/admin/action-logs", params={"target": "capability:deep_solve"},
                                 headers=ADMIN_HEADERS)
@@ -597,7 +597,7 @@ async def test_admin_sees_student_mistakes_sessions_and_validator_rejections(env
         await session.commit()
     async with _client() as client:
         await client.post(f"/api/v1/exams/{exam_id}/submit", json={"answers": {"q1": "B"}})
-        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله", "book_id": env.ids["book_id"]})
+        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "قانون دوم نیوتون: نیروی خالص برابر جرم ضربدر شتاب است", "book_id": env.ids["book_id"]})
         mistakes = await client.get(f"/api/v1/admin/users/{student}/mistakes", headers=ADMIN_HEADERS)
         sessions = await client.get(f"/api/v1/admin/users/{student}/deep-solve-sessions", headers=ADMIN_HEADERS)
         rejected = await client.get(f"/api/v1/admin/users/{student}/quiz-validation",
@@ -626,7 +626,7 @@ async def test_phase5_ai_calls_route_through_runtime_and_gateway(env, monkeypatc
     monkeypatch.setattr(deep_solve_service, "run_capability_json", spy)
     env.fake.json_reply = lambda messages: PLAN
     async with _client() as client:
-        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله", "book_id": env.ids["book_id"]})
+        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "قانون دوم نیوتون: نیروی خالص برابر جرم ضربدر شتاب است", "book_id": env.ids["book_id"]})
     assert seen == ["deep_solve"]
     assert await _count(env.factory, AiAuditLog, AiAuditLog.feature_key == "deep_solve") >= 1
 
@@ -666,7 +666,7 @@ async def test_ai_capabilities_consume_user_quota_rows(env):
     async with _client() as client:
         r1 = await client.post(f"/api/v1/immersive/books/{book_id}/assist",
                                json={"action": "summarize", "pdf_page_index": 2})
-        r2 = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئلهٔ آزمایشی", "book_id": env.ids["book_id"]})
+        r2 = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "قانون دوم نیوتون و نیروی خالص", "book_id": env.ids["book_id"]})
     assert r1.status_code == 200
     assert r2.status_code in (201, 502)  # plan may be invalid in the stub; quota must still be touched
     async with env.factory() as session:
@@ -838,7 +838,7 @@ async def test_deep_solve_refuses_books_without_processed_source_pages(env):
         )
         no_processed_pages = await client.post(
             "/api/v1/deep-solve/sessions",
-            json={"problem_text": "مسئله", "book_id": env.ids["book_id"]},
+            json={"problem_text": "قانون دوم نیوتون: نیروی خالص برابر جرم ضربدر شتاب است", "book_id": env.ids["book_id"]},
         )
 
     assert missing_book.status_code == 422
