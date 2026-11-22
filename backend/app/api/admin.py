@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 from sqlalchemy import delete, func, or_, select, text as sql_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2954,7 +2954,7 @@ class FeatureRouteBody(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=200_000)
     fallback_provider_id: int | None = Field(default=None, gt=0)
     fallback_model_name: str | None = Field(default=None, max_length=255)
-    fallback_provider_ids: list[int] = Field(default_factory=list, max_length=8)
+    fallback_provider_ids: list[PositiveInt] = Field(default_factory=list, max_length=8)
     fallback_model_names: list[str] = Field(default_factory=list, max_length=8)
     is_active: bool = True
 
