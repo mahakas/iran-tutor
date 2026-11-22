@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+
+import httpx
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -288,17 +290,15 @@ async def _resolve_candidates(
 def _fallback_eligible(error: Exception) -> bool:
     """Only fail over for provider/transport errors, not application bugs."""
     name = type(error).__name__
-    if name in {
+    if isinstance(error, httpx.TransportError) or name in {
         "APIConnectionError",
         "APITimeoutError",
         "InvalidJSONError",
-        "ConnectError",
-        "TimeoutException",
     }:
         return True
     status_code = getattr(error, "status_code", None)
     return isinstance(status_code, int) and (
-        status_code in {401, 403, 404, 408, 409, 425, 429} or status_code >= 500
+        status_code in {402, 401, 403, 404, 408, 409, 413, 425, 429} or status_code >= 500
     )
 
 

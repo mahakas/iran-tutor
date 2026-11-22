@@ -295,3 +295,12 @@ async def test_gateway_without_request_session_still_resolves_admin_route(monkey
 
     assert resolved == [route]
     assert opened == [sentinel_session]
+
+
+def test_fallback_eligibility_includes_httpx_transport_errors():
+    import httpx
+
+    assert ai_gateway._fallback_eligible(httpx.ConnectTimeout("provider timed out"))
+    assert ai_gateway._fallback_eligible(httpx.ReadError("provider connection was interrupted"))
+    assert ai_gateway._fallback_eligible(ProviderUnavailable("upstream unavailable"))
+    assert not ai_gateway._fallback_eligible(ValueError("invalid application state"))

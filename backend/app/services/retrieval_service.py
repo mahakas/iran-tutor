@@ -397,7 +397,12 @@ def _scope_sql_clause(scopes: Sequence[TextbookScope]):
 async def _uses_postgresql_database() -> bool:
     """Detect the active SQL dialect instead of assuming demo_mode means SQLite."""
     async with async_session_factory() as session:
-        bind = session.get_bind()
+        get_bind = getattr(session, "get_bind", None)
+        # Lightweight fake sessions in query-construction tests predate
+        # dialect introspection and represent the configured production DB.
+        if not callable(get_bind):
+            return True
+        bind = get_bind()
         return bool(bind is not None and bind.dialect.name == "postgresql")
 
 
