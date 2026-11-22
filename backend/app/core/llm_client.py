@@ -411,7 +411,7 @@ async def embed_texts(texts: list[str], model: str | None = None) -> list[list[f
                 response = await client.embeddings.create(model=embedding_model, input=texts)
             vectors = [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
             if len(vectors) != len(texts):
-                raise ValueError("embedding response count does not match input count")
+                raise InvalidJSONError("embedding response count does not match input count")
             for vector in vectors:
                 if len(vector) != settings.embedding_dimension:
                     raise ValueError(
@@ -653,7 +653,7 @@ async def transcribe_audio(
         )
     text = getattr(response, "text", "")
     if not text or not text.strip():
-        raise ValueError("audio transcription returned no text")
+        raise InvalidJSONError("audio transcription returned no text")
     record_token_usage(fallback_prompt=max(100, len(audio_bytes) // 1024 * 12), fallback_completion=max(20, len(text) // 4))
     _log(logging.INFO, "llm.transcribe_audio.ok", model=transcription_model)
     return text.strip()
@@ -714,7 +714,7 @@ async def synthesize_speech(
         )
     audio = getattr(response, "content", b"") or b""
     if not audio:
-        raise ValueError("speech provider returned no audio")
+        raise InvalidJSONError("speech provider returned no audio")
     record_token_usage(fallback_prompt=max(1, len(cleaned) // 4), fallback_completion=0)
     _log(logging.INFO, "llm.synthesize_speech.ok", model=model, bytes=len(audio))
     return audio
