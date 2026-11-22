@@ -19,7 +19,7 @@ from app.core.config import get_settings
 from app.services.ai_gateway import CallContext, embed_via_gateway
 from app.db.session import async_session_factory
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
-from app.services.curriculum_access import student_book_catalog_clause
+from app.services.curriculum_access import allowed_student_catalog_statuses, student_book_catalog_clause
 
 logger = logging.getLogger(__name__)
 
@@ -689,7 +689,7 @@ async def _search_pgvector_scopes(
         + """)
           AND bp.status = 'done'
           AND b.status = 'ready'
-          AND b.catalog_status <> 'pending_review'
+          AND b.catalog_status = ANY(:catalog_statuses)
           AND e.embedding_model = :embedding_model
           AND (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) >= 0.15
         ORDER BY e.embedding <=> CAST(:query_vector AS vector) ASC, bp.pdf_page_index ASC
@@ -777,6 +777,7 @@ async def _search_pgvector(
                     "book_id": book_id,
                     "grade_number": grade_number,
                     "major_code": selected_major,
+                    "catalog_statuses": list(allowed_student_catalog_statuses()),
                     "embedding_model": embedding_model,
                     "limit": limit,
                 },
