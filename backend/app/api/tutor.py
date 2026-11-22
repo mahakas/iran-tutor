@@ -527,6 +527,7 @@ async def ask_tutor_with_audio(
     grade_number: int = Form(...),
     book_id: int = Form(...),
     major_code: str | None = Form(None),
+    branch_code: str | None = Form(None),
     top_k: int = Form(5),
     mode: TutorMode = Form("tutor"),
     chat_session_id: str | None = Form(None),
