@@ -33,7 +33,14 @@ def _fake_student() -> SimpleNamespace:
 class FakeSession:
     async def get(self, model, identity):
         if model is Book and identity == 1:
-            return SimpleNamespace(id=1, grade_id=12, major_id=2)
+            return SimpleNamespace(
+                id=1,
+                grade_id=12,
+                major_id=2,
+                status="ready",
+                catalog_status="approved",
+                academic_year_id=None,
+            )
         if model is Grade and identity == 12:
             return SimpleNamespace(number=12, has_major=True)
         if model is Major and identity == 2:
@@ -129,6 +136,7 @@ async def test_chat_sessions_roundtrip_crud(tmp_path):
             pdf_file_path="dummy.pdf",
             total_pdf_pages=1,
             status="ready",
+            catalog_status="approved",
         )
         user = User(
             id="user-chat-1",
