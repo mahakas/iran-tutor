@@ -274,7 +274,6 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
         assert results[0]["book_id"] == 8
         assert results[0]["major_code"] == "general"
         assert results[0]["pdf_page_index"] == 1
-        assert results[0]["pdf_page_index"] == 1
     finally:
         await client.close()
         retrieval_service._qdrant = old_client
