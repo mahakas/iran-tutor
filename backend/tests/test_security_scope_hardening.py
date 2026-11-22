@@ -185,3 +185,17 @@ async def test_guardian_role_cannot_use_student_dependency(auth_session, monkeyp
 
 async def _return_user(user):
     return user
+
+
+@pytest.mark.parametrize("role", ["teacher", "admin"])
+def test_teacher_admin_preview_does_not_require_student_grade_profile(monkeypatch, role):
+    monkeypatch.setattr(
+        dependencies,
+        "get_settings",
+        lambda: type("Settings", (), {"demo_mode": False, "require_student_grade_profile": True})(),
+    )
+    user = type("UserStub", (), {"role": role, "grade_level": None})()
+
+    # Preview access still relies on the normal book/branch/capability checks.
+    # This helper only avoids treating a teacher/admin as an unprofiled student.
+    dependencies.enforce_student_grade_level(user, 12)

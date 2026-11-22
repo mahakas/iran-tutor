@@ -107,7 +107,12 @@ def enforce_student_grade_level(user: User, grade_number: int) -> None:
     """
     settings = get_settings()
     assigned_grade = getattr(user, "grade_level", None)
+    role = (getattr(user, "role", None) or "student").strip().lower()
     if assigned_grade is None:
+        # Teacher/admin preview is not a student account. Preserve their
+        # authorized preview workflow; actual student accounts still fail closed.
+        if role in {"teacher", "admin"}:
+            return
         if not settings.demo_mode and getattr(settings, "require_student_grade_profile", True):
             raise HTTPException(
                 status_code=409,
