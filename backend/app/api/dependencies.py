@@ -100,6 +100,22 @@ def enforce_student_grade_level(user: User, grade_number: int) -> None:
         )
 
 
+async def enforce_student_book_grade_level(
+    session: AsyncSession,
+    user: User,
+    book_id: int,
+) -> tuple[Book, Grade]:
+    """Validate an approved student-visible textbook and its assigned-grade ceiling."""
+    book = await session.get(Book, book_id)
+    if not is_student_visible_book(book):
+        raise HTTPException(status_code=404, detail="book not found")
+    grade = await session.get(Grade, book.grade_id)
+    if grade is None:
+        raise HTTPException(status_code=404, detail="book grade not found")
+    enforce_student_grade_level(user, grade.number)
+    return book, grade
+
+
 async def resolve_book_scope(
     session: AsyncSession,
     *,
