@@ -109,7 +109,7 @@ export default function MasteryWorkspace() {
           objective_id: objective.id,
           book_id: bookId,
           source_type: "self_assessment",
-          source_ref: `self-assessment:${objective.id}:${Date.now()}`,
+          source_ref: null,
           score: hasScore ? Number(score) : null,
           qualitative_level: hasLevel ? qualitativeLevel : null,
           rubric: {},
