@@ -2568,3 +2568,108 @@ img, svg, video, canvas { max-width: 100%; }
 .p4-layer[data-layer="L2"] .p4-item::before { background: var(--indigo); }
 .p4-layer[data-layer="L3"] .p4-item::before { background: var(--amber); }
 .p4-layer .p4-item:last-child::after { display: none; }
+
+/* ==========================================================================
+   Auth flow + admin user management (hotfix 2026-11-22)
+   RTL-first; reuses the existing modal/button/field primitives.
+   ========================================================================== */
+
+.auth-flow-modal { width: min(460px, 94vw); }
+.auth-flow-modal form > p { margin: 0 0 14px; color: var(--ink-secondary); font-size: 11px; line-height: 1.9; }
+
+.auth-mode-tabs { display: flex; gap: 4px; margin: 14px 0 12px; padding: 4px; background: var(--surface-muted); border-radius: 12px; }
+.auth-mode-tab { flex: 1; padding: 8px 4px; color: var(--muted); background: transparent; border: 0; border-radius: 9px; font-family: inherit; font-size: 10.5px; font-weight: 600; cursor: pointer; transition: .15s; }
+.auth-mode-tab:hover:not(:disabled) { color: var(--ink); }
+.auth-mode-tab.active { color: var(--teal-strong, var(--teal)); background: var(--card); box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+.auth-mode-tab:disabled { opacity: .6; cursor: not-allowed; }
+
+.auth-step-indicator { display: flex; gap: 6px; margin: 0 0 14px; padding: 0; list-style: none; }
+.auth-step-indicator li { display: flex; align-items: center; gap: 5px; flex: 1; color: var(--muted); font-size: 9.5px; }
+.auth-step-indicator li span { display: grid; place-items: center; width: 18px; height: 18px; flex: 0 0 auto; background: var(--surface-muted); border-radius: 50%; font-size: 9px; font-weight: 700; }
+.auth-step-indicator li.current { color: var(--ink); font-weight: 600; }
+.auth-step-indicator li.current span { color: #fff; background: var(--teal); }
+.auth-step-indicator li.done span { color: #fff; background: rgba(34, 150, 100, .85); }
+
+.auth-info-note { margin-bottom: 12px; padding: 9px 11px; color: var(--teal-strong, var(--teal)); background: var(--teal-soft); border-radius: 10px; font-size: 10.5px; line-height: 1.8; }
+
+.auth-remember { display: flex; align-items: center; gap: 7px; margin: 4px 0 8px; color: var(--ink-secondary); font-size: 10.5px; cursor: pointer; }
+.auth-remember input { width: 14px; height: 14px; accent-color: var(--teal); }
+
+.password-rules { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: -2px 0 12px; padding: 0; list-style: none; }
+.password-rules li { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 9.5px; }
+.password-rules li svg { opacity: .35; }
+.password-rules li.ok { color: #1b8c67; }
+.password-rules li.ok svg { opacity: 1; }
+
+/* --- admin users panel --- */
+.admin-users-shell { margin-bottom: 18px; }
+.admin-users-panel { display: grid; gap: 14px; }
+.admin-banner { display: flex; align-items: center; gap: 7px; margin-top: 10px; }
+.admin-banner .icon-button { margin-inline-start: auto; }
+.admin-muted { color: var(--muted); font-size: 10px; line-height: 1.8; }
+
+.users-toolbar select { padding: 8px 10px; color: var(--ink-secondary); background: var(--card); border: 1px solid var(--line-strong); border-radius: var(--radius-control); font-family: inherit; font-size: 10.5px; }
+.users-toolbar .primary-button,
+.users-toolbar .outline-button { display: inline-flex; align-items: center; gap: 5px; padding: 8px 12px; font-size: 10.5px; }
+
+.admin-create-user { margin-top: 12px; padding: 14px; background: var(--surface-muted); border: 1px dashed var(--line-strong); border-radius: 12px; }
+.admin-create-user h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; font-size: 12px; }
+.admin-create-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.admin-inline-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.admin-inline-actions .primary-button,
+.admin-inline-actions .outline-button { display: inline-flex; align-items: center; gap: 5px; padding: 8px 12px; font-size: 10.5px; }
+.outline-button.danger { color: #c54b3e; border-color: rgba(197, 75, 62, .45); }
+.outline-button.danger:hover { color: #fff; background: #c54b3e; }
+
+.admin-users-table-wrap { margin-top: 12px; overflow-x: auto; }
+.admin-users-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+.admin-users-table th { padding: 8px 10px; color: var(--muted); font-size: 9.5px; font-weight: 600; text-align: right; border-bottom: 1px solid var(--line); }
+.admin-users-table td { padding: 9px 10px; color: var(--ink-secondary); border-bottom: 1px solid var(--line); vertical-align: middle; }
+.admin-users-table td b { display: block; color: var(--ink); font-size: 10.5px; }
+.admin-users-table td small { color: var(--muted); font-size: 9.5px; }
+.admin-users-table tr.selected { background: var(--teal-soft); }
+.admin-users-table.compact td, .admin-users-table.compact th { padding: 7px 8px; }
+
+.admin-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: 10px; color: var(--muted); }
+.admin-pagination .outline-button { display: inline-flex; align-items: center; gap: 4px; padding: 6px 10px; font-size: 10px; }
+
+.admin-user-detail { margin-top: 4px; }
+.admin-user-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.admin-user-actions select { padding: 8px 10px; background: var(--card); border: 1px solid var(--line-strong); border-radius: var(--radius-control); font-family: inherit; font-size: 10.5px; }
+.admin-user-actions .outline-button { display: inline-flex; align-items: center; gap: 5px; padding: 8px 12px; font-size: 10.5px; }
+
+.admin-user-tabs { display: flex; gap: 4px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.admin-user-tab { padding: 7px 12px; color: var(--muted); background: transparent; border: 0; border-radius: 8px; font-family: inherit; font-size: 10.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.admin-user-tab:hover { color: var(--ink); background: var(--surface-muted); }
+.admin-user-tab.active { color: var(--teal-strong, var(--teal)); background: var(--teal-soft); }
+
+.admin-user-pane { display: grid; gap: 14px; }
+.admin-user-form { display: grid; gap: 10px; }
+.admin-user-form h3 { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 11.5px; }
+.admin-password-reset { padding-top: 12px; border-top: 1px dashed var(--line-strong); }
+
+.admin-audit-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.admin-audit-list li { padding: 9px 11px; background: var(--surface-muted); border-radius: 10px; font-size: 10.5px; }
+.admin-audit-meta { display: flex; align-items: center; gap: 10px; margin-top: 4px; color: var(--muted); font-size: 9.5px; }
+.admin-audit-meta summary { cursor: pointer; }
+.admin-code { margin: 6px 0 0; padding: 8px; direction: ltr; background: var(--card); border-radius: 8px; font-size: 9.5px; overflow-x: auto; }
+
+.confirm-modal { width: min(400px, 94vw); }
+.confirm-modal p { margin: 0 0 14px; color: var(--ink-secondary); font-size: 11px; line-height: 1.9; }
+.confirm-modal .modal-icon.danger-icon { color: #c54b3e; background: rgba(197, 75, 62, .12); }
+.dialog-actions-row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.dialog-actions-row .outline-button,
+.dialog-actions-row .primary-button,
+.dialog-actions-row .danger-button { padding: 9px 16px; font-size: 11px; }
+
+[data-theme="dark"] .auth-mode-tab.active { background: rgba(255, 255, 255, .07); }
+[data-theme="dark"] .admin-create-user { background: rgba(255, 255, 255, .03); }
+[data-theme="dark"] .admin-users-table tr.selected { background: rgba(20, 160, 130, .14); }
+
+@media (max-width: 720px) {
+  .auth-step-indicator li span { display: none; }
+  .admin-users-table th:nth-child(5),
+  .admin-users-table td:nth-child(5) { display: none; }
+  .dialog-actions-row { flex-direction: column-reverse; }
+  .dialog-actions-row > button { width: 100%; }
+}

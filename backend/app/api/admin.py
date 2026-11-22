@@ -161,8 +161,12 @@ def _is_admin_authenticated(request: Request) -> bool:
 
 
 async def _resolve_rbac_admin(request: Request, session: AsyncSession):
-    """Return the user behind an admin-role session token, or `None`."""
-    from app.api.rbac_deps import normalize_role
+    """Return the user behind an admin-role session token, or `None`.
+
+    Both `admin` and `super_admin` user sessions may enter the admin API; finer
+    least-privilege checks happen in the user-management service.
+    """
+    from app.services.permissions import is_admin_role
     from app.services.rbac import get_optional_user
 
     try:
@@ -172,7 +176,9 @@ async def _resolve_rbac_admin(request: Request, session: AsyncSession):
         return None
     if user is None or not user.is_active:
         return None
-    if normalize_role(user.role) != "admin":
+    if getattr(user, "deleted_at", None) is not None:
+        return None
+    if not is_admin_role(user.role):
         return None
     return user
 
@@ -186,21 +192,25 @@ async def require_admin(
     X-Admin-Token) or a real user session whose role is `admin`.
     Unauthenticated -> 401, authenticated but not an admin -> 403.
     """
-    if _is_admin_authenticated(request):
+    # A real user session wins over the shared legacy console session: the person is
+    # known, so least-privilege rules and audit entries use their actual role.
+    user = await _resolve_rbac_admin(request, session)
+    if user is None and _is_admin_authenticated(request):
         request.state.admin_identity = {"kind": "admin_session", "user_id": None, "role": "admin"}
         return
 
-    user = await _resolve_rbac_admin(request, session)
     if user is not None:
+        from app.services.permissions import normalize_role
+
         request.state.admin_identity = {
             "kind": "user_session",
             "user_id": user.id,
-            "role": "admin",
+            "role": normalize_role(user.role),
         }
         request.state.current_user = user
         return
 
-    from app.api.rbac_deps import normalize_role
+    from app.services.permissions import normalize_role
     from app.services.rbac import get_optional_user
 
     try:
@@ -1759,81 +1769,42 @@ async def update_admin_plan(plan_code: str, body: PlanUpdateBody) -> dict[str, o
 
 @protected_router.get("/users")
 async def list_admin_users(
+    request: Request,
     q: str | None = Query(None, max_length=64),
     plan: str | None = Query(None, max_length=32),
-    limit: int = Query(default=100, ge=1, le=500),
+    role: str | None = Query(None, max_length=32),
+    status: Literal["active", "inactive", "deleted", "all"] = Query("all"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    limit: int | None = Query(default=None, ge=1, le=500),
 ) -> dict[str, object]:
+    """User list with search, role/plan/status filters and pagination.
+
+    Delegates to `admin_user_service` so the admin UI and tests share one query path.
+    `limit` keeps the previous (unpaginated) caller signature working: it maps onto
+    `page_size` for page 1.
+    """
+    from app.services.admin_user_service import UserListQuery, actor_for_request, list_users
+
     async with async_session_factory() as session:
-        billing = await get_or_init_billing_settings(session)
-        query = select(User).order_by(User.created_at.desc()).limit(limit)
-        if q and q.strip():
-            term = f"%{q.strip()}%"
-            query = query.where(or_(User.phone_number.ilike(term), User.full_name.ilike(term)))
-        if plan and plan.strip() and plan != "all":
-            query = query.where(User.plan_code == plan.strip())
+        actor = await actor_for_request(request, session)
+        from app.services import permissions
 
-        users = list((await session.scalars(query)).all())
-        start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        today_rows = (
-            await session.execute(
-                select(TokenUsageLog.user_id, func.coalesce(func.sum(TokenUsageLog.total_tokens), 0))
-                .where(TokenUsageLog.created_at >= start_of_day)
-                .group_by(TokenUsageLog.user_id)
-            )
-        ).all()
-        today_by_user = {uid: int(total) for uid, total in today_rows}
-
-        total_users = int(await session.scalar(select(func.count()).select_from(User)) or 0)
-        active_users = int(
-            await session.scalar(select(func.count()).select_from(User).where(User.is_active.is_(True))) or 0
+        if not permissions.can_read_users(actor):
+            raise HTTPException(status_code=403, detail="دسترسی به فهرست کاربران مجاز نیست.")
+        effective_page_size = limit if limit is not None else page_size
+        effective_page = 1 if limit is not None else page
+        return await list_users(
+            session,
+            UserListQuery(
+                q=q,
+                role=role,
+                status=status,
+                plan=plan,
+                page=effective_page,
+                page_size=effective_page_size,
+            ),
         )
-        paid_users = int(
-            await session.scalar(
-                select(func.count()).select_from(User).where(User.plan_code.in_(["normal", "pro", "vip"]))
-            )
-            or 0
-        )
-        total_tokens_used = int(
-            await session.scalar(select(func.coalesce(func.sum(User.tokens_used_total), 0))) or 0
-        )
-        total_revenue_toman = int(
-            await session.scalar(
-                select(func.coalesce(func.sum(PaymentTransaction.amount_toman), 0)).where(
-                    PaymentTransaction.status == "paid",
-                    PaymentTransaction.provider != "admin_grant",
-                )
-            )
-            or 0
-        )
-        plans_list = await get_or_init_plans(session)
-        plan_storage = {p.code: int(p.storage_quota_bytes) for p in plans_list}
-        await session.commit()
-
-        return {
-            "summary": {
-                "total_users": total_users,
-                "active_users": active_users,
-                "paid_users": paid_users,
-                "total_tokens_used": total_tokens_used,
-                "total_used_value_toman": calculate_token_cost_toman(
-                    total_tokens_used, token_price_per_1k_toman=billing.token_price_per_1k_toman
-                ),
-                "total_revenue_toman": total_revenue_toman,
-            },
-            "users": [
-                serialize_user(
-                    u,
-                    today_tokens=today_by_user.get(u.id, 0),
-                    token_price_per_1k_toman=billing.token_price_per_1k_toman,
-                    storage_quota_bytes=(
-                        int(billing.starter_storage_bytes)
-                        if u.plan_code == "trial"
-                        else plan_storage.get(u.plan_code, int(billing.starter_storage_bytes))
-                    ),
-                )
-                for u in users
-            ],
-        }
 
 
 @protected_router.put("/users/{user_id}")
@@ -3138,7 +3109,7 @@ class QuotaPolicyBody(BaseModel):
 class AdminUserRoleBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    role: Literal["admin", "teacher", "student", "guardian"] | None = None
+    role: Literal["admin", "super_admin", "moderator", "teacher", "student", "guardian"] | None = None
     grade_level: int | None = Field(default=None, ge=1, le=12)
     major: str | None = Field(default=None, max_length=64)
     plan_id: int | None = Field(default=None, gt=0)
@@ -3507,38 +3478,6 @@ async def get_user_quota(
     snapshot = await get_quota_snapshot(session, user_id=user_id)
     await session.commit()
     return {"user_id": user_id, "quota": snapshot}
-
-
-@protected_router.put("/users/{user_id}/role")
-async def update_user_role(
-    user_id: str, body: AdminUserRoleBody, session: AsyncSession = Depends(get_session)
-) -> dict[str, object]:
-    """Admin-only RBAC editing: role, grade level, major, plan, activation."""
-    user = await session.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="کاربر پیدا نشد.")
-    if body.role is not None:
-        user.role = body.role
-    if body.grade_level is not None:
-        user.grade_level = body.grade_level
-    if body.major is not None:
-        user.major = body.major.strip() or None
-    if body.plan_id is not None:
-        user.plan_id = body.plan_id
-    if body.is_active is not None:
-        user.is_active = body.is_active
-    await session.commit()
-    await session.refresh(user)
-    return {
-        "user": {
-            "id": user.id,
-            "role": user.role,
-            "grade_level": user.grade_level,
-            "major": user.major,
-            "plan_id": user.plan_id,
-            "is_active": user.is_active,
-        }
-    }
 
 
 @protected_router.get("/audit-logs")

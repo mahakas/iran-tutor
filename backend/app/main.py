@@ -69,6 +69,20 @@ async def add_security_headers(request, call_next):  # type: ignore[no-untyped-d
     return response
 
 
+@app.middleware("http")
+async def csrf_protection(request, call_next):  # type: ignore[no-untyped-def]
+    """Double-submit CSRF check for cookie-authenticated mutations (see app.core.csrf)."""
+    from app.core.csrf import TOKEN_EXPOSING_PATHS, csrf_protection_middleware, ensure_csrf_cookie
+
+    response = await csrf_protection_middleware(request, call_next)
+    if request.method.upper() in {"GET", "HEAD"} and any(
+        request.url.path.endswith(path) for path in TOKEN_EXPOSING_PATHS
+    ):
+        token = ensure_csrf_cookie(request, response)
+        response.headers["X-CSRF-Token"] = token
+    return response
+
+
 @app.get("/health")
 async def health(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
     await session.execute(text("SELECT 1"))
@@ -92,6 +106,7 @@ async def system_status(session: AsyncSession = Depends(get_session)) -> dict[st
 
 from app.api.account import router as account_router  # noqa: E402
 from app.api.admin import router as admin_router  # noqa: E402
+from app.api.admin_users import router as admin_users_router  # noqa: E402
 from app.api.auth import router as auth_router  # noqa: E402
 from app.api.capabilities import admin_router as capabilities_admin_router  # noqa: E402
 from app.api.capabilities import router as capabilities_router  # noqa: E402
@@ -112,6 +127,7 @@ from app.api.tutor import router as tutor_router  # noqa: E402
 
 app.include_router(account_router)
 app.include_router(admin_router)
+app.include_router(admin_users_router)
 app.include_router(auth_router)
 app.include_router(curriculum_router)
 app.include_router(plans_router)

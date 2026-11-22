@@ -393,6 +393,26 @@ async def _ensure_sqlite_demo_columns(connection) -> None:
             await connection.execute(text("ALTER TABLE users ADD COLUMN major VARCHAR(64)"))
         if "plan_id" not in user_cols:
             await connection.execute(text("ALTER TABLE users ADD COLUMN plan_id INTEGER"))
+        # Phone/password auth + soft delete (hotfix 2026-11-22). Mirrors the Alembic
+        # migration so an existing local demo file keeps working without a reset.
+        user_auth_additions = {
+            "password_hash": "VARCHAR(255)",
+            "phone_verified_at": "DATETIME",
+            "last_password_change_at": "DATETIME",
+            "deleted_at": "DATETIME",
+            "deleted_by": "VARCHAR(128)",
+        }
+        for column, sql_type in user_auth_additions.items():
+            if column not in user_cols:
+                await connection.execute(text(f"ALTER TABLE users ADD COLUMN {column} {sql_type}"))
+    otp_cols = {
+        row[1]
+        for row in (await connection.execute(text("PRAGMA table_info(otp_codes)"))).fetchall()
+    }
+    if otp_cols and "purpose" not in otp_cols:
+        await connection.execute(
+            text("ALTER TABLE otp_codes ADD COLUMN purpose VARCHAR(24) NOT NULL DEFAULT 'login'")
+        )
 
 
 async def seed_database() -> None:
@@ -420,4 +440,10 @@ async def seed_database() -> None:
             major = await session.scalar(select(Major).where(Major.code == "math_physics"))
             if grade is not None and major is not None:
                 await _seed_demo_book(session, grade=grade, major=major)
+        await session.commit()
+        # Phase 4 (hotfix): environment-controlled development test account. No-op unless
+        # DEV_SEED_ENABLED=true, and refused outright in production.
+        from app.db.dev_seed import seed_development_account
+
+        await seed_development_account(session)
         await session.commit()

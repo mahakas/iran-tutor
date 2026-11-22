@@ -6,6 +6,8 @@ secrets still have their development values:
 * `ADMIN_PASSWORD` is a known-weak value, shorter than 12 characters, or a placeholder.
 * `SECRET_KEY` is missing, shorter than 32 characters, or a placeholder.
 * `DEMO_MODE` is enabled. Demo mode returns the SMS OTP code in API responses.
+* `DEV_SEED_ENABLED` / `DEV_SEED_ALLOW_WEAK_PASSWORD` are enabled. Those create and keep
+  the documented weak development test account.
 
 Outside production nothing is blocked; the admin password still logs a warning.
 """
@@ -42,6 +44,12 @@ def is_weak_secret_key(value: str | None) -> bool:
 
 def production_violations(settings: Any) -> list[str]:
     problems: list[str] = []
+    if bool(getattr(settings, "dev_seed_enabled", False)):
+        problems.append(
+            "DEV_SEED_ENABLED must be false in production (it creates a known test account)"
+        )
+    if bool(getattr(settings, "dev_seed_allow_weak_password", False)):
+        problems.append("DEV_SEED_ALLOW_WEAK_PASSWORD must be false in production")
     if bool(getattr(settings, "demo_mode", False)):
         problems.append("DEMO_MODE must be false in production (it exposes OTP codes in API responses)")
     if is_weak_admin_password(getattr(settings, "admin_password", None)):

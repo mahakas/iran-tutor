@@ -1,6 +1,7 @@
 "use client";
 
 import AdminSideNav, { type AdminNavKey } from "@/components/AdminSideNav";
+import AdminUsersPanel from "@/components/AdminUsersPanel";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -2310,6 +2311,12 @@ export default function AdminPage() {
                 </article>
               ))}
             </section>
+          </div>
+        )}
+
+        {adminTab === "users" && (
+          <div className="admin-users-shell">
+            <AdminUsersPanel authHeaders={authHeadersMemo} onUnauthorized={lockAdminPanel} />
           </div>
         )}
 

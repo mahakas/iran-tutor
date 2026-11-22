@@ -10,8 +10,16 @@ import {
   useState,
 } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { Check, LoaderCircle, LogOut, Phone, Send, X } from "lucide-react";
+import { LoaderCircle, LogOut, X } from "lucide-react";
+import AuthFlowModal from "@/components/AuthFlowModal";
 import { COPY } from "@/lib/i18n";
+import {
+  SESSION_EXPIRED_EVENT,
+  apiRequest,
+  clearCsrfMemo,
+  currentCsrfToken,
+  rememberCsrfToken,
+} from "@/lib/apiClient";
 import {
   applyPreferencesToDocument,
   DEFAULT_PREFERENCES,
@@ -80,7 +88,10 @@ type AppContextValue = {
   resetPreferences: (
     section: "all" | "general" | "appearance" | "notifications" | "privacy"
   ) => Promise<UserPreferences | null>;
-  openLoginModal: (notice?: string) => void;
+  openLoginModal: (
+    notice?: string,
+    mode?: "login" | "register" | "recover" | "code"
+  ) => void;
   requestLogout: () => void;
   performLogoutNow: () => Promise<void>;
 };
@@ -127,17 +138,10 @@ export default function AppProvider({ children }: { children: React.ReactNode })
   const [preferences, setPreferences] = useState<UserPreferences>(DEFAULT_PREFERENCES);
   const [systemIsDark, setSystemIsDark] = useState(false);
 
-  // Auth modal state
+  // Auth modal state (phone + password flow lives in AuthFlowModal)
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authStep, setAuthStep] = useState<"phone" | "otp">("phone");
-  const [phoneInput, setPhoneInput] = useState("");
-  const [fullNameInput, setFullNameInput] = useState("");
-  const [otpInput, setOtpInput] = useState("");
-  const [normalizedPhone, setNormalizedPhone] = useState("");
-  const [demoOtpHint, setDemoOtpHint] = useState<string | null>(null);
-  const [resendCooldown, setResendCooldown] = useState(0);
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authError, setAuthError] = useState("");
+  const [authInitialMode, setAuthInitialMode] = useState<"login" | "register" | "recover" | "code">("login");
+  const [authNotice, setAuthNotice] = useState("");
 
   // Logout confirmation dialog state
   const [logoutModalOpen, setLogoutModalOpen] = useState(false);
@@ -158,6 +162,7 @@ export default function AppProvider({ children }: { children: React.ReactNode })
 
   const setAuthSession = useCallback(
     (nextToken: string | null, nextUser: StudentUser | null) => {
+      if (!nextToken) clearCsrfMemo();
       tokenRef.current = nextToken;
       setToken(nextToken);
       storeUserToken(nextToken);
@@ -233,7 +238,9 @@ export default function AppProvider({ children }: { children: React.ReactNode })
       const payload = (await res.json()) as {
         authenticated?: boolean;
         user?: StudentUser | null;
+        csrf_token?: string;
       };
+      if (payload.csrf_token) rememberCsrfToken(payload.csrf_token);
       if (payload.authenticated && payload.user) {
         tokenRef.current = activeToken;
         setToken(activeToken);
@@ -276,14 +283,27 @@ export default function AppProvider({ children }: { children: React.ReactNode })
     return () => window.removeEventListener("pageshow", onPageShow);
   }, [refreshAccount]);
 
-  // OTP resend timer
+  // Session revocation from any AJAX call (401) or from another tab.
   useEffect(() => {
-    if (resendCooldown <= 0) return;
-    const timer = window.setInterval(() => {
-      setResendCooldown((prev) => (prev <= 1 ? 0 : prev - 1));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [resendCooldown]);
+    const onExpired = () => {
+      clearClientAuth();
+      clearCsrfMemo();
+      setAuthNotice("نشست شما منقضی شده است. لطفاً دوباره وارد شوید.");
+      setAuthInitialMode("login");
+      setAuthModalOpen(true);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === USER_TOKEN_KEY && !event.newValue) {
+        clearClientAuth();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [clearClientAuth]);
 
   const authFetch = useCallback(
     async (input: string, init?: RequestInit): Promise<Response> => {
@@ -292,14 +312,23 @@ export default function AppProvider({ children }: { children: React.ReactNode })
       for (const [k, v] of Object.entries(buildUserAuthHeaders(activeToken))) {
         if (!mergedHeaders.has(k)) mergedHeaders.set(k, v);
       }
+      // Cookie sessions are CSRF-checked; echo the token the API handed us.
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method !== "GET" && !mergedHeaders.has("X-CSRF-Token")) {
+        const csrfToken = currentCsrfToken();
+        if (csrfToken) mergedHeaders.set("X-CSRF-Token", csrfToken);
+      }
       const res = await fetch(input, {
         ...init,
         cache: "no-store",
         credentials: "same-origin",
         headers: mergedHeaders,
       });
+      const csrf = res.headers.get("X-CSRF-Token");
+      if (csrf) rememberCsrfToken(csrf);
       if (res.status === 401) {
         clearClientAuth();
+        clearCsrfMemo();
         if (pathname?.startsWith("/account") && pathname !== "/account/help") {
           router.replace("/");
         }
@@ -371,11 +400,9 @@ export default function AppProvider({ children }: { children: React.ReactNode })
     [authFetch]
   );
 
-  const openLoginModal = useCallback((notice?: string) => {
-    setAuthError(notice ?? "");
-    setAuthStep("phone");
-    setOtpInput("");
-    setDemoOtpHint(null);
+  const openLoginModal = useCallback((notice?: string, mode: "login" | "register" | "recover" | "code" = "login") => {
+    setAuthNotice(notice ?? "");
+    setAuthInitialMode(mode);
     setAuthModalOpen(true);
   }, []);
 
@@ -383,11 +410,11 @@ export default function AppProvider({ children }: { children: React.ReactNode })
     const activeToken = getActiveToken();
     setLogoutBusy(true);
     try {
-      await fetch("/api/v1/auth/logout", {
+      // Goes through the shared client so the CSRF token for cookie sessions is attached.
+      await apiRequest("/api/v1/auth/logout", {
         method: "POST",
-        cache: "no-store",
-        credentials: "same-origin",
         headers: buildUserAuthHeaders(activeToken),
+        fallbackMessage: "خروج از حساب انجام نشد.",
       });
     } catch {
       // proceed with client cleanup even if network fails
@@ -404,60 +431,6 @@ export default function AppProvider({ children }: { children: React.ReactNode })
   const requestLogout = useCallback(() => {
     setLogoutModalOpen(true);
   }, []);
-
-  const handleRequestOtp = async (event?: React.FormEvent) => {
-    event?.preventDefault();
-    setAuthError("");
-    setAuthBusy(true);
-    try {
-      const res = await fetch("/api/v1/auth/request-otp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone_number: phoneInput.trim() }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(errorMessage(payload, "ارسال کد تأیید انجام نشد."));
-      setNormalizedPhone(String(payload.phone_number ?? phoneInput.trim()));
-      setDemoOtpHint(typeof payload.demo_code === "string" ? payload.demo_code : null);
-      setResendCooldown(Number(payload.resend_after_seconds ?? 60));
-      setAuthStep("otp");
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : "خطا در ارسال کد پیامکی");
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
-  const handleVerifyOtp = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setAuthError("");
-    setAuthBusy(true);
-    try {
-      const res = await fetch("/api/v1/auth/verify-otp", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          phone_number: normalizedPhone || phoneInput.trim(),
-          code: otpInput.trim(),
-          full_name: fullNameInput.trim() || null,
-        }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(errorMessage(payload, "تأیید کد ناموفق بود."));
-      const nextToken = typeof payload.token === "string" ? payload.token : null;
-      const loggedUser = (payload.user ?? null) as StudentUser | null;
-      setAuthSession(nextToken, loggedUser);
-      setAuthModalOpen(false);
-      setOtpInput("");
-      setDemoOtpHint(null);
-      setAuthError("");
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : "کد تأیید نادرست است");
-    } finally {
-      setAuthBusy(false);
-    }
-  };
 
   const lang = preferences.general.language === "en" ? "en" : "fa";
   const copy = COPY[lang];
@@ -503,162 +476,17 @@ export default function AppProvider({ children }: { children: React.ReactNode })
     <AppContext.Provider value={contextValue}>
       {children}
 
-      {/* Global SMS OTP Login Modal */}
-      {authModalOpen && (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) setAuthModalOpen(false);
-          }}
-        >
-          <section
-            className="exam-setup-modal otp-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="global-otp-modal-title"
-          >
-            <button
-              className="modal-close icon-button"
-              onClick={() => setAuthModalOpen(false)}
-              aria-label="بستن"
-            >
-              <X size={18} />
-            </button>
-            <div className="modal-icon">
-              <Phone size={22} />
-            </div>
-            <span className="eyebrow">
-              {lang === "en" ? "SMS Verification" : "احراز هویت پیامکی"}
-            </span>
-            <h2 id="global-otp-modal-title">
-              {authStep === "phone"
-                ? lang === "en"
-                  ? "Sign in with mobile"
-                  : "ورود یا ثبت‌نام با موبایل"
-                : lang === "en"
-                ? "Verify SMS code"
-                : "تأیید کد پیامکی"}
-            </h2>
-            {authStep === "phone" ? (
-              <form onSubmit={handleRequestOtp}>
-                <p>
-                  {lang === "en"
-                    ? "Enter your Iranian mobile number to receive a 6-digit verification code."
-                    : "شماره موبایل خودت را وارد کن تا کد ۶ رقمی ورود برایت پیامک شود. کاربران تازه هدیهٔ شروع دریافت می‌کنند."}
-                </p>
-                <label className="form-field">
-                  <span>{lang === "en" ? "Mobile Number" : "شماره موبایل (ایران)"}</span>
-                  <input
-                    type="tel"
-                    dir="ltr"
-                    value={phoneInput}
-                    onChange={(event) => setPhoneInput(event.target.value)}
-                    placeholder="09123456789"
-                    autoFocus
-                    required
-                  />
-                </label>
-                <label className="form-field">
-                  <span>
-                    {lang === "en"
-                      ? "Full Name (optional for new accounts)"
-                      : "نام و نام خانوادگی (اختیاری — برای ثبت‌نام تازه)"}
-                  </span>
-                  <input
-                    type="text"
-                    value={fullNameInput}
-                    onChange={(event) => setFullNameInput(event.target.value)}
-                    placeholder={lang === "en" ? "e.g. Ali Rezaei" : "مثلاً علی رضایی"}
-                  />
-                </label>
-                {authError && <div className="inline-error">{authError}</div>}
-                <button className="primary-button modal-submit" type="submit" disabled={authBusy}>
-                  {authBusy ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />}
-                  {lang === "en" ? "Send verification code" : "ارسال کد تأیید پیامکی"}
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={handleVerifyOtp}>
-                <p>
-                  {lang === "en" ? (
-                    <>
-                      Enter the 6-digit code sent to <b dir="ltr">{normalizedPhone}</b>.
-                    </>
-                  ) : (
-                    <>
-                      کد ۶ رقمی ارسال‌شده به شمارهٔ <b dir="ltr">{normalizedPhone}</b> را وارد کن.
-                    </>
-                  )}
-                </p>
-                {demoOtpHint && (
-                  <div className="demo-otp-box">
-                    <div>
-                      <b>{lang === "en" ? "Demo Mode" : "حالت آزمایشی"}</b>
-                      <span>
-                        {lang === "en" ? "Code: " : "کد تأیید شما: "}
-                        <strong dir="ltr">{demoOtpHint}</strong>
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className="outline-button"
-                      onClick={() => setOtpInput(demoOtpHint)}
-                    >
-                      {lang === "en" ? "Auto-fill" : "درج خودکار کد"}
-                    </button>
-                  </div>
-                )}
-                <label className="form-field">
-                  <span>{lang === "en" ? "6-digit code" : "کد تأیید ۶ رقمی"}</span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    dir="ltr"
-                    maxLength={6}
-                    value={otpInput}
-                    onChange={(event) => setOtpInput(event.target.value)}
-                    placeholder="123456"
-                    autoFocus
-                    required
-                  />
-                </label>
-                {authError && <div className="inline-error">{authError}</div>}
-                <button className="primary-button modal-submit" type="submit" disabled={authBusy}>
-                  {authBusy ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}
-                  {lang === "en" ? "Verify & Sign In" : "تأیید و ورود به کلاس"}
-                </button>
-                <div className="otp-footer-actions">
-                  <button
-                    type="button"
-                    className="text-button"
-                    onClick={() => {
-                      setAuthStep("phone");
-                      setAuthError("");
-                    }}
-                  >
-                    {lang === "en" ? "Change number" : "تغییر شماره موبایل"}
-                  </button>
-                  <button
-                    type="button"
-                    className="text-button"
-                    disabled={resendCooldown > 0 || authBusy}
-                    onClick={() => void handleRequestOtp()}
-                  >
-                    {resendCooldown > 0
-                      ? lang === "en"
-                        ? `Resend (${resendCooldown}s)`
-                        : `ارسال مجدد (${resendCooldown} ثانیه)`
-                      : lang === "en"
-                      ? "Resend code"
-                      : "ارسال مجدد کد"}
-                  </button>
-                </div>
-              </form>
-            )}
-          </section>
-        </div>
-      )}
+      <AuthFlowModal
+        open={authModalOpen}
+        initialMode={authInitialMode}
+        notice={authNotice}
+        onClose={() => setAuthModalOpen(false)}
+        onAuthenticated={(nextToken, loggedUser) => {
+          setAuthSession(nextToken, loggedUser);
+          setAuthNotice("");
+          void refreshAccount();
+        }}
+      />
 
       {/* Global Log Out Confirmation Dialog */}
       {logoutModalOpen && (
