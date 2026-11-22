@@ -48,17 +48,16 @@ async def _create_curriculum(session: AsyncSession):
         max_grade=12,
         is_active=True,
     )
-    field = FieldOfStudy(
-        branch_id=1,
-        code="math_physics",
-        title="ریاضی‌فیزیک",
-        is_active=True,
-    )
     year = AcademicYear(code="1405", title="۱۴۰۵–۱۴۰۶", is_active=True)
     subject = Subject(code="physics", title="فیزیک", is_active=True)
     session.add_all([grade, branch, year, subject])
     await session.flush()
-    field.branch_id = branch.id
+    field = FieldOfStudy(
+        branch_id=branch.id,
+        code="math_physics",
+        title="ریاضی‌فیزیک",
+        is_active=True,
+    )
     session.add(field)
     await session.flush()
 
