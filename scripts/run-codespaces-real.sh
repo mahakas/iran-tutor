@@ -44,6 +44,22 @@ export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
 export VECTOR_BACKEND="${VECTOR_BACKEND:-qdrant}"
 export EMBEDDING_DIMENSION="${EMBEDDING_DIMENSION:-1536}"
 
+# Do not inherit an old Demo or legacy single-provider .env by accident.
+# Managed provider endpoints, keys and models are configured in the admin vault/routes.
+export LLM_BASE_URL=""
+export LLM_API_KEY=""
+export TUTOR_MODEL=""
+export VISION_MODEL_A=""
+export VISION_MODEL_B=""
+export VISION_MODEL_PRIMARY=""
+export SPEECH_TO_TEXT_MODEL=""
+export SPEECH_SYNTHESIS_MODEL=""
+export AUDIO_BASE_URL=""
+export AUDIO_API_KEY=""
+export EMBEDDING_BASE_URL=""
+export EMBEDDING_API_KEY=""
+export EMBEDDING_MODEL="${EMBEDDING_MODEL:-text-embedding-3-small}"
+
 cd "$ROOT"
 
 # Docker Compose reads the root .env. Keep it local and private; never commit it.
