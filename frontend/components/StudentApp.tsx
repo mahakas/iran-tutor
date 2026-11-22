@@ -82,19 +82,36 @@ function errorMessage(payload: unknown, fallback: string) {
 }
 
 function sourceText(source: Source, lang: "fa" | "en") {
-  // Chat sources show book and chapter only; printed pages stay in the structured
-  // fields and are used by the immersive reader for click-through.
   const title = source.book_title ?? (lang === "en" ? "Textbook" : "کتاب درسی");
   const bookLabel = source.grade_number
     ? `${title} (${lang === "en" ? "Grade" : "پایه"} ${source.grade_number})`
     : title;
+  const scopeLabels = [
+    ...(source.branch_titles ?? []),
+    ...(source.field_titles ?? []),
+  ];
+  const scopeLabel = scopeLabels.length
+    ? `${lang === "en" ? "Scope" : "شاخه/رشته"}: ${scopeLabels.join(lang === "en" ? ", " : "، ")}`
+    : null;
+  const editionLabels = [
+    source.academic_year_code
+      ? `${lang === "en" ? "Academic year" : "سال تحصیلی"} ${source.academic_year_code}`
+      : null,
+    source.edition_label,
+    source.print_year
+      ? `${lang === "en" ? "Print" : "چاپ"} ${source.print_year}`
+      : null,
+  ].filter(Boolean);
+  const editionLabel = editionLabels.length ? editionLabels.join(" · ") : null;
   const chapterLabel =
     source.chapter_number != null && source.chapter_title
       ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}: ${source.chapter_title}`
       : source.chapter_number != null
         ? `${lang === "en" ? "Ch." : "فصل"} ${source.chapter_number}`
         : source.chapter_title ?? null;
-  return [bookLabel, chapterLabel].filter(Boolean).join(lang === "en" ? " · " : "، ");
+  return [bookLabel, scopeLabel, editionLabel, chapterLabel]
+    .filter(Boolean)
+    .join(lang === "en" ? " · " : "، ");
 }
 
 function uniqueSourceTexts(sources: Source[], lang: "fa" | "en") {
