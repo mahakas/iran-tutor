@@ -29,6 +29,7 @@ class ExamSession(Base):
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     grade_number: Mapped[int] = mapped_column(Integer, nullable=False)
     major_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    branch_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     exam_type: Mapped[str] = mapped_column(String(32), nullable=False)
     time_limit_seconds: Mapped[int] = mapped_column(Integer, nullable=False)

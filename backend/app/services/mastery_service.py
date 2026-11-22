@@ -13,11 +13,25 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.curriculum import Book, BookPage, PageStatus
+from app.models.curriculum import (
+    AcademicYear,
+    Book,
+    BookCurriculumLink,
+    BookPage,
+    BookPageObjective,
+    BookStatus,
+    CurriculumUnit,
+    LearningEvidence,
+    LearningObjective,
+    ObjectivePrerequisite,
+    PageStatus,
+    Subject,
+)
 from app.models.phase5 import MasteryBookSettings, MasteryChapterProgress
+from app.services.curriculum_access import is_student_visible_book
 
 WEIGHTS: dict[str, float] = {"exam": 0.5, "flash": 0.3, "solve": 0.2}
 DEFAULT_THRESHOLD = 0.7
@@ -245,3 +259,358 @@ async def set_chapter_override(
     settings.chapter_overrides_json = overrides
     await session.flush()
     return settings
+
+
+QUALITATIVE_MASTERED_LEVELS = {"proficient", "advanced", "mastered"}
+QUALITATIVE_NEEDS_SUPPORT_LEVELS = {"needs_support", "not_observed"}
+
+
+def _evidence_progress(
+    rows: list[LearningEvidence],
+    *,
+    assessment_profile: str,
+    threshold: float,
+) -> dict[str, Any]:
+    ordered = sorted(rows, key=lambda item: item.observed_at, reverse=True)
+    latest_submission = ordered[0] if ordered else None
+    verified_rows = [row for row in ordered if getattr(row, "verification_status", "unverified") == "verified"]
+    latest = verified_rows[0] if verified_rows else latest_submission
+    level = None
+    if latest is not None:
+        level = latest.qualitative_level or (latest.rubric_json or {}).get("overall_level")
+
+    if not ordered:
+        status = "not_started"
+        score = None
+    elif not verified_rows:
+        # Student-submitted self-assessments and practical work cannot independently
+        # certify mastery. An authorized reviewer must verify the evidence first.
+        status = "submitted_for_review" if any(
+            getattr(row, "verification_status", "unverified") == "unverified" for row in ordered
+        ) else "needs_support"
+        score = None
+    elif assessment_profile in {"qualitative_descriptive", "performance"}:
+        if level in QUALITATIVE_MASTERED_LEVELS:
+            status = "mastered"
+        elif level in QUALITATIVE_NEEDS_SUPPORT_LEVELS:
+            status = "needs_support"
+        else:
+            status = "developing"
+        score = None
+    else:
+        scored = [float(row.score) for row in verified_rows if row.score is not None][:5]
+        score = round(sum(scored) / len(scored), 2) if scored else None
+        if score is None:
+            status = "developing"
+        elif score >= threshold:
+            status = "mastered"
+        else:
+            status = "developing"
+
+    return {
+        "status": status,
+        "score": score,
+        "qualitative_level": level,
+        "evidence_count": len(ordered),
+        "latest_evidence": (
+            {
+                "source_type": latest.source_type,
+                "score": latest.score,
+                "qualitative_level": level,
+                "feedback": latest.feedback,
+                "observed_at": latest.observed_at.isoformat() if latest.observed_at else None,
+            }
+            if latest is not None
+            else None
+        ),
+        "evidence": [
+            {
+                "id": row.id,
+                "source_type": row.source_type,
+                "score": row.score,
+                "qualitative_level": row.qualitative_level,
+                "verification_status": getattr(row, "verification_status", "unverified"),
+                "reviewed_at": row.reviewed_at.isoformat() if getattr(row, "reviewed_at", None) else None,
+                "rubric": dict(row.rubric_json or {}),
+                "feedback": row.feedback,
+                "observed_at": row.observed_at.isoformat() if row.observed_at else None,
+            }
+            for row in ordered[:8]
+        ],
+    }
+
+
+async def record_objective_evidence(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    objective_id: int,
+    source_type: str,
+    source_ref: str | None,
+    score: float | None,
+    qualitative_level: str | None,
+    rubric: dict[str, Any],
+    feedback: str | None,
+    book_id: int | None = None,
+    pdf_page_index: int | None = None,
+) -> LearningEvidence:
+    objective = await session.get(LearningObjective, objective_id)
+    if objective is None or not objective.is_active:
+        raise HTTPException(status_code=404, detail="هدف یادگیری یافت نشد.")
+    profile = objective.assessment_profile or "mixed"
+    if profile == "qualitative_descriptive" and qualitative_level is None:
+        raise HTTPException(status_code=422, detail="برای این هدف، سطح ارزیابی توصیفی لازم است.")
+    if profile == "performance" and qualitative_level is None and not rubric:
+        raise HTTPException(status_code=422, detail="برای هدف مهارتی، سطح یا روبرک عملکرد ثبت کنید.")
+    if profile == "written" and score is None:
+        raise HTTPException(status_code=422, detail="برای این هدف، نمرهٔ ارزیابی لازم است.")
+    if profile == "mixed" and score is None and qualitative_level is None and not rubric:
+        raise HTTPException(status_code=422, detail="حداقل یک شاهد کمی، توصیفی یا عملکردی لازم است.")
+
+    page_id = None
+    if book_id is not None:
+        book = await session.get(Book, book_id)
+        if not is_student_visible_book(book):
+            raise HTTPException(status_code=404, detail="کتاب آماده و منتشرشده یافت نشد.")
+        unit = await session.get(CurriculumUnit, objective.unit_id)
+        if unit is None or unit.grade_id != book.grade_id:
+            raise HTTPException(status_code=422, detail="هدف یادگیری با پایهٔ این کتاب سازگار نیست.")
+    if pdf_page_index is not None:
+        if book_id is None:
+            raise HTTPException(status_code=422, detail="برای ثبت شمارهٔ صفحه، شناسهٔ کتاب لازم است.")
+        page = await session.scalar(
+            select(BookPage).where(
+                BookPage.book_id == book_id,
+                BookPage.pdf_page_index == pdf_page_index,
+                BookPage.status == PageStatus.done,
+            )
+        )
+        if page is None:
+            raise HTTPException(status_code=404, detail="صفحهٔ تأییدشدهٔ کتاب یافت نشد.")
+        mapped_objectives = (
+            await session.scalars(
+                select(BookPageObjective.objective_id).where(BookPageObjective.book_page_id == page.id)
+            )
+        ).all()
+        if mapped_objectives and objective_id not in mapped_objectives:
+            raise HTTPException(status_code=422, detail="این هدف به صفحهٔ انتخاب‌شده متصل نیست.")
+        page_id = page.id
+
+    row = None
+    if source_ref:
+        row = await session.scalar(
+            select(LearningEvidence).where(
+                LearningEvidence.user_id == user_id,
+                LearningEvidence.objective_id == objective_id,
+                LearningEvidence.source_type == source_type,
+                LearningEvidence.source_ref == source_ref,
+            )
+        )
+    if row is None:
+        row = LearningEvidence(
+            user_id=user_id,
+            objective_id=objective_id,
+            source_type=source_type,
+            source_ref=source_ref,
+        )
+        session.add(row)
+    row.book_id = book_id
+    row.book_page_id = page_id
+    row.score = score
+    row.qualitative_level = qualitative_level
+    row.rubric_json = dict(rubric or {})
+    row.verification_status = "unverified"
+    row.reviewed_at = None
+    row.feedback = feedback
+    row.observed_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def objective_tree(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    book_id: int,
+) -> dict[str, Any]:
+    """Objective-level mastery, respecting academic-year scope and prerequisite edges."""
+    book = await session.get(Book, book_id)
+    if not is_student_visible_book(book):
+        raise HTTPException(status_code=404, detail="کتاب آماده و منتشرشده یافت نشد.")
+
+    year_code = None
+    if book.academic_year_id is not None:
+        year = await session.get(AcademicYear, book.academic_year_id)
+        year_code = year.code if year is not None else None
+    scope_condition = (
+        CurriculumUnit.scope_code.in_([year_code, "unspecified"])
+        if year_code
+        else CurriculumUnit.scope_code == "unspecified"
+    )
+    subject_ids = set(
+        (
+            await session.scalars(
+                select(BookCurriculumLink.subject_id).where(
+                    BookCurriculumLink.book_id == book_id,
+                    BookCurriculumLink.subject_id.is_not(None),
+                )
+            )
+        ).all()
+    )
+    mapped_objective_ids = set(
+        (
+            await session.scalars(
+                select(BookPageObjective.objective_id)
+                .join(BookPage, BookPageObjective.book_page_id == BookPage.id)
+                .join(LearningObjective, BookPageObjective.objective_id == LearningObjective.id)
+                .join(CurriculumUnit, LearningObjective.unit_id == CurriculumUnit.id)
+                .where(
+                    BookPage.book_id == book_id,
+                    BookPage.status == PageStatus.done,
+                    CurriculumUnit.grade_id == book.grade_id,
+                )
+            )
+        ).all()
+    )
+    relevance_terms = []
+    if subject_ids:
+        relevance_terms.append(CurriculumUnit.subject_id.in_(subject_ids))
+    if mapped_objective_ids:
+        relevance_terms.append(LearningObjective.id.in_(mapped_objective_ids))
+    if not relevance_terms:
+        return {
+            "book": {"id": book.id, "title": book.title},
+            "academic_year_code": year_code,
+            "threshold": None,
+            "mastered_count": 0,
+            "objectives": [],
+            "message": "برای این کتاب هنوز درس یا پیوند هدف یادگیری وارد نشده است.",
+        }
+
+    rows = (
+        await session.execute(
+            select(LearningObjective, CurriculumUnit, Subject)
+            .join(CurriculumUnit, LearningObjective.unit_id == CurriculumUnit.id)
+            .join(Subject, CurriculumUnit.subject_id == Subject.id)
+            .where(
+                CurriculumUnit.grade_id == book.grade_id,
+                CurriculumUnit.is_active.is_(True),
+                LearningObjective.is_active.is_(True),
+                scope_condition,
+                or_(*relevance_terms),
+            )
+            .order_by(Subject.title, CurriculumUnit.sort_order, LearningObjective.code)
+        )
+    ).all()
+    objectives = [objective for objective, _unit, _subject in rows]
+    objective_ids = [objective.id for objective in objectives]
+    if not objective_ids:
+        return {
+            "book": {"id": book.id, "title": book.title},
+            "academic_year_code": year_code,
+            "threshold": None,
+            "mastered_count": 0,
+            "objectives": [],
+        }
+
+    prereq_rows = (
+        await session.execute(
+            select(
+                ObjectivePrerequisite.objective_id,
+                LearningObjective.id,
+                LearningObjective.code,
+                LearningObjective.title,
+                LearningObjective.assessment_profile,
+            )
+            .join(LearningObjective, ObjectivePrerequisite.prerequisite_id == LearningObjective.id)
+            .join(CurriculumUnit, LearningObjective.unit_id == CurriculumUnit.id)
+            .where(
+                ObjectivePrerequisite.objective_id.in_(objective_ids),
+                CurriculumUnit.grade_id == book.grade_id,
+                LearningObjective.is_active.is_(True),
+                scope_condition,
+            )
+        )
+    ).all()
+    prerequisite_ids = {row[1] for row in prereq_rows}
+    all_evidence_ids = set(objective_ids) | prerequisite_ids
+    evidence_rows = (
+        await session.scalars(
+            select(LearningEvidence)
+            .where(
+                LearningEvidence.user_id == user_id,
+                LearningEvidence.objective_id.in_(all_evidence_ids),
+            )
+            .order_by(LearningEvidence.observed_at.desc(), LearningEvidence.id.desc())
+        )
+    ).all()
+    evidence_by_objective: dict[int, list[LearningEvidence]] = {}
+    for evidence in evidence_rows:
+        evidence_by_objective.setdefault(evidence.objective_id, []).append(evidence)
+
+    settings = await get_settings(session, book_id)
+    threshold = float(settings.threshold) * 100
+    progress_by_id = {
+        objective_id: _evidence_progress(
+            evidence_by_objective.get(objective_id, []),
+            assessment_profile=next(
+                (objective.assessment_profile for objective in objectives if objective.id == objective_id),
+                profile_by_id.get(objective_id, "mixed"),
+            ),
+            threshold=threshold,
+        )
+        for objective_id in all_evidence_ids
+    }
+    titles_by_id = {row[1]: {"code": row[2], "title": row[3]} for row in prereq_rows}
+    profile_by_id = {row[1]: row[4] for row in prereq_rows}
+    prerequisites_by_objective: dict[int, list[int]] = {}
+    for objective_id, prerequisite_id, _code, _title in prereq_rows:
+        prerequisites_by_objective.setdefault(objective_id, []).append(prerequisite_id)
+
+    nodes: list[dict[str, Any]] = []
+    for objective, unit, subject in rows:
+        progress = progress_by_id[objective.id]
+        prerequisite_items = [
+            {
+                **titles_by_id[prerequisite_id],
+                "status": progress_by_id.get(
+                    prerequisite_id,
+                    {"status": "not_started"},
+                )["status"],
+            }
+            for prerequisite_id in prerequisites_by_objective.get(objective.id, [])
+        ]
+        prerequisite_blocked = any(
+            item["status"] != "mastered" for item in prerequisite_items
+        )
+        status = progress["status"]
+        if prerequisite_blocked and status != "mastered":
+            status = "locked"
+        nodes.append(
+            {
+                "id": objective.id,
+                "code": objective.code,
+                "title": objective.title,
+                "description": objective.description,
+                "competency_type": objective.competency_type,
+                "assessment_profile": objective.assessment_profile,
+                "unit": {"id": unit.id, "code": unit.code, "title": unit.title, "type": unit.unit_type},
+                "subject": {"code": subject.code, "title": subject.title},
+                "status": status,
+                "score": progress["score"],
+                "qualitative_level": progress["qualitative_level"],
+                "evidence_count": progress["evidence_count"],
+                "latest_evidence": progress["latest_evidence"],
+                "evidence": progress["evidence"],
+                "prerequisites": prerequisite_items,
+            }
+        )
+
+    return {
+        "book": {"id": book.id, "title": book.title},
+        "academic_year_code": year_code,
+        "threshold": threshold,
+        "mastered_count": sum(1 for node in nodes if node["status"] == "mastered"),
+        "objectives": nodes,
+    }

@@ -30,6 +30,7 @@ from app.services import (
     capability_service,
     kb_ingestion_service,
     learning_blocks,
+    retrieval_service,
     skill_seed,
 )
 
@@ -440,6 +441,81 @@ async def _seed_book(session: AsyncSession, pdf_path: Path, pages: int) -> Book:
     await session.commit()
     await session.refresh(book)
     return book
+
+
+@pytest.mark.asyncio
+async def test_qdrant_hits_must_match_current_approved_page_snapshot(phase2_env, tmp_path, monkeypatch):
+    from app.services.retrieval_service import TextbookScope, page_embedding_text
+
+    monkeypatch.setattr(retrieval_service, "async_session_factory", phase2_env)
+    pdf = tmp_path / "book.pdf"
+    _make_pdf_with_image(pdf)
+
+    async with phase2_env() as session:
+        book = await _seed_book(session, pdf, pages=1)
+        book_id = book.id
+        grade = await session.get(Grade, book.grade_id)
+        major = await session.get(Major, book.major_id) if book.major_id else None
+        scope = TextbookScope(
+            book_id=book.id,
+            grade_number=grade.number,
+            major_code=major.code if major else "general",
+        )
+
+    indexed_text = page_embedding_text("متن", [])
+    point = SimpleNamespace(
+        payload={
+            "book_id": book_id,
+            "pdf_page_index": 1,
+            "full_text": indexed_text,
+            "embedding_model": "test-embedding",
+        },
+        score=0.91,
+    )
+    accepted = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="test-embedding"
+    )
+    assert len(accepted) == 1
+    assert accepted[0]["full_text"] == "متن"
+    assert accepted[0]["printed_page_number"] == 10
+
+    # An older vector payload must not serve content after a page edit.
+    async with phase2_env() as session:
+        page = await session.scalar(
+            select(BookPage).where(BookPage.book_id == book_id, BookPage.pdf_page_index == 1)
+        )
+        page.markdown_content = "متن جدید"
+        await session.commit()
+    stale = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="test-embedding"
+    )
+    assert stale == []
+
+    # Once re-indexed, the same page is usable again with current database content.
+    point.payload["full_text"] = page_embedding_text("متن جدید", [])
+    refreshed = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="test-embedding"
+    )
+    assert len(refreshed) == 1
+    assert refreshed[0]["full_text"] == "متن جدید"
+
+    # Vectors built by another embedding model are not compared with this query.
+    wrong_model = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="different-model"
+    )
+    assert wrong_model == []
+
+    # Approval status is checked independently from text equality.
+    async with phase2_env() as session:
+        page = await session.scalar(
+            select(BookPage).where(BookPage.book_id == book_id, BookPage.pdf_page_index == 1)
+        )
+        page.status = PageStatus.needs_review
+        await session.commit()
+    unapproved = await retrieval_service._filter_qdrant_points(
+        [point], scopes=[scope], expected_embedding_model="test-embedding"
+    )
+    assert unapproved == []
 
 
 @pytest.mark.asyncio

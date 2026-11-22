@@ -271,8 +271,10 @@ async def test_create_exam_falls_back_to_approved_book_pages_when_search_is_empt
             ]
         }
 
+    quiz_generation_calls = 0
+
     async def fake_complete_json_gateway(*, ctx, messages, model=None, session=None, **kwargs):
-        # Phase 5: generation and the Validator Gate both route through capability_runtime -> gateway.
+        # Generation and the Validator Gate both route through the shared gateway.
         if ctx.feature_key == "quiz_validator":
             return SimpleNamespace(
                 content={
@@ -286,7 +288,14 @@ async def test_create_exam_falls_back_to_approved_book_pages_when_search_is_empt
             )
         assert ctx.feature_key == "quiz"
         assert ctx.textbook_strict is True
-        return SimpleNamespace(content=await fake_complete_json(model, messages), audit_id="audit-quiz")
+        nonlocal quiz_generation_calls
+        quiz_generation_calls += 1
+        if quiz_generation_calls == 1:
+            return SimpleNamespace(content={"questions": "malformed"}, audit_id="audit-quiz-invalid")
+        return SimpleNamespace(
+            content=await fake_complete_json(model, messages),
+            audit_id="audit-quiz-repaired",
+        )
 
     from app.services import capability_runtime, quiz_validator
 
@@ -356,6 +365,7 @@ async def test_create_exam_falls_back_to_approved_book_pages_when_search_is_empt
     )
     assert len(exam.questions) == 3
     assert exam.questions[0]["source"]["book_title"] == "فیزیک ۳"
+    assert quiz_generation_calls == 2  # one malformed response plus one repair pass
 
     empty_session = FakeSession([])
     with pytest.raises(LookupError, match="no approved textbook pages"):

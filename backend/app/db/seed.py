@@ -13,7 +13,18 @@ from app.core.config import BACKEND_DIR, get_settings
 from app.db.base import Base
 from app.db.session import async_session_factory, engine
 from app.models.auth import BillingSettings, Plan
-from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.curriculum import (
+    Book,
+    BookCurriculumLink,
+    BookPage,
+    BookStatus,
+    EducationBranch,
+    EducationCycle,
+    FieldOfStudy,
+    Grade,
+    Major,
+    PageStatus,
+)
 
 GRADE_TITLES: dict[int, str] = {
     1: "اول دبستان",
@@ -119,6 +130,76 @@ async def seed_majors(session: AsyncSession) -> None:
             session.add(Major(title=title, code=code))
 
 
+async def seed_curriculum_taxonomy(session: AsyncSession) -> None:
+    """Seed only stable K-12 structure; year-specific subjects/fields are imported separately."""
+    cycle_specs = [
+        ("primary", "ابتدایی", 1),
+        ("lower_secondary", "متوسطهٔ اول", 2),
+        ("upper_secondary", "متوسطهٔ دوم", 3),
+    ]
+    branch_specs = [
+        ("theoretical", "نظری", 1),
+        ("technical_vocational", "فنی‌وحرفه‌ای", 2),
+        ("kar_danesh", "کاردانش", 3),
+    ]
+
+    cycles_by_code = {
+        item.code: item
+        for item in (await session.scalars(select(EducationCycle))).all()
+    }
+    for code, title, order in cycle_specs:
+        if code not in cycles_by_code:
+            item = EducationCycle(code=code, title=title, sort_order=order)
+            session.add(item)
+            cycles_by_code[code] = item
+    branches_by_code = {
+        item.code: item
+        for item in (await session.scalars(select(EducationBranch))).all()
+    }
+    for code, title, order in branch_specs:
+        if code not in branches_by_code:
+            item = EducationBranch(
+                code=code,
+                title=title,
+                min_grade=10,
+                max_grade=12,
+                sort_order=order,
+                is_active=True,
+            )
+            session.add(item)
+            branches_by_code[code] = item
+    await session.flush()
+
+    theoretical = branches_by_code["theoretical"]
+    existing_fields = set((await session.scalars(select(FieldOfStudy.code))).all())
+    legacy_majors = (await session.scalars(select(Major).order_by(Major.id))).all()
+    field_specs = [(major.code, major.title) for major in legacy_majors]
+    field_specs.append(("islamic_studies", "علوم و معارف اسلامی"))
+    for sort_order, (code, title) in enumerate(field_specs, start=1):
+        if code not in existing_fields:
+            session.add(
+                FieldOfStudy(
+                    branch_id=theoretical.id,
+                    code=code,
+                    title=title,
+                    sort_order=sort_order,
+                    is_active=True,
+                )
+            )
+    await session.flush()
+
+    cycle_for_grade = {
+        **{n: cycles_by_code["primary"] for n in range(1, 7)},
+        **{n: cycles_by_code["lower_secondary"] for n in range(7, 10)},
+        **{n: cycles_by_code["upper_secondary"] for n in range(10, 13)},
+    }
+    grades = (await session.scalars(select(Grade))).all()
+    for grade in grades:
+        expected_cycle = cycle_for_grade.get(grade.number)
+        if expected_cycle is not None:
+            grade.cycle_id = expected_cycle.id
+
+
 DEMO_BOOK_TITLE = "فیزیک ۳ — کتاب آزمایشی"
 DEMO_PAGES = [
     {
@@ -197,9 +278,21 @@ async def _seed_demo_book(session: AsyncSession, *, grade: Grade, major: Major) 
         pdf_file_path=pdf_path,
         total_pdf_pages=len(DEMO_PAGES),
         status=BookStatus.ready,
+        catalog_status="demo",
     )
     session.add(book)
     await session.flush()
+    field = await session.scalar(select(FieldOfStudy).where(FieldOfStudy.code == "math_physics"))
+    branch = await session.scalar(select(EducationBranch).where(EducationBranch.code == "theoretical"))
+    if field is not None and branch is not None:
+        session.add(
+            BookCurriculumLink(
+                book_id=book.id,
+                branch_id=branch.id,
+                field_of_study_id=field.id,
+                scope_code="field:math_physics",
+            )
+        )
     for index, page_data in enumerate(DEMO_PAGES, start=1):
         session.add(
             BookPage(
@@ -234,6 +327,43 @@ async def _ensure_sqlite_demo_columns(connection) -> None:
         await connection.execute(
             text("ALTER TABLE billing_settings ADD COLUMN system_config JSON NOT NULL DEFAULT '{}'")
         )
+    grade_cols = {
+        row[1]
+        for row in (await connection.execute(text("PRAGMA table_info(grades)"))).fetchall()
+    }
+    if grade_cols and "cycle_id" not in grade_cols:
+        await connection.execute(text("ALTER TABLE grades ADD COLUMN cycle_id INTEGER"))
+
+    book_cols = {
+        row[1]
+        for row in (await connection.execute(text("PRAGMA table_info(books)"))).fetchall()
+    }
+    book_additions = {
+        "academic_year_id": "INTEGER",
+        "edition_label": "VARCHAR(80)",
+        "print_year": "INTEGER",
+        "publisher": "VARCHAR(180)",
+        "official_source_url": "VARCHAR(1024)",
+        "source_checksum": "VARCHAR(128)",
+        "catalog_status": "VARCHAR(32) NOT NULL DEFAULT 'legacy_unverified'",
+        "approved_at": "DATETIME",
+    }
+    for column, sql_type in book_additions.items():
+        if book_cols and column not in book_cols:
+            await connection.execute(text(f"ALTER TABLE books ADD COLUMN {column} {sql_type}"))
+
+    for table_name in ("chat_sessions", "exam_sessions"):
+        columns = {
+            row[1]
+            for row in (
+                await connection.execute(text(f"PRAGMA table_info({table_name})"))
+            ).fetchall()
+        }
+        if columns and "branch_code" not in columns:
+            await connection.execute(
+                text(f"ALTER TABLE {table_name} ADD COLUMN branch_code VARCHAR(64)")
+            )
+
     page_cols = {
         row[1]
         for row in (await connection.execute(text("PRAGMA table_info(book_pages)"))).fetchall()
@@ -266,6 +396,7 @@ async def seed_database() -> None:
     async with async_session_factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await seed_curriculum_taxonomy(session)
         await seed_plans(session)
         await seed_billing_settings(session)
         # Phase 2: capability registry + skills (idempotent, admin-safe).

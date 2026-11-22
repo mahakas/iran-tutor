@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -16,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import require_student
 from app.db.session import get_session
 from app.models.auth import User
+from app.models.curriculum import Book
+from app.services.curriculum_access import is_student_visible_book
 from app.services import deep_solve_service as ds
 from app.services import immersive_service as imm
 from app.services import mastery_service
@@ -27,6 +30,18 @@ router = APIRouter(tags=["phase5"])
 
 class AnswerBody(BaseModel):
     choice: str = Field(min_length=1, max_length=1)
+
+
+class LearningEvidenceBody(BaseModel):
+    objective_id: int = Field(gt=0)
+    book_id: int | None = Field(default=None, gt=0)
+    pdf_page_index: int | None = Field(default=None, ge=0)
+    source_type: Literal["self_assessment", "performance_task", "reading"]
+    source_ref: str | None = Field(default=None, max_length=128)
+    score: float | None = Field(default=None, ge=0, le=100)
+    qualitative_level: Literal["needs_support", "developing", "proficient", "advanced", "not_observed"] | None = None
+    rubric: dict[str, Any] = Field(default_factory=dict)
+    feedback: str | None = Field(default=None, max_length=4000)
 
 
 class DeepSolveCreateBody(BaseModel):
@@ -105,6 +120,48 @@ async def my_mastery_path(
     return await mastery_service.book_tree(session, user_id=current_user.id, book_id=book_id)
 
 
+
+@router.get("/api/v1/mastery/books/{book_id}/objectives")
+async def my_objective_mastery_path(
+    book_id: int,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    await check_capability_access(session, "mastery_path", current_user)
+    return await mastery_service.objective_tree(session, user_id=current_user.id, book_id=book_id)
+
+
+@router.post("/api/v1/mastery/evidence", status_code=201)
+async def record_mastery_evidence(
+    body: LearningEvidenceBody,
+    current_user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    await check_capability_access(session, "mastery_path", current_user)
+    row = await mastery_service.record_objective_evidence(
+        session,
+        user_id=current_user.id,
+        objective_id=body.objective_id,
+        source_type=body.source_type,
+        source_ref=body.source_ref,
+        score=body.score,
+        qualitative_level=body.qualitative_level,
+        rubric=body.rubric,
+        feedback=body.feedback,
+        book_id=body.book_id,
+        pdf_page_index=body.pdf_page_index,
+    )
+    return {
+        "id": row.id,
+        "objective_id": row.objective_id,
+        "book_id": row.book_id,
+        "source_type": row.source_type,
+        "score": row.score,
+        "qualitative_level": row.qualitative_level,
+        "observed_at": row.observed_at.isoformat() if row.observed_at else None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Deep Solve
 # ---------------------------------------------------------------------------
@@ -115,6 +172,10 @@ async def create_deep_solve(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     await check_capability_access(session, "deep_solve", current_user)
+    if body.book_id is not None:
+        book = await session.get(Book, body.book_id)
+        if not is_student_visible_book(book):
+            raise HTTPException(status_code=404, detail="کتاب رسمی و منتشرشده یافت نشد.")
     row = await ds.create_session(
         session,
         current_user,

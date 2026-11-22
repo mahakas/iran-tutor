@@ -102,6 +102,7 @@ class AskRequest(BaseModel):
     # Single-book scope (Phase 1-3). Required unless `grade_numbers` is set.
     grade_number: int | None = Field(default=None, ge=1, le=12)
     major_code: str | None = Field(default=None, max_length=64)
+    branch_code: str | None = Field(default=None, max_length=64)
     book_id: int | None = Field(default=None, gt=0)
     top_k: int = Field(default=5, ge=1, le=20)
     mode: TutorMode = "tutor"
@@ -128,6 +129,7 @@ class CreateChatSessionRequest(BaseModel):
     book_id: int = Field(gt=0)
     grade_number: int = Field(ge=1, le=12)
     major_code: str | None = Field(default=None, max_length=64)
+    branch_code: str | None = Field(default=None, max_length=64)
     mode: TutorMode = "tutor"
     title: str = Field(min_length=1, max_length=255)
     messages: list[ChatMessageItem] = Field(min_length=1, max_length=200)
@@ -135,6 +137,7 @@ class CreateChatSessionRequest(BaseModel):
 
 class UpdateChatSessionRequest(BaseModel):
     mode: TutorMode | None = None
+    branch_code: str | None = Field(default=None, max_length=64)
     title: str | None = Field(default=None, min_length=1, max_length=255)
     messages: list[ChatMessageItem] = Field(min_length=1, max_length=200)
 
@@ -158,6 +161,7 @@ def _serialize_chat_summary(
         "book_title": book_title,
         "grade_number": chat.grade_number,
         "major_code": chat.major_code,
+        "branch_code": getattr(chat, "branch_code", None),
         "mode": chat.mode,
         "message_count": len(chat.messages or []),
         "created_at": _utc_iso(chat.created_at),
@@ -293,6 +297,7 @@ async def _resolve_request_scope(
         book_id=body.book_id,
         grade_number=body.grade_number,
         major_code=body.major_code,
+        branch_code=body.branch_code,
     )
     return book, grade.number, major_code, None, None
 
@@ -378,6 +383,7 @@ async def ask_tutor_with_image(
     grade_number: int = Form(...),
     book_id: int = Form(...),
     major_code: str | None = Form(None),
+    branch_code: str | None = Form(None),
     top_k: int = Form(5),
     mode: TutorMode = Form("tutor"),
     chat_session_id: str | None = Form(None),
@@ -391,6 +397,7 @@ async def ask_tutor_with_image(
         book_id=book_id,
         grade_number=grade_number,
         major_code=major_code,
+        branch_code=branch_code,
     )
     await check_capability_access(session, "multimodal", current_user)
     await enforce_ai_quota(session, user=current_user, feature_key="vision_ocr")
@@ -462,6 +469,7 @@ async def ask_tutor_with_audio(
         book_id=book_id,
         grade_number=grade_number,
         major_code=major_code,
+        branch_code=branch_code,
     )
     await check_capability_access(session, "multimodal", current_user)
     await enforce_ai_quota(session, user=current_user, feature_key="stt")
@@ -622,6 +630,7 @@ async def create_chat_session(
         book_id=body.book_id,
         grade_number=body.grade_number,
         major_code=body.major_code,
+        branch_code=body.branch_code,
     )
     now = datetime.now(timezone.utc)
     chat = ChatSession(
@@ -629,6 +638,7 @@ async def create_chat_session(
         user_id=current_user.id,
         grade_number=grade.number,
         major_code=major_code or "general",
+        branch_code=body.branch_code,
         mode=body.mode,
         title=body.title.strip()[:255] or "گفت‌وگو با معلم",
         messages=[item.model_dump() for item in body.messages],
@@ -692,6 +702,8 @@ async def update_chat_session(
         chat.title = body.title.strip()[:255] or chat.title
     if body.mode is not None:
         chat.mode = body.mode
+    if body.branch_code is not None:
+        chat.branch_code = body.branch_code
     chat.messages = [item.model_dump() for item in body.messages]
     chat.updated_at = datetime.now(timezone.utc)
     await session.commit()

@@ -18,6 +18,8 @@ export default function MasteryWorkspace() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    setTree(null);
+    setError(null);
     if (!bookId) return;
     let cancelled = false;
     (async () => {

@@ -7,8 +7,9 @@ Design
   loses text.
 - Buffer backend: Redis when `REDIS_URL` is reachable (works across workers),
   otherwise an in-process store (single worker, tests, demo).
-- The gateway is non-streaming, so the full answer is produced first and then
-  emitted in small chunks. Stop cancels the task and sets a flag.
+- The model provider streams deltas into the buffer while it generates. The runner
+  coalesces small deltas for efficient SSE delivery. Stop cancels the live provider
+  request and sets a flag.
 - No orphan rows: the generation runs in one DB transaction. Gateway audit rows
   and quota counters are flushed inside it, but committed only after the stream
   finishes. A stopped or failed run is rolled back and writes nothing.
@@ -269,8 +270,15 @@ async def _check_stop(store: StreamStore, stream_id: str) -> None:
 
 
 async def _run_generation(stream_id: str, params: StreamParams) -> None:
+    from app.models.auth import User
+    from app.services.capability_service import check_capability_access
     from app.services.intent_router import route_intent
-    from app.services.tutor_service import answer_from_textbook
+    from app.services.quota_service import enforce_ai_quota
+    from app.services.tutor_service import (
+        MODE_CAPABILITY_KEYS,
+        MODE_FEATURE_KEYS,
+        answer_from_textbook,
+    )
     from app.services.tutor_turns import finish_turn_success
 
     store = await get_stream_store()
@@ -287,7 +295,37 @@ async def _run_generation(stream_id: str, params: StreamParams) -> None:
                         db_session=db,
                     )
                     mode = decision.mode
+                    # The HTTP entrypoint can only pre-check Chat before routing.
+                    # Re-check the selected non-chat capability and its own quota
+                    # before any Solve/Quiz work is allowed to run in the background.
+                    if mode != "tutor":
+                        user = await db.get(User, params.user_id)
+                        if user is None:
+                            raise RuntimeError("student account is no longer available")
+                        await check_capability_access(
+                            db, MODE_CAPABILITY_KEYS.get(mode, "chat"), user
+                        )
+                        await enforce_ai_quota(
+                            db,
+                            user=user,
+                            feature_key=MODE_FEATURE_KEYS.get(mode, "chat"),
+                        )
                 await _check_stop(store, stream_id)
+
+                pending_text = ""
+
+                async def publish_delta(delta: str) -> None:
+                    nonlocal pending_text
+                    if not delta:
+                        return
+                    await _check_stop(store, stream_id)
+                    pending_text += delta
+                    while len(pending_text) >= CHUNK_CHARS:
+                        chunk = pending_text[:CHUNK_CHARS]
+                        pending_text = pending_text[CHUNK_CHARS:]
+                        await store.append(stream_id, chunk)
+                        if CHUNK_DELAY_SECONDS > 0:
+                            await asyncio.sleep(CHUNK_DELAY_SECONDS)
 
                 with track_token_usage() as usage:
                     result = await answer_from_textbook(
@@ -302,17 +340,16 @@ async def _run_generation(stream_id: str, params: StreamParams) -> None:
                         db_session=db,
                         grade_numbers=params.grade_numbers,
                         book_ids=params.book_ids,
+                        on_chunk=publish_delta,
                     )
                 result["mode"] = mode
                 if decision is not None:
                     result["router"] = decision.to_payload()
 
-                # Emit chunks; a stop here rolls back everything flushed so far.
-                answer = str(result.get("answer") or "")
-                for start in range(0, len(answer), CHUNK_CHARS):
-                    await _check_stop(store, stream_id)
-                    await store.append(stream_id, answer[start : start + CHUNK_CHARS])
-                    await asyncio.sleep(CHUNK_DELAY_SECONDS)
+                # Flush the final partial chunk only after generation completed.
+                await _check_stop(store, stream_id)
+                if pending_text:
+                    await store.append(stream_id, pending_text)
                 await _check_stop(store, stream_id)
 
                 # Persist: usage + audit (already flushed) + L1 trace, then mark done.

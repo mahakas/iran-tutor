@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from app.core.config import get_settings
-from app.services.ai_gateway import CallContext, complete_text_via_gateway
+from app.services.ai_gateway import CallContext, complete_text_via_gateway, stream_text_via_gateway
 from app.services.multi_grade_rag import search_multi_grade
 from app.services.retrieval_service import search_textbook
 
@@ -150,6 +150,7 @@ async def answer_from_textbook(
     db_session: Any | None = None,
     grade_numbers: list[int] | None = None,
     book_ids: list[int] | None = None,
+    on_chunk: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Retrieve book evidence, answer only from it, and return server-owned citations.
 
@@ -180,8 +181,11 @@ async def answer_from_textbook(
         scope_count = 1
         expanded_count = 0
     if not pages:
+        answer = "در صفحه‌های تأییدشدهٔ این کتاب، منبع کافی برای پاسخ مطمئن پیدا نکردم. لطفاً موضوع یا شمارهٔ صفحه را دقیق‌تر بگو."
+        if on_chunk is not None:
+            await on_chunk(answer)
         return {
-            "answer": "در صفحه‌های تأییدشدهٔ این کتاب، منبع کافی برای پاسخ مطمئن پیدا نکردم. لطفاً موضوع یا شمارهٔ صفحه را دقیق‌تر بگو.",
+            "answer": answer,
             "sources": [],
             "retrieved_count": 0,
             "scope_count": scope_count,
@@ -198,6 +202,7 @@ async def answer_from_textbook(
         db_session=db_session,
         scope_count=scope_count,
         expanded_count=expanded_count,
+        on_chunk=on_chunk,
     )
 
 
@@ -213,15 +218,19 @@ async def answer_grounded(
     db_session: Any | None = None,
     scope_count: int = 1,
     expanded_count: int = 0,
+    on_chunk: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
-    """Answer from already-retrieved pages (shared by sync and streaming paths)."""
+    """Answer from retrieved pages; optionally publish model text as it arrives."""
     from app.services.learner_memory_service import build_memory_context
 
     retrieved_count = len(pages)
     context = _format_context(pages)
     if not context:
+        answer = "صفحه‌های مرتبط پیدا شدند، اما محتوای قابل‌استفاده‌ای برای پاسخ در آن‌ها ثبت نشده است."
+        if on_chunk is not None:
+            await on_chunk(answer)
         return {
-            "answer": "صفحه‌های مرتبط پیدا شدند، اما محتوای قابل‌استفاده‌ای برای پاسخ در آن‌ها ثبت نشده است.",
+            "answer": answer,
             "sources": [],
             "retrieved_count": retrieved_count,
             "scope_count": scope_count,
@@ -267,18 +276,28 @@ async def answer_grounded(
         citations=pages,
         rag_hit_count=retrieved_count,
     )
-    gateway_result = await complete_text_via_gateway(
-        ctx=call_ctx,
-        messages=build_tutor_messages(
-            query=query,
-            grade_number=grade_number,
-            context=context,
-            mode=mode,
-            system_prompt_override=system_prompt_override,
-        ),
-        model=settings.tutor_model,
-        session=db_session,
+    messages = build_tutor_messages(
+        query=query,
+        grade_number=grade_number,
+        context=context,
+        mode=mode,
+        system_prompt_override=system_prompt_override,
     )
+    if on_chunk is not None:
+        gateway_result = await stream_text_via_gateway(
+            ctx=call_ctx,
+            messages=messages,
+            model=settings.tutor_model,
+            session=db_session,
+            on_chunk=on_chunk,
+        )
+    else:
+        gateway_result = await complete_text_via_gateway(
+            ctx=call_ctx,
+            messages=messages,
+            model=settings.tutor_model,
+            session=db_session,
+        )
     answer = gateway_result.content
 
     sources: list[dict[str, Any]] = []
@@ -307,9 +326,12 @@ async def answer_grounded(
                 "citation": _source_reference(page),
             }
         )
-    answer += "\n\n**منابع:**\n" + "\n".join(
+    source_section = "\n\n**منابع:**\n" + "\n".join(
         f"- {label}" for label in source_labels
     )
+    if on_chunk is not None:
+        await on_chunk(source_section)
+    answer += source_section
     from app.services.learning_blocks import blocks_from_answer, blocks_to_payload
 
     return {

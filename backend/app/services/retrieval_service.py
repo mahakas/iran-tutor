@@ -18,7 +18,8 @@ from sqlalchemy import Text, cast, func, select, text as sql_text
 from app.core.config import get_settings
 from app.services.ai_gateway import CallContext, embed_via_gateway
 from app.db.session import async_session_factory
-from app.models.curriculum import Book, BookPage, Grade, Major, PageStatus
+from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.services.curriculum_access import student_book_catalog_clause
 
 logger = logging.getLogger(__name__)
 
@@ -295,12 +296,15 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
             async with async_session_factory() as write_session:
                 for start in range(0, len(documents), batch_size):
                     batch = documents[start : start + batch_size]
-                    vectors = (
-                        await embed_via_gateway(
-                            ctx=CallContext(feature_key="embedding", book_id=book_id),
-                            texts=[text for _, text in batch],
-                        )
-                    ).content
+                    embedding_result = await embed_via_gateway(
+                        ctx=CallContext(feature_key="embedding", book_id=book_id),
+                        texts=[text for _, text in batch],
+                    )
+                    vectors = embedding_result.content
+                    embedding_model = (
+                        getattr(embedding_result, "model_name", None)
+                        or settings.embedding_model
+                    )
                     for (page, _text), vector in zip(batch, vectors, strict=True):
                         await write_session.execute(
                             upsert_sql,
@@ -309,7 +313,7 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
                                 "book_id": book.id,
                                 "grade_number": grade.number,
                                 "major_code": payload_base["major_code"],
-                                "embedding_model": settings.embedding_model,
+                                "embedding_model": embedding_model,
                                 "embedding": json.dumps(vector),
                             },
                         )
@@ -325,12 +329,15 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
         points: list[models.PointStruct] = []
         for start in range(0, len(documents), batch_size):
             batch = documents[start : start + batch_size]
-            vectors = (
-                await embed_via_gateway(
-                    ctx=CallContext(feature_key="embedding", book_id=book_id),
-                    texts=[text for _, text in batch],
-                )
-            ).content
+            embedding_result = await embed_via_gateway(
+                ctx=CallContext(feature_key="embedding", book_id=book_id),
+                texts=[text for _, text in batch],
+            )
+            vectors = embedding_result.content
+            embedding_model = (
+                getattr(embedding_result, "model_name", None)
+                or settings.embedding_model
+            )
             for (page, text), vector in zip(batch, vectors, strict=True):
                 points.append(
                     models.PointStruct(
@@ -338,6 +345,7 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
                         vector=vector,
                         payload={
                             **payload_base,
+                            "embedding_model": embedding_model,
                             "pdf_page_index": page.pdf_page_index,
                             "printed_page_number": page.printed_page_number,
                             "chapter_number": page.chapter_number,
@@ -374,6 +382,8 @@ def _scope_sql_clause(scopes: Sequence[TextbookScope]):
     for scope in scopes:
         conditions = [
             Book.id == scope.book_id,
+            Book.status == BookStatus.ready,
+            student_book_catalog_clause(),
             Grade.number == scope.grade_number,
             func.coalesce(Major.code, "general") == (scope.major_code or "general"),
         ]
@@ -631,13 +641,19 @@ def merge_hybrid_results(
 async def _search_pgvector_scopes(
     query: str, *, scopes: Sequence[TextbookScope], limit: int
 ) -> list[dict[str, Any]]:
-    vector = (
-        await embed_via_gateway(
-            ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
-            texts=[query],
-        )
-    ).content[0]
-    params: dict[str, Any] = {"query_vector": json.dumps(vector), "limit": limit}
+    embedding_result = await embed_via_gateway(
+        ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
+        texts=[query],
+    )
+    vector = embedding_result.content[0]
+    embedding_model = (
+        getattr(embedding_result, "model_name", None) or get_settings().embedding_model
+    )
+    params: dict[str, Any] = {
+        "query_vector": json.dumps(vector),
+        "embedding_model": embedding_model,
+        "limit": limit,
+    }
     clauses: list[str] = []
     for index, scope in enumerate(scopes):
         clause = (
@@ -672,6 +688,9 @@ async def _search_pgvector_scopes(
         + " OR ".join(clauses)
         + """)
           AND bp.status = 'done'
+          AND b.status = 'ready'
+          AND b.catalog_status <> 'pending_review'
+          AND e.embedding_model = :embedding_model
           AND (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) >= 0.15
         ORDER BY e.embedding <=> CAST(:query_vector AS vector) ASC, bp.pdf_page_index ASC
         LIMIT :limit
@@ -711,12 +730,14 @@ async def _search_pgvector(
     book_id: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    vector = (
-        await embed_via_gateway(
-            ctx=CallContext(feature_key="embedding_query", book_id=book_id),
-            texts=[query],
-        )
-    ).content[0]
+    embedding_result = await embed_via_gateway(
+        ctx=CallContext(feature_key="embedding_query", book_id=book_id),
+        texts=[query],
+    )
+    vector = embedding_result.content[0]
+    embedding_model = (
+        getattr(embedding_result, "model_name", None) or get_settings().embedding_model
+    )
     selected_major = major_code or "general"
     statement = sql_text(
         """
@@ -739,6 +760,9 @@ async def _search_pgvector(
           AND e.grade_number = :grade_number
           AND e.major_code = :major_code
           AND bp.status = 'done'
+          AND b.status = 'ready'
+          AND b.catalog_status <> 'pending_review'
+          AND e.embedding_model = :embedding_model
           AND (1.0 - (e.embedding <=> CAST(:query_vector AS vector))) >= 0.15
         ORDER BY e.embedding <=> CAST(:query_vector AS vector) ASC, bp.pdf_page_index ASC
         LIMIT :limit
@@ -753,6 +777,7 @@ async def _search_pgvector(
                     "book_id": book_id,
                     "grade_number": grade_number,
                     "major_code": selected_major,
+                    "embedding_model": embedding_model,
                     "limit": limit,
                 },
             )
@@ -781,27 +806,148 @@ async def _search_pgvector(
     return results
 
 
+async def _filter_qdrant_points(
+    points: Sequence[Any],
+    *,
+    scopes: Sequence[TextbookScope],
+    expected_embedding_model: str | None = None,
+) -> list[dict[str, Any]]:
+    """Reconcile vector hits with the current, approved textbook page rows.
+
+    Qdrant is an index, not the source of truth. A page may have been edited or
+    moved to needs_review since it was indexed. Keep a vector hit only when the
+    corresponding database page is still approved and its indexed text exactly
+    matches the current text; return the current database metadata/content.
+    """
+    from sqlalchemy import and_, or_
+
+    requested: set[tuple[int, int]] = set()
+    point_payloads: list[tuple[Any, dict[str, Any], tuple[int, int]]] = []
+    for point in points:
+        payload = dict(getattr(point, "payload", None) or {})
+        book_id = payload.get("book_id")
+        page_index = payload.get("pdf_page_index")
+        if (
+            isinstance(book_id, bool)
+            or not isinstance(book_id, int)
+            or book_id <= 0
+            or isinstance(page_index, bool)
+            or not isinstance(page_index, int)
+            or page_index < 0
+        ):
+            continue
+        identity = (book_id, page_index)
+        requested.add(identity)
+        point_payloads.append((point, payload, identity))
+
+    if not requested:
+        return []
+
+    identity_clause = or_(
+        *(
+            and_(BookPage.book_id == book_id, BookPage.pdf_page_index == page_index)
+            for book_id, page_index in requested
+        )
+    )
+    async with async_session_factory() as session:
+        rows = (
+            await session.execute(
+                select(
+                    BookPage,
+                    Book.title,
+                    Grade.number,
+                    func.coalesce(Major.code, "general"),
+                )
+                .join(Book, BookPage.book_id == Book.id)
+                .join(Grade, Book.grade_id == Grade.id)
+                .outerjoin(Major, Book.major_id == Major.id)
+                .where(
+                    _scope_sql_clause(scopes),
+                    identity_clause,
+                    BookPage.status == PageStatus.done,
+                )
+            )
+        ).all()
+
+    current: dict[tuple[int, int], tuple[BookPage, str, int, str]] = {
+        (page.book_id, page.pdf_page_index): (page, title, grade_number, major_code)
+        for page, title, grade_number, major_code in rows
+    }
+
+    verified: list[dict[str, Any]] = []
+    for point, payload, identity in point_payloads:
+        record = current.get(identity)
+        if record is None:
+            continue
+        page, title, grade_number, major_code = record
+        if expected_embedding_model and payload.get("embedding_model") != expected_embedding_model:
+            continue
+        current_text = page_embedding_text(page.markdown_content or "", page.visual_elements or [])
+        # Old or stale payloads without an exact source snapshot must be re-indexed.
+        if not current_text or payload.get("full_text") != current_text:
+            continue
+        verified.append(
+            {
+                "book_id": page.book_id,
+                "book_title": title,
+                "grade_number": grade_number,
+                "major_code": major_code,
+                "pdf_page_index": page.pdf_page_index,
+                "printed_page_number": page.printed_page_number,
+                "chapter_number": page.chapter_number,
+                "chapter_title": page.chapter_title,
+                "full_text": current_text,
+                "markdown_content": page.markdown_content,
+                "visual_elements": page.visual_elements or [],
+                "score": float(point.score),
+            }
+        )
+    return verified
+
+
 async def _search_qdrant_scopes(
     query: str, *, scopes: Sequence[TextbookScope], limit: int
 ) -> list[dict[str, Any]]:
-    vector = (
-        await embed_via_gateway(
-            ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
-            texts=[query],
-        )
-    ).content[0]
+    embedding_result = await embed_via_gateway(
+        ctx=CallContext(feature_key="embedding_query", book_id=scopes[0].book_id),
+        texts=[query],
+    )
+    vector = embedding_result.content[0]
     settings = get_settings()
+    expected_embedding_model = (
+        getattr(embedding_result, "model_name", None) or settings.embedding_model
+    )
+    scope_filter = make_scope_filter(scopes)
+    model_condition = models.FieldCondition(
+        key="embedding_model",
+        match=models.MatchValue(value=expected_embedding_model),
+    )
+    # Apply model identity before top-k selection; otherwise stale vectors can
+    # occupy the candidate window and hide usable points from the current model.
+    if scope_filter.must:
+        query_filter = models.Filter(
+            must=[*scope_filter.must, model_condition],
+            must_not=scope_filter.must_not,
+        )
+    else:
+        query_filter = models.Filter(
+            must=[model_condition],
+            should=scope_filter.should,
+            must_not=scope_filter.must_not,
+        )
     response = await _get_qdrant().query_points(
         collection_name=settings.qdrant_collection,
         query=vector,
-        query_filter=make_scope_filter(scopes),
+        query_filter=query_filter,
         limit=limit,
         with_payload=True,
         score_threshold=0.15,
     )
-    return [
-        {**(point.payload or {}), "score": float(point.score)} for point in response.points
-    ]
+    return await _filter_qdrant_points(
+        response.points,
+        scopes=scopes,
+        expected_embedding_model=expected_embedding_model,
+    )
 
 
 async def _search_qdrant(
@@ -812,26 +958,47 @@ async def _search_qdrant(
     book_id: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    vector = (
-        await embed_via_gateway(
-            ctx=CallContext(feature_key="embedding_query", book_id=book_id),
-            texts=[query],
-        )
-    ).content[0]
+    embedding_result = await embed_via_gateway(
+        ctx=CallContext(feature_key="embedding_query", book_id=book_id),
+        texts=[query],
+    )
+    vector = embedding_result.content[0]
     settings = get_settings()
+    expected_embedding_model = (
+        getattr(embedding_result, "model_name", None) or settings.embedding_model
+    )
+    textbook_filter = make_textbook_filter(
+        grade_number=grade_number, major_code=major_code, book_id=book_id
+    )
+    query_filter = models.Filter(
+        must=[
+            *(textbook_filter.must or []),
+            models.FieldCondition(
+                key="embedding_model",
+                match=models.MatchValue(value=expected_embedding_model),
+            ),
+        ],
+        must_not=textbook_filter.must_not,
+    )
     response = await _get_qdrant().query_points(
         collection_name=settings.qdrant_collection,
         query=vector,
-        query_filter=make_textbook_filter(
-            grade_number=grade_number, major_code=major_code, book_id=book_id
-        ),
+        query_filter=query_filter,
         limit=limit,
         with_payload=True,
         score_threshold=0.15,
     )
-    return [
-        {**(point.payload or {}), "score": float(point.score)} for point in response.points
-    ]
+    return await _filter_qdrant_points(
+        response.points,
+        scopes=[
+            TextbookScope(
+                book_id=book_id,
+                grade_number=grade_number,
+                major_code=major_code,
+            )
+        ],
+        expected_embedding_model=expected_embedding_model,
+    )
 
 
 async def search_textbook_scopes(

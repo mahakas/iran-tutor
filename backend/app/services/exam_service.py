@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -91,6 +92,7 @@ def public_exam(session: ExamSession, *, include_report: bool = False) -> dict[s
         "book_id": session.book_id,
         "grade_number": session.grade_number,
         "major_code": session.major_code,
+        "branch_code": getattr(session, "branch_code", None),
         "title": session.title,
         "exam_type": session.exam_type,
         "time_limit_seconds": session.time_limit_seconds,
@@ -136,6 +138,7 @@ def exam_summary(session: ExamSession, *, book_title: str | None = None) -> dict
         "book_title": book_title,
         "grade_number": session.grade_number,
         "major_code": session.major_code,
+        "branch_code": getattr(session, "branch_code", None),
         "exam_type": session.exam_type,
         "status": status,
         "question_count": len(session.questions or []),
@@ -204,6 +207,7 @@ async def create_exam(
     question_count: int,
     time_limit_minutes: int,
     exam_type: Literal["konkoor", "final"],
+    branch_code: str | None = None,
     chapter_title: str | None = None,
     user_id: str | None = None,
 ) -> ExamSession:
@@ -282,11 +286,12 @@ async def create_exam(
     from app.services.capability_runtime import run_capability_json
     from app.services.quiz_validator import validate_questions as validate_generated_questions
 
+    generation_context = "\n\n---\n\n".join(context_parts)[:28_000]
     gateway_result, _skill = await run_capability_json(
         session=session,
         capability_key="quiz",
         feature_key="quiz",
-        user_text="\n\n---\n\n".join(context_parts)[:28_000],
+        user_text=generation_context,
         user_id=user_id,
         book_id=book_id,
         textbook_strict=True,
@@ -298,9 +303,45 @@ async def create_exam(
         extra_system=system_prompt,
     )
     generated = gateway_result.content
-    parsed_questions = validate_questions(
-        generated, expected_count=question_count, source_count=len(sources)
-    )
+    try:
+        parsed_questions = validate_questions(
+            generated, expected_count=question_count, source_count=len(sources)
+        )
+    except ValueError:
+        # One schema-repair pass before the scientific Validator Gate. The repair
+        # stays grounded in the same approved pages and is still gateway-audited.
+        invalid_output = json.dumps(generated, ensure_ascii=False, default=str)[:12_000]
+        try:
+            repaired_result, _skill = await run_capability_json(
+                session=session,
+                capability_key="quiz",
+                feature_key="quiz",
+                user_text=(
+                    f"{generation_context}\n\n"
+                    f"خروجی JSON نامعتبر قبلی:\n{invalid_output}\n\n"
+                    "خروجی قبلی را اصلاح کن. تعداد سؤال‌ها باید دقیقاً "
+                    f"{question_count} باشد. source_index فقط می‌تواند یکی از "
+                    f"اعداد 0 تا {len(sources) - 1} باشد. همهٔ سؤال‌ها باید چهار گزینه "
+                    "غیرخالی A,B,C,D، یک correct_option از همین چهار گزینه و explanation "
+                    "داشته باشند. فقط JSON معتبر با کلید questions برگردان."
+                ),
+                user_id=user_id,
+                book_id=book_id,
+                textbook_strict=True,
+                citations=sources,
+                rag_hit_count=len(sources),
+                model=settings.tutor_model,
+                enforce=False,
+                extra_system=system_prompt,
+            )
+            generated = repaired_result.content
+            parsed_questions = validate_questions(
+                generated, expected_count=question_count, source_count=len(sources)
+            )
+        except Exception:
+            # Keep both generation audits and the consumed quota even when repair fails.
+            await session.commit()
+            raise
 
     # Stage 2 (Validator Gate): grounding, LaTeX validity, unambiguous key.
     exam_id = str(uuid4())
@@ -343,6 +384,7 @@ async def create_exam(
         user_id=user_id,
         grade_number=grade_number,
         major_code=major_code or "general",
+        branch_code=branch_code,
         title=f"آزمون {chapter_title or 'مروری'}",
         exam_type=exam_type,
         time_limit_seconds=time_limit_minutes * 60,

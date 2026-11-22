@@ -18,6 +18,7 @@ export type TutorStreamRequest = {
   query: string;
   grade_number?: number | null;
   major_code?: string | null;
+  branch_code?: string | null;
   book_id?: number | null;
   grade_numbers?: number[] | null;
   book_ids?: number[] | null;

@@ -169,6 +169,7 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
                         "major_code": "math_physics",
                         "book_title": "فیزیک ۳",
                         "pdf_page_index": 1,
+                        "embedding_model": settings.embedding_model,
                     },
                 ),
                 models.PointStruct(
@@ -180,6 +181,7 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
                         "major_code": "experimental",
                         "book_title": "فیزیک ۳",
                         "pdf_page_index": 2,
+                        "embedding_model": settings.embedding_model,
                     },
                 ),
                 models.PointStruct(
@@ -191,6 +193,21 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
                         "major_code": "math_physics",
                         "book_title": "فیزیک ۲",
                         "pdf_page_index": 3,
+                        "embedding_model": settings.embedding_model,
+                    },
+                ),
+                # A closer vector from an older embedding model must not
+                # occupy the top-k slot for a query using the current model.
+                models.PointStruct(
+                    id=4,
+                    vector=[1.0, 0.0],
+                    payload={
+                        "book_id": 8,
+                        "grade_number": 12,
+                        "major_code": "math_physics",
+                        "book_title": "فیزیک ۳",
+                        "pdf_page_index": 4,
+                        "embedding_model": "old-embedding-model",
                     },
                 ),
             ],
@@ -203,18 +220,28 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
         async def no_lexical_results(*args, **kwargs):
             return []
 
+        async def passthrough_verified(points, *, scopes, expected_embedding_model=None):
+            return [
+                {**(point.payload or {}), "score": float(point.score)}
+                for point in points
+            ]
+
         monkeypatch.setattr(retrieval_service, "embed_via_gateway", fake_embed_gateway)
         monkeypatch.setattr(retrieval_service, "_search_postgres", no_lexical_results)
+        # This test isolates Qdrant's exact curriculum filter. Current-page
+        # approval/snapshot reconciliation is covered by the DB-backed tests.
+        monkeypatch.setattr(retrieval_service, "_filter_qdrant_points", passthrough_verified)
         results = await retrieval_service.search_textbook(
             "شتاب چیست؟",
             grade_number=12,
             major_code="math_physics",
             book_id=8,
-            top_k=5,
+            top_k=1,
         )
         assert len(results) == 1
         assert results[0]["book_id"] == 8
         assert results[0]["major_code"] == "math_physics"
+        assert results[0]["pdf_page_index"] == 1
     finally:
         await client.close()
         retrieval_service._qdrant = old_client

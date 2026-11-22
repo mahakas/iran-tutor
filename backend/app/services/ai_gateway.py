@@ -26,7 +26,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +36,7 @@ from app.core.llm_client import (
     complete_text,
     embed_texts,
     synthesize_speech,
+    stream_text,
     transcribe_audio,
     vision_json,
 )
@@ -313,6 +314,84 @@ async def complete_text_via_gateway(
     )
     return GatewayResult(
         content=text,
+        audit_id=audit_id,
+        provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None,
+        model_name=effective_model,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        latency_ms=latency,
+    )
+
+
+async def stream_text_via_gateway(
+    *,
+    ctx: CallContext,
+    messages: list[dict[str, str]],
+    on_chunk: Callable[[str], Awaitable[None]],
+    model: str | None = None,
+    session: AsyncSession | None = None,
+    usage_hook: Callable[[int, int], None] | None = None,
+) -> GatewayResult:
+    """Stream model text while retaining feature routing, audit, and usage accounting."""
+    settings = get_settings()
+    route = await _resolve(ctx.feature_key, session)
+    effective_model = (route.model_name if route and route.configured else None) or model or settings.tutor_model
+    started = time.perf_counter()
+
+    if not effective_model:
+        await _write_audit(
+            ctx=ctx,
+            route=route,
+            model_name=None,
+            messages=messages,
+            response_text=None,
+            tokens_in=0,
+            tokens_out=0,
+            latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
+            status=STATUS_ERROR,
+            error_message="no model configured for feature",
+            session=session,
+        )
+        raise RuntimeError("no model is configured for this feature; ask an admin to set a route")
+
+    try:
+        content = await stream_text(effective_model, messages, on_chunk)
+    except Exception as error:
+        await _write_audit(
+            ctx=ctx,
+            route=route,
+            model_name=effective_model,
+            messages=messages,
+            response_text=None,
+            tokens_in=0,
+            tokens_out=0,
+            latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
+            status=STATUS_ERROR,
+            error_message=f"{type(error).__name__}: {error}",
+            session=session,
+        )
+        raise
+
+    latency = max(1, int(round((time.perf_counter() - started) * 1000)))
+    tokens_in = max(50, sum(len(str(m.get("content", ""))) for m in messages) // 4)
+    tokens_out = max(20, len(content) // 4)
+    if usage_hook is not None:
+        usage_hook(tokens_in, tokens_out)
+    audit_id = await _write_audit(
+        ctx=ctx,
+        route=route,
+        model_name=effective_model,
+        messages=messages,
+        response_text=content,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        latency_ms=latency,
+        status=STATUS_SUCCESS,
+        session=session,
+    )
+    return GatewayResult(
+        content=content,
         audit_id=audit_id,
         provider_id=route.provider_id if route else None,
         provider_name=route.provider_name if route else None,

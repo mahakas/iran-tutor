@@ -466,6 +466,34 @@ async def test_deep_solve_ladder_hides_answer_until_full_and_records_mastery(env
 
 
 @pytest.mark.asyncio
+async def test_deep_solve_repairs_one_invalid_structured_plan(env):
+    calls = 0
+
+    def malformed_then_valid(messages):
+        nonlocal calls
+        calls += 1
+        return {"steps": "not a list"} if calls == 1 else PLAN
+
+    env.fake.json_reply = malformed_then_valid
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/deep-solve/sessions",
+            json={
+                "problem_text": "جسمی ۲ کیلوگرمی با نیروی ۱۰ نیوتون",
+                "book_id": env.ids["book_id"],
+                "chapter_number": 2,
+            },
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "active"
+    assert calls == 2
+    assert await _count(
+        env.factory, AiAuditLog, AiAuditLog.feature_key == "deep_solve"
+    ) == 2
+    assert await _count(env.factory, DeepSolveSession) == 1
+
+
+@pytest.mark.asyncio
 async def test_deep_solve_invalid_model_plan_creates_no_orphan_row(env):
     env.fake.json_reply = lambda messages: {"steps": "not a list"}
     async with _client() as client:
@@ -511,6 +539,23 @@ async def test_immersive_overview_page_and_assist_cite_exact_page(env):
     assert assist.json()["citation"]["printed_page_number"] == 14
     assert env.fake.text_calls, "assist must call the gateway"
     assert await _count(env.factory, AiAuditLog, AiAuditLog.feature_key == "immersive_reader") >= 1
+
+
+@pytest.mark.asyncio
+async def test_immersive_reader_does_not_serve_unapproved_page_image(env):
+    book_id = env.ids["book_id"]
+    async with env.factory() as session:
+        page = await session.scalar(
+            select(BookPage).where(BookPage.book_id == book_id, BookPage.pdf_page_index == 1)
+        )
+        page.status = PageStatus.needs_review
+        await session.commit()
+
+    async with _client() as client:
+        response = await client.get(
+            f"/api/v1/immersive/books/{book_id}/pages/1/image"
+        )
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio

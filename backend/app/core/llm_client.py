@@ -17,7 +17,7 @@ import logging
 import random
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 from openai import (
@@ -443,6 +443,93 @@ async def complete_text(model: str, messages: list[dict[str, str]]) -> str:
                 error_type=type(error).__name__,
             )
             await asyncio.sleep(delay)
+
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+async def stream_text(
+    model: str,
+    messages: list[dict[str, Any]],
+    on_chunk: Callable[[str], Awaitable[None]],
+) -> str:
+    """Stream a plain-text chat completion while preserving the shared client policy.
+
+    Retries are permitted only before the first visible chunk. Retrying after a
+    partial response would duplicate text in clients that are already rendering it.
+    """
+    if get_settings().demo_mode:
+        content = await complete_text(model, messages)
+        for start in range(0, len(content), 40):
+            await on_chunk(content[start : start + 40])
+        return content
+
+    client = _get_client()
+    for attempt in range(MAX_RETRIES + 1):
+        started = time.perf_counter()
+        emitted = False
+        stream = None
+        try:
+            parts: list[str] = []
+            async with _get_semaphore():
+                stream = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=0.2,
+                    stream=True,
+                )
+                async for event in stream:
+                    choices = getattr(event, "choices", None) or []
+                    for choice in choices:
+                        delta = getattr(getattr(choice, "delta", None), "content", None)
+                        if not isinstance(delta, str) or not delta:
+                            continue
+                        parts.append(delta)
+                        emitted = True
+                        await on_chunk(delta)
+
+            content = "".join(parts).strip()
+            if not content:
+                raise InvalidJSONError("empty model response")
+            prompt_est = max(50, sum(len(str(m.get("content", ""))) for m in messages) // 4)
+            completion_est = max(20, len(content) // 4)
+            record_token_usage(fallback_prompt=prompt_est, fallback_completion=completion_est)
+            _log(
+                logging.INFO,
+                "llm.stream_text.ok",
+                model=model,
+                latency_s=round(time.perf_counter() - started, 2),
+                chunks=len(parts),
+            )
+            return content
+        except Exception as error:  # noqa: BLE001 - classified below
+            if emitted or not _is_retryable(error) or attempt == MAX_RETRIES:
+                _log(
+                    logging.ERROR,
+                    "llm.stream_text.failed",
+                    model=model,
+                    error_type=type(error).__name__,
+                    error=str(error)[:300],
+                    emitted=emitted,
+                )
+                raise
+            delay = BACKOFF_BASE_SECONDS * (2**attempt) + random.uniform(0, 0.5)
+            _log(
+                logging.WARNING,
+                "llm.stream_text.retry",
+                model=model,
+                attempt=attempt + 1,
+                delay_s=round(delay, 2),
+                error_type=type(error).__name__,
+            )
+            await asyncio.sleep(delay)
+        finally:
+            if stream is not None:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        await close()
+                    except Exception:  # noqa: BLE001 - preserve the primary result/error
+                        logger.debug("llm.stream_text.close_failed", exc_info=True)
 
     raise RuntimeError("unreachable")  # pragma: no cover
 

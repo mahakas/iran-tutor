@@ -62,11 +62,20 @@ export type GradeOption = {
 };
 
 export type MajorOption = { code: string; title: string };
+export type BranchOption = { code: string; title: string; min_grade: number; max_grade: number };
+export type FieldOption = { code: string; title: string; branch_code: string; branch_title: string };
 export type BookOption = {
   id: number;
   title: string;
   grade_number: number;
   major_code: string;
+  branch_code?: string | null;
+  field_code?: string | null;
+  academic_year_code?: string | null;
+  edition_label?: string | null;
+  print_year?: number | null;
+  publisher?: string | null;
+  catalog_status?: string;
   status: string;
 };
 
@@ -254,6 +263,7 @@ export type Exam = {
   book_id: number;
   grade_number: number;
   major_code: string;
+  branch_code?: string | null;
   exam_type: "konkoor" | "final";
   time_limit_seconds: number;
   expires_at: string;
@@ -271,6 +281,7 @@ export type ExamSummary = {
   book_title: string | null;
   grade_number: number;
   major_code: string;
+  branch_code?: string | null;
   exam_type: "konkoor" | "final";
   status: "active" | "submitted" | "expired";
   question_count: number;
@@ -312,6 +323,7 @@ export type ChatSessionSummary = {
   book_title: string | null;
   grade_number: number;
   major_code: string;
+  branch_code?: string | null;
   mode: TutorMode;
   message_count: number;
   created_at: string | null;

@@ -17,6 +17,7 @@ from app.models.auth import User
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
 from app.services import kb_ingestion_service
 from app.services.capability_runtime import run_capability_text
+from app.services.curriculum_access import is_student_visible_book
 
 IMMERSIVE_CAPABILITY = "immersive_reader"
 ASSIST_INSTRUCTIONS = {
@@ -27,7 +28,7 @@ ASSIST_INSTRUCTIONS = {
 
 async def _ready_book(session: AsyncSession, book_id: int) -> Book:
     book = await session.get(Book, book_id)
-    if book is None or book.status != BookStatus.ready:
+    if not is_student_visible_book(book):
         raise HTTPException(status_code=404, detail="کتاب آماده‌ای با این شناسه یافت نشد.")
     return book
 
@@ -114,7 +115,7 @@ async def page_image_path(session: AsyncSession, book_id: int, pdf_page_index: i
     page = await session.scalar(
         select(BookPage).where(BookPage.book_id == book_id, BookPage.pdf_page_index == pdf_page_index)
     )
-    if page is None or not page.page_image_path:
+    if page is None or page.status != PageStatus.done or not page.page_image_path:
         raise HTTPException(status_code=404, detail="تصویر صفحه موجود نیست.")
     return page.page_image_path
 

@@ -159,6 +159,15 @@ async def env(tmp_path, monkeypatch):
             await asyncio.sleep(fake.text_delay)
         return fake.text_reply
 
+    async def fake_stream_text(model, messages, on_chunk):
+        fake.text_calls.append(messages)
+        if fake.text_delay:
+            await asyncio.sleep(fake.text_delay)
+        content = fake.text_reply
+        for start in range(0, len(content), 40):
+            await on_chunk(content[start : start + 40])
+        return content
+
     async def fake_complete_json(model, messages):
         fake.json_calls.append(messages)
         if callable(fake.json_reply):
@@ -166,6 +175,7 @@ async def env(tmp_path, monkeypatch):
         return fake.json_reply or {"facts": []}
 
     monkeypatch.setattr(ai_gateway, "complete_text", fake_complete_text)
+    monkeypatch.setattr(ai_gateway, "stream_text", fake_stream_text)
     monkeypatch.setattr(ai_gateway, "complete_json", fake_complete_json)
 
     env_obj = SimpleNamespace(factory=factory, ids=ids, fake=fake)
@@ -520,6 +530,47 @@ async def test_auto_mode_falls_back_to_heuristic_and_audits_fallback(env):
                                      AiAuditLog.flag_reason == "router_heuristic_fallback")
         )
     assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_stream_rechecks_routed_capability_before_generation(env, monkeypatch):
+    from app.models.capabilities import Capability
+    from app.services.intent_router import RouterDecision
+
+    async def force_quiz_route(**kwargs):
+        return RouterDecision(
+            mode="question_designer",
+            confidence=0.99,
+            reason="test route",
+            source="heuristic",
+        )
+
+    monkeypatch.setattr(intent_router, "route_intent", force_quiz_route)
+    async with env.factory() as session:
+        quiz = await session.get(Capability, "quiz")
+        quiz.is_enabled = False
+        await session.commit()
+
+    body = dict(
+        _STREAM_BODY,
+        book_id=env.ids["book11"],
+        chat_session_id="chat-auto-disabled-quiz",
+        auto_mode=True,
+    )
+    async with _client() as client:
+        started = await client.post("/api/v1/tutor/stream", json=body)
+        assert started.status_code == 200, started.text
+        payload = started.json()
+        chunks, end = await _read_stream(client, payload["stream_id"])
+
+    assert end["status"] == "error"
+    assert chunks == []
+    assert env.fake.text_calls == []
+    assert await _count(
+        env.factory,
+        AiAuditLog,
+        AiAuditLog.feature_key == "quiz",
+    ) == 0
 
 
 def test_router_heuristic_and_invalid_llm_output():
