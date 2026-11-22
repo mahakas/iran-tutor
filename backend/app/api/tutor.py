@@ -273,7 +273,10 @@ async def _finalize_usage(
 
 
 async def _resolve_request_scope(
-    session: AsyncSession, body: AskRequest
+    session: AsyncSession,
+    body: AskRequest,
+    *,
+    current_user: User,
 ) -> tuple[Any, int | None, str | None, list[int] | None, list[int] | None]:
     """Return (book, grade_number, major_code, grade_numbers, book_ids).
 
@@ -297,6 +300,15 @@ async def _resolve_request_scope(
             raise HTTPException(
                 status_code=422,
                 detail="the anchor textbook grade must be included in grade_numbers",
+            )
+        # The anchor book and every cross-grade citation must stay at or below
+        # the learner's current grade. When no grade is on the profile, the
+        # selected anchor textbook is the conservative upper bound.
+        learner_grade = current_user.grade_level or anchor_grade.number
+        if anchor_grade.number > learner_grade or any(grade > learner_grade for grade in grades):
+            raise HTTPException(
+                status_code=422,
+                detail="multi-grade retrieval cannot include textbooks above the student's current grade",
             )
         _resolved_book, _resolved_grade, field_code = await resolve_book_scope(
             session,
@@ -368,7 +380,7 @@ async def ask_tutor(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
     book, grade_number, major_code, grade_numbers, book_ids = await _resolve_request_scope(
-        session, body
+        session, body, current_user=current_user
     )
     mode: TutorMode = body.mode
     decision = None
@@ -832,7 +844,7 @@ async def start_tutor_stream(
 ) -> dict[str, object]:
     """Start a generation. Regenerate = call again with `regenerate_of` set."""
     book, grade_number, major_code, grade_numbers, book_ids = await _resolve_request_scope(
-        session, body
+        session, body, current_user=current_user
     )
     if body.auto_mode:
         await check_capability_access(session, "chat", current_user)
