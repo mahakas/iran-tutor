@@ -27,7 +27,7 @@ ASSIST_INSTRUCTIONS = {
 
 async def _ready_book(session: AsyncSession, book_id: int) -> Book:
     book = await session.get(Book, book_id)
-    if book is None or book.status != BookStatus.ready:
+    if book is None or book.status != BookStatus.ready or book.catalog_status == "pending_review":
         raise HTTPException(status_code=404, detail="کتاب آماده‌ای با این شناسه یافت نشد.")
     return book
 

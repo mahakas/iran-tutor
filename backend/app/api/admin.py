@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import hmac
 import logging
@@ -37,7 +37,23 @@ from app.core.runtime_config import (
 from app.db.session import async_session_factory
 from app.models.auth import PaymentTransaction, Plan, TokenUsageLog, User, UserFile, UserSession
 from app.models.chat import ChatSession
-from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.curriculum import (
+    AcademicYear,
+    Book,
+    BookCurriculumLink,
+    BookPageObjective,
+    BookPage,
+    BookStatus,
+    EducationBranch,
+    FieldOfStudy,
+    Grade,
+    LearningObjective,
+    CurriculumUnit,
+    ObjectivePrerequisite,
+    Subject,
+    Major,
+    PageStatus,
+)
 from app.models.exam import ExamSession
 from app.models.governance import AiAuditLog, AiProvider, FeatureModelRoute
 from app.services.upload_guard import verify_extension, verify_pdf
@@ -209,6 +225,385 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 protected_router = APIRouter(dependencies=[Depends(require_admin)])
 
 
+class CurriculumFieldInput(BaseModel):
+    branch_code: str = Field(min_length=1, max_length=64)
+    code: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=160)
+    sort_order: int = 0
+    is_active: bool = True
+
+
+class AcademicYearInput(BaseModel):
+    code: str = Field(min_length=1, max_length=24)
+    title: str = Field(min_length=1, max_length=80)
+    start_date: date | None = None
+    end_date: date | None = None
+    is_active: bool = False
+
+
+class SubjectInput(BaseModel):
+    code: str = Field(min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=160)
+    description: str | None = None
+    is_active: bool = True
+
+
+class LearningObjectiveInput(BaseModel):
+    code: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    competency_type: str = "knowledge"
+    assessment_profile: Literal["qualitative_descriptive", "written", "performance", "mixed"] = "mixed"
+    source_url: str | None = None
+    prerequisites: list[str] = Field(default_factory=list)
+
+
+class CurriculumUnitInput(BaseModel):
+    grade_number: int = Field(ge=1, le=12)
+    subject_code: str = Field(min_length=1, max_length=80)
+    code: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=255)
+    unit_type: Literal["chapter", "lesson", "topic", "skill"] = "chapter"
+    parent_code: str | None = None
+    academic_year_code: str | None = Field(default=None, max_length=24)
+    sort_order: int = 0
+    source_url: str | None = None
+    objectives: list[LearningObjectiveInput] = Field(default_factory=list)
+
+
+class BookPageObjectiveInput(BaseModel):
+    book_id: int = Field(gt=0)
+    pdf_page_index: int = Field(ge=0)
+    objective_code: str = Field(min_length=1, max_length=160)
+    relevance: int = Field(default=100, ge=0, le=100)
+
+
+class CurriculumCatalogImportBody(BaseModel):
+    academic_years: list[AcademicYearInput] = Field(default_factory=list)
+    fields: list[CurriculumFieldInput] = Field(default_factory=list)
+    subjects: list[SubjectInput] = Field(default_factory=list)
+    units: list[CurriculumUnitInput] = Field(default_factory=list)
+    page_objectives: list[BookPageObjectiveInput] = Field(default_factory=list)
+
+
+class BookApprovalBody(BaseModel):
+    approved: bool
+
+
+@protected_router.post("/curriculum/catalog/import")
+async def import_curriculum_catalog(
+    body: CurriculumCatalogImportBody,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Idempotently import reviewed, official curriculum catalogue rows."""
+    counts = {
+        "academic_years": 0,
+        "fields": 0,
+        "subjects": 0,
+        "units": 0,
+        "objectives": 0,
+        "prerequisites": 0,
+        "page_objectives": 0,
+    }
+    if sum(1 for item in body.academic_years if item.is_active) > 1:
+        raise HTTPException(status_code=422, detail="در هر بار ورود کاتالوگ فقط یک سال تحصیلی می‌تواند فعال باشد.")
+    if any(item.start_date and item.end_date and item.end_date < item.start_date for item in body.academic_years):
+        raise HTTPException(status_code=422, detail="تاریخ پایان سال تحصیلی نمی‌تواند پیش از تاریخ آغاز آن باشد.")
+
+    if any(item.is_active for item in body.academic_years):
+        await session.execute(update(AcademicYear).values(is_active=False))
+    for item in body.academic_years:
+        year = await session.scalar(select(AcademicYear).where(AcademicYear.code == item.code))
+        if year is None:
+            year = AcademicYear(code=item.code, title=item.title)
+            session.add(year)
+        year.title = item.title
+        year.start_date = item.start_date
+        year.end_date = item.end_date
+        year.is_active = item.is_active
+        counts["academic_years"] += 1
+
+    for item in body.fields:
+        branch = await session.scalar(
+            select(EducationBranch).where(
+                EducationBranch.code == item.branch_code,
+                EducationBranch.is_active.is_(True),
+            )
+        )
+        if branch is None:
+            raise HTTPException(status_code=422, detail=f"شاخهٔ نامعتبر: {item.branch_code}")
+        field = await session.scalar(select(FieldOfStudy).where(FieldOfStudy.code == item.code))
+        if field is not None and field.branch_id != branch.id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"رشتهٔ {item.code} قبلاً به شاخهٔ دیگری متصل شده است؛ برای حفظ سوابق، کد جدید تعریف کنید.",
+            )
+        if field is None:
+            field = FieldOfStudy(branch_id=branch.id, code=item.code, title=item.title)
+            session.add(field)
+        field.branch_id = branch.id
+        field.title = item.title
+        field.sort_order = item.sort_order
+        field.is_active = item.is_active
+        counts["fields"] += 1
+
+    for item in body.subjects:
+        subject = await session.scalar(select(Subject).where(Subject.code == item.code))
+        if subject is None:
+            subject = Subject(code=item.code, title=item.title)
+            session.add(subject)
+        subject.title = item.title
+        subject.description = item.description
+        subject.is_active = item.is_active
+        counts["subjects"] += 1
+
+    await session.flush()
+    unit_rows: list[tuple[CurriculumUnitInput, CurriculumUnit, Grade, Subject]] = []
+    for item in body.units:
+        grade = await session.scalar(select(Grade).where(Grade.number == item.grade_number))
+        subject = await session.scalar(select(Subject).where(Subject.code == item.subject_code))
+        if grade is None:
+            raise HTTPException(status_code=404, detail=f"پایه یافت نشد: {item.grade_number}")
+        if subject is None or not subject.is_active:
+            raise HTTPException(status_code=404, detail=f"درس فعال یافت نشد: {item.subject_code}")
+        unit_year = None
+        if item.academic_year_code:
+            unit_year = await session.scalar(
+                select(AcademicYear).where(AcademicYear.code == item.academic_year_code)
+            )
+            if unit_year is None:
+                unit_year = AcademicYear(
+                    code=item.academic_year_code,
+                    title=f"سال تحصیلی {item.academic_year_code}",
+                    is_active=False,
+                )
+                session.add(unit_year)
+                await session.flush()
+        unit_scope = unit_year.code if unit_year is not None else "unspecified"
+        unit = await session.scalar(
+            select(CurriculumUnit).where(
+                CurriculumUnit.grade_id == grade.id,
+                CurriculumUnit.subject_id == subject.id,
+                CurriculumUnit.scope_code == unit_scope,
+                CurriculumUnit.code == item.code,
+            )
+        )
+        if unit is None:
+            unit = CurriculumUnit(
+                grade_id=grade.id,
+                subject_id=subject.id,
+                academic_year_id=unit_year.id if unit_year is not None else None,
+                scope_code=unit_scope,
+                code=item.code,
+                title=item.title,
+            )
+            session.add(unit)
+        unit.academic_year_id = unit_year.id if unit_year is not None else None
+        unit.scope_code = unit_scope
+        unit.title = item.title
+        unit.unit_type = item.unit_type
+        unit.sort_order = item.sort_order
+        unit.source_url = item.source_url
+        unit_rows.append((item, unit, grade, subject))
+        counts["units"] += 1
+
+    await session.flush()
+    objective_prerequisites: list[tuple[int, str]] = []
+    for item, unit, grade, subject in unit_rows:
+        if item.parent_code:
+            parent = await session.scalar(
+                select(CurriculumUnit).where(
+                    CurriculumUnit.grade_id == grade.id,
+                    CurriculumUnit.subject_id == subject.id,
+                    CurriculumUnit.scope_code == unit.scope_code,
+                    CurriculumUnit.code == item.parent_code,
+                )
+            )
+            if parent is None:
+                raise HTTPException(status_code=422, detail=f"والد فصل/درس یافت نشد: {item.parent_code}")
+            if parent.id == unit.id:
+                raise HTTPException(status_code=422, detail="یک واحد درسی نمی‌تواند والد خودش باشد.")
+            unit.parent_id = parent.id
+        else:
+            unit.parent_id = None
+
+        for objective_input in item.objectives:
+            objective = await session.scalar(
+                select(LearningObjective).where(LearningObjective.code == objective_input.code)
+            )
+            if objective is None:
+                objective = LearningObjective(
+                    unit_id=unit.id,
+                    code=objective_input.code,
+                    title=objective_input.title,
+                )
+                session.add(objective)
+            objective.unit_id = unit.id
+            objective.title = objective_input.title
+            objective.description = objective_input.description
+            objective.competency_type = objective_input.competency_type
+            profile = objective_input.assessment_profile
+            if profile == "mixed" and item.grade_number <= 6:
+                profile = "qualitative_descriptive"
+            elif profile == "mixed" and objective_input.competency_type in {"skill", "practical"}:
+                profile = "performance"
+            objective.assessment_profile = profile
+            objective.source_url = objective_input.source_url
+            counts["objectives"] += 1
+            objective_prerequisites.extend((objective_input.code, code) for code in objective_input.prerequisites)
+
+    await session.flush()
+    existing_edges = (
+        await session.execute(
+            select(ObjectivePrerequisite.objective_id, ObjectivePrerequisite.prerequisite_id)
+        )
+    ).all()
+    dependency_graph: dict[int, set[int]] = {}
+    for objective_id, prerequisite_id in existing_edges:
+        dependency_graph.setdefault(objective_id, set()).add(prerequisite_id)
+
+    def _has_dependency_path(start_id: int, target_id: int) -> bool:
+        pending = [start_id]
+        visited: set[int] = set()
+        while pending:
+            current_id = pending.pop()
+            if current_id == target_id:
+                return True
+            if current_id in visited:
+                continue
+            visited.add(current_id)
+            pending.extend(dependency_graph.get(current_id, set()) - visited)
+        return False
+
+    for objective_code, prerequisite_code in objective_prerequisites:
+        objective = await session.scalar(
+            select(LearningObjective).where(LearningObjective.code == objective_code)
+        )
+        prerequisite = await session.scalar(
+            select(LearningObjective).where(LearningObjective.code == prerequisite_code)
+        )
+        if objective is None or prerequisite is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"هدف یادگیری یا پیش‌نیاز یافت نشد: {objective_code} ← {prerequisite_code}",
+            )
+        if objective.id == prerequisite.id:
+            raise HTTPException(status_code=422, detail="هدف یادگیری نمی‌تواند پیش‌نیاز خودش باشد.")
+        exists_link = await session.scalar(
+            select(ObjectivePrerequisite.id).where(
+                ObjectivePrerequisite.objective_id == objective.id,
+                ObjectivePrerequisite.prerequisite_id == prerequisite.id,
+            )
+        )
+        if exists_link is None:
+            if _has_dependency_path(prerequisite.id, objective.id):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"رابطهٔ پیش‌نیاز باعث ایجاد چرخه می‌شود: {objective_code} ← {prerequisite_code}",
+                )
+            dependency_graph.setdefault(objective.id, set()).add(prerequisite.id)
+            session.add(ObjectivePrerequisite(objective_id=objective.id, prerequisite_id=prerequisite.id))
+            counts["prerequisites"] += 1
+
+    for item in body.page_objectives:
+        page = await session.scalar(
+            select(BookPage).where(
+                BookPage.book_id == item.book_id,
+                BookPage.pdf_page_index == item.pdf_page_index,
+                BookPage.status == PageStatus.done,
+            )
+        )
+        objective = await session.scalar(
+            select(LearningObjective).where(LearningObjective.code == item.objective_code)
+        )
+        if page is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"صفحهٔ {item.pdf_page_index} از کتاب {item.book_id} یافت نشد.",
+            )
+        if objective is None:
+            raise HTTPException(status_code=404, detail=f"هدف یادگیری یافت نشد: {item.objective_code}")
+        book = await session.get(Book, item.book_id)
+        unit = await session.get(CurriculumUnit, objective.unit_id)
+        if book is None or unit is None or unit.grade_id != book.grade_id:
+            raise HTTPException(
+                status_code=422,
+                detail="هدف یادگیری باید متعلق به همان پایهٔ کتاب انتخاب‌شده باشد.",
+            )
+        scoped_subject_ids = set(
+            (
+                await session.scalars(
+                    select(BookCurriculumLink.subject_id).where(
+                        BookCurriculumLink.book_id == item.book_id,
+                        BookCurriculumLink.subject_id.is_not(None),
+                    )
+                )
+            ).all()
+        )
+        if scoped_subject_ids and unit.subject_id not in scoped_subject_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="درس هدف یادگیری با حوزهٔ درسی کتاب سازگار نیست.",
+            )
+        mapping = await session.scalar(
+            select(BookPageObjective).where(
+                BookPageObjective.book_page_id == page.id,
+                BookPageObjective.objective_id == objective.id,
+            )
+        )
+        if mapping is None:
+            mapping = BookPageObjective(
+                book_page_id=page.id,
+                objective_id=objective.id,
+                relevance=item.relevance,
+            )
+            session.add(mapping)
+        else:
+            mapping.relevance = item.relevance
+        counts["page_objectives"] += 1
+
+    await session.commit()
+    return {"status": "imported", "counts": counts}
+
+
+@protected_router.patch("/books/{book_id}/approval")
+async def set_book_catalog_approval(
+    book_id: int,
+    body: BookApprovalBody,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    book = await session.get(Book, book_id)
+    if book is None:
+        raise HTTPException(status_code=404, detail="book not found")
+    if body.approved:
+        if book.status != BookStatus.ready:
+            raise HTTPException(status_code=409, detail="کتاب تا پایان پردازش قابل تأیید نیست.")
+        if not book.official_source_url:
+            raise HTTPException(status_code=422, detail="نشانی منبع رسمی کتاب ثبت نشده است.")
+        page_count = await session.scalar(
+            select(func.count()).select_from(BookPage).where(
+                BookPage.book_id == book_id,
+                BookPage.status == PageStatus.done,
+            )
+        )
+        total_count = await session.scalar(
+            select(func.count()).select_from(BookPage).where(BookPage.book_id == book_id)
+        )
+        if not total_count or page_count != total_count:
+            raise HTTPException(status_code=409, detail="همهٔ صفحه‌های کتاب باید بازبینی و تأیید شوند.")
+        book.catalog_status = "approved"
+        book.approved_at = datetime.now(timezone.utc)
+    else:
+        book.catalog_status = "pending_review"
+        book.approved_at = None
+    await session.commit()
+    return {
+        "book_id": book.id,
+        "catalog_status": book.catalog_status,
+        "approved_at": utc_iso(book.approved_at),
+    }
+
+
 ADMIN_LOGIN_RATE_LIMIT = 10
 ADMIN_LOGIN_RATE_WINDOW_SECONDS = 900
 
@@ -336,6 +731,17 @@ async def upload_and_ingest(
     pdf_file: UploadFile | None = File(None),
     grade_number: int = Form(...),
     major_code: str | None = Form(None),
+    branch_code: str | None = Form(None),
+    field_code: str | None = Form(None),
+    subject_code: str | None = Form(None),
+    applicable_field_codes: list[str] = Form(default=[]),
+    applicable_branch_codes: list[str] = Form(default=[]),
+    is_general_book: bool = Form(False),
+    academic_year_code: str | None = Form(None),
+    edition_label: str | None = Form(None),
+    print_year: int | None = Form(None),
+    publisher: str | None = Form(None),
+    official_source_url: str | None = Form(None),
     book_title: str = Form(...),
     start_page: int = Form(1),
     end_page: int | None = Form(None),
@@ -361,16 +767,84 @@ async def upload_and_ingest(
         if grade is None:
             raise HTTPException(status_code=404, detail=f"grade {grade_number} not found")
 
-        error = validate_major_code(grade.has_major, major_code)
-        if error:
-            raise HTTPException(status_code=422, detail=error)
+        selected_branch_codes = list(dict.fromkeys(
+            [code.strip() for code in [*applicable_branch_codes, branch_code] if code and code.strip()]
+        ))
+        selected_field_codes = list(dict.fromkeys(
+            [code.strip() for code in [*applicable_field_codes, field_code, major_code] if code and code.strip()]
+        ))
+        if official_source_url:
+            parsed_source_url = urlparse(official_source_url.strip())
+            if parsed_source_url.scheme not in {"http", "https"} or not parsed_source_url.netloc:
+                raise HTTPException(status_code=422, detail="official_source_url must be an HTTP(S) URL")
 
+        selected_subject = None
+        if subject_code:
+            selected_subject = await session.scalar(
+                select(Subject).where(Subject.code == subject_code, Subject.is_active.is_(True))
+            )
+            if selected_subject is None:
+                raise HTTPException(status_code=404, detail=f"subject '{subject_code}' not found")
+
+        selected_year = None
+        if academic_year_code:
+            selected_year = await session.scalar(
+                select(AcademicYear).where(AcademicYear.code == academic_year_code)
+            )
+            if selected_year is None:
+                selected_year = AcademicYear(
+                    code=academic_year_code,
+                    title=f"سال تحصیلی {academic_year_code}",
+                    is_active=False,
+                )
+                session.add(selected_year)
+                await session.flush()
+
+        selected_branches = []
+        if grade.number >= 10:
+            if not selected_branch_codes and not selected_field_codes and not is_general_book:
+                raise HTTPException(status_code=422, detail="برای کتاب‌های متوسطهٔ دوم باید شاخه یا رشته تعیین شود؛ یا کتاب عمومی را مشخص کنید.")
+            for code in selected_branch_codes:
+                branch = await session.scalar(
+                    select(EducationBranch).where(EducationBranch.code == code, EducationBranch.is_active.is_(True))
+                )
+                if branch is None or not branch.min_grade <= grade.number <= branch.max_grade:
+                    raise HTTPException(status_code=422, detail=f"invalid branch '{code}' for grade {grade.number}")
+                selected_branches.append(branch)
+        elif selected_branch_codes or selected_field_codes or major_code:
+            raise HTTPException(status_code=422, detail="شاخه و رشته فقط برای پایه‌های ۱۰ تا ۱۲ قابل انتخاب است.")
+
+        selected_fields = []
+        if selected_field_codes:
+            for code in selected_field_codes:
+                field = await session.scalar(
+                    select(FieldOfStudy).where(FieldOfStudy.code == code, FieldOfStudy.is_active.is_(True))
+                )
+                if field is None:
+                    raise HTTPException(status_code=404, detail=f"field '{code}' not found")
+                if selected_branches and all(item.id != field.branch_id for item in selected_branches):
+                    raise HTTPException(status_code=422, detail=f"field '{code}' is outside the selected branches")
+                selected_fields.append(field)
+
+        if any(item.code == "theoretical" for item in selected_branches) and not selected_fields:
+            raise HTTPException(status_code=422, detail="برای شاخهٔ نظری حداقل یک رشته باید مشخص شود.")
+        if not selected_branches and selected_fields:
+            branch_ids = {item.branch_id for item in selected_fields}
+            selected_branches = (
+                await session.scalars(select(EducationBranch).where(EducationBranch.id.in_(branch_ids)))
+            ).all()
+
+        # Book.major_id remains a compatibility alias only when the edition applies
+        # to exactly one old-style field. Multi-field editions use the link table.
         major_id = None
-        if grade.has_major:
-            major = await session.scalar(select(Major).where(Major.code == major_code))
-            if major is None:
-                raise HTTPException(status_code=404, detail=f"major '{major_code}' not found")
-            major_id = major.id
+        ingest_major_code = None
+        if len(selected_fields) == 1:
+            legacy_major = await session.scalar(
+                select(Major).where(Major.code == selected_fields[0].code)
+            )
+            if legacy_major is not None:
+                major_id = legacy_major.id
+                ingest_major_code = legacy_major.code
 
         raw_bytes = await upload.read(MAX_PDF_BYTES + 1)
         if not raw_bytes:
@@ -402,18 +876,45 @@ async def upload_and_ingest(
                     detail=f"page range ends at {end_page}, but the PDF contains only {page_count} pages",
                 )
 
+            checksum = hashlib.sha256(raw_bytes).hexdigest()
             book = Book(
                 title=book_title,
                 grade_id=grade.id,
                 major_id=major_id,
+                academic_year_id=selected_year.id if selected_year else None,
+                edition_label=edition_label.strip() if edition_label else None,
+                print_year=print_year,
+                publisher=publisher.strip() if publisher else None,
+                official_source_url=official_source_url.strip() if official_source_url else None,
+                source_checksum=checksum,
+                catalog_status="pending_review",
                 pdf_file_path=str(dest),
                 total_pdf_pages=end_page - start_page + 1,
                 status="ingesting",
             )
             session.add(book)
+            await session.flush()
+            book_id = book.id
+            scope_rows = []
+            linked_subject_id = selected_subject.id if selected_subject is not None else None
+            if is_general_book or grade.number < 10:
+                scope_rows.append((None, None, linked_subject_id, "general"))
+            scope_rows.extend((item.id, None, linked_subject_id, f"branch:{item.code}") for item in selected_branches)
+            scope_rows.extend(
+                (item.branch_id, item.id, linked_subject_id, f"field:{item.code}") for item in selected_fields
+            )
+            for linked_branch_id, linked_field_id, link_subject_id, scope_code in scope_rows:
+                session.add(
+                    BookCurriculumLink(
+                        book_id=book_id,
+                        branch_id=linked_branch_id,
+                        field_of_study_id=linked_field_id,
+                        subject_id=link_subject_id,
+                        scope_code=scope_code,
+                    )
+                )
             await session.commit()
             await session.refresh(book)
-            book_id = book.id
 
             from app.services import kb_ingestion_service
 
@@ -425,7 +926,7 @@ async def upload_and_ingest(
                 book_id=book_id,
                 pdf_path=dest,
                 grade_number=grade_number,
-                major_code=major_code,
+                major_code=ingest_major_code,
                 book_title=book_title,
                 start_page=start_page,
                 end_page=end_page,
@@ -465,10 +966,18 @@ async def upload_and_ingest(
 
         dest.write_bytes(raw_bytes)
         model_label = f"structured-{doc_format}"
+        checksum = hashlib.sha256(raw_bytes).hexdigest()
         book = Book(
             title=book_title,
             grade_id=grade.id,
             major_id=major_id,
+            academic_year_id=selected_year.id if selected_year else None,
+            edition_label=edition_label.strip() if edition_label else None,
+            print_year=print_year,
+            publisher=publisher.strip() if publisher else None,
+            official_source_url=official_source_url.strip() if official_source_url else None,
+            source_checksum=checksum,
+            catalog_status="pending_review",
             pdf_file_path=str(dest),
             total_pdf_pages=len(selected_pages),
             status="ready",
@@ -476,6 +985,24 @@ async def upload_and_ingest(
         session.add(book)
         await session.flush()
         book_id = book.id
+        scope_rows = []
+        linked_subject_id = selected_subject.id if selected_subject is not None else None
+        if is_general_book or grade.number < 10:
+            scope_rows.append((None, None, linked_subject_id, "general"))
+        scope_rows.extend((item.id, None, linked_subject_id, f"branch:{item.code}") for item in selected_branches)
+        scope_rows.extend(
+            (item.branch_id, item.id, linked_subject_id, f"field:{item.code}") for item in selected_fields
+        )
+        for linked_branch_id, linked_field_id, link_subject_id, scope_code in scope_rows:
+            session.add(
+                BookCurriculumLink(
+                    book_id=book_id,
+                    branch_id=linked_branch_id,
+                    field_of_study_id=linked_field_id,
+                    subject_id=link_subject_id,
+                    scope_code=scope_code,
+                )
+            )
 
         page_rows: list[BookPage] = []
         status_counts: dict[str, int] = {}
@@ -547,6 +1074,14 @@ async def list_admin_books() -> list[dict[str, object]]:
                 "grade_number": grade_number,
                 "major_id": book.major_id,
                 "major_code": major_code,
+                "academic_year_id": book.academic_year_id,
+                "edition_label": book.edition_label,
+                "print_year": book.print_year,
+                "publisher": book.publisher,
+                "official_source_url": book.official_source_url,
+                "source_checksum": book.source_checksum,
+                "catalog_status": book.catalog_status,
+                "approved_at": utc_iso(book.approved_at),
                 "total_pdf_pages": book.total_pdf_pages,
                 "status": book.status.value if hasattr(book.status, "value") else book.status,
                 "pages": counts_by_book.get(book.id, {}),
@@ -574,6 +1109,14 @@ async def book_status(book_id: int) -> dict[str, object]:
             "title": book.title,
             "grade_id": book.grade_id,
             "major_id": book.major_id,
+            "academic_year_id": book.academic_year_id,
+            "edition_label": book.edition_label,
+            "print_year": book.print_year,
+            "publisher": book.publisher,
+            "official_source_url": book.official_source_url,
+            "source_checksum": book.source_checksum,
+            "catalog_status": book.catalog_status,
+            "approved_at": utc_iso(book.approved_at),
             "total_pdf_pages": book.total_pdf_pages,
             "status": book.status.value if hasattr(book.status, "value") else book.status,
             "pages": counts,

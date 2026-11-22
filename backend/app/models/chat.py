@@ -22,6 +22,7 @@ class ChatSession(Base):
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     grade_number: Mapped[int] = mapped_column(Integer, nullable=False)
     major_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    branch_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mode: Mapped[str] = mapped_column(String(32), default="tutor", nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     _json_type = JSON().with_variant(JSONB, "postgresql")

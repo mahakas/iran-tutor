@@ -28,6 +28,7 @@ router = APIRouter(prefix="/api/v1/exams", tags=["exams"])
 class CreateExamRequest(BaseModel):
     grade_number: int = Field(ge=1, le=12)
     major_code: str | None = Field(default=None, max_length=64)
+    branch_code: str | None = Field(default=None, max_length=64)
     book_id: int = Field(gt=0)
     chapter_title: str | None = Field(default=None, max_length=255)
     question_count: int = Field(default=5, ge=3, le=20)
@@ -50,6 +51,7 @@ async def start_exam(
         book_id=body.book_id,
         grade_number=body.grade_number,
         major_code=body.major_code,
+        branch_code=body.branch_code,
     )
     await check_capability_access(session, "quiz", current_user)
     await enforce_ai_quota(session, user=current_user, feature_key="quiz")
@@ -60,6 +62,7 @@ async def start_exam(
                 book_id=book.id,
                 grade_number=grade.number,
                 major_code=major_code,
+                branch_code=body.branch_code,
                 question_count=body.question_count,
                 time_limit_minutes=body.time_limit_minutes,
                 exam_type=body.exam_type,

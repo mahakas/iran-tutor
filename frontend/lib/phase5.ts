@@ -109,7 +109,20 @@ export type DeepSolveSession = {
   mastery_recorded: boolean;
 };
 
-export type BookListItem = { id: number; title: string; grade_number: number; major_code: string; status: string };
+export type BookListItem = {
+  id: number;
+  title: string;
+  grade_number: number;
+  major_code: string;
+  branch_code?: string | null;
+  field_code?: string | null;
+  academic_year_code?: string | null;
+  edition_label?: string | null;
+  print_year?: number | null;
+  publisher?: string | null;
+  catalog_status?: string;
+  status: string;
+};
 
 export function toPersianDigits(value: string | number): string {
   return String(value).replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);

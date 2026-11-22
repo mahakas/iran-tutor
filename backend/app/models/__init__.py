@@ -11,7 +11,23 @@ from app.models.auth import (  # noqa: F401
     UserSession,
 )
 from app.models.chat import ChatSession  # noqa: F401
-from app.models.curriculum import Book, BookPage, Grade, Major  # noqa: F401
+from app.models.curriculum import (  # noqa: F401
+    AcademicYear,
+    Book,
+    BookCurriculumLink,
+    BookPage,
+    BookPageObjective,
+    CurriculumUnit,
+    EducationBranch,
+    EducationCycle,
+    FieldOfStudy,
+    Grade,
+    LearningObjective,
+    LearningEvidence,
+    Major,
+    ObjectivePrerequisite,
+    Subject,
+)
 from app.models.exam import ExamSession  # noqa: F401
 from app.models.concepts import ConceptLink  # noqa: F401
 from app.models.learner_memory import LearnerMemory  # noqa: F401
@@ -53,6 +69,17 @@ __all__ = [
     "Major",
     "Book",
     "BookPage",
+    "EducationCycle",
+    "EducationBranch",
+    "FieldOfStudy",
+    "AcademicYear",
+    "Subject",
+    "BookCurriculumLink",
+    "CurriculumUnit",
+    "LearningObjective",
+    "LearningEvidence",
+    "ObjectivePrerequisite",
+    "BookPageObjective",
     "ExamSession",
     "ChatSession",
     "FlashcardDeck",

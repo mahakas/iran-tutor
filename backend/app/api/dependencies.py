@@ -5,12 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
 from app.models.auth import User, UserSession
-from app.models.curriculum import Book, Grade, Major
+from app.models.curriculum import Book, BookCurriculumLink, BookStatus, EducationBranch, FieldOfStudy, Grade, Major
 from app.services.auth_billing_service import USER_COOKIE_NAME, parse_user_session_token
 from app.services.validation import validate_major_code
 
@@ -86,22 +86,88 @@ async def require_student(
 
 
 async def resolve_book_scope(
-    session: AsyncSession, *, book_id: int, grade_number: int, major_code: str | None
+    session: AsyncSession,
+    *,
+    book_id: int,
+    grade_number: int,
+    major_code: str | None,
+    branch_code: str | None = None,
 ) -> tuple[Book, Grade, str | None]:
-    """Resolve a book while strictly checking the caller's grade and major."""
+    """Resolve a textbook in either legacy major mode or the normalized K-12 context.
+
+    For new high-school requests, branch_code is mandatory and major_code is the
+    field-of-study code (when that branch has fields). The selected Book row is
+    always checked against its explicit applicability links.
+    """
     book = await session.get(Book, book_id)
-    if book is None:
+    if book is None or book.status != BookStatus.ready or book.catalog_status == "pending_review":
         raise HTTPException(status_code=404, detail="book not found")
     grade = await session.get(Grade, book.grade_id)
     if grade is None or grade.number != grade_number:
         raise HTTPException(status_code=422, detail="book does not belong to the selected grade")
 
-    major_error = validate_major_code(grade.has_major, major_code)
-    if major_error:
-        raise HTTPException(status_code=422, detail=major_error)
-
     book_major = await session.get(Major, book.major_id) if book.major_id is not None else None
     expected_major = book_major.code if book_major is not None else None
-    if major_code != expected_major:
-        raise HTTPException(status_code=422, detail="book does not belong to the selected major")
-    return book, grade, expected_major
+
+    if branch_code is None:
+        major_error = validate_major_code(grade.has_major, major_code)
+        if major_error:
+            raise HTTPException(status_code=422, detail=major_error)
+        if major_code != expected_major:
+            raise HTTPException(status_code=422, detail="book does not belong to the selected major")
+        return book, grade, expected_major
+
+    if grade.number < 10:
+        raise HTTPException(status_code=422, detail="branch selection is only valid for grades 10-12")
+
+    branch = await session.scalar(
+        select(EducationBranch).where(
+            EducationBranch.code == branch_code,
+            EducationBranch.is_active.is_(True),
+        )
+    )
+    if branch is None or not branch.min_grade <= grade.number <= branch.max_grade:
+        raise HTTPException(status_code=422, detail="invalid education branch for this grade")
+
+    selected_field = None
+    if major_code:
+        selected_field = await session.scalar(
+            select(FieldOfStudy).where(
+                FieldOfStudy.code == major_code,
+                FieldOfStudy.branch_id == branch.id,
+                FieldOfStudy.is_active.is_(True),
+            )
+        )
+        if selected_field is None:
+            raise HTTPException(status_code=422, detail="field of study does not belong to the selected branch")
+    elif branch.code == "theoretical":
+        raise HTTPException(status_code=422, detail="a theoretical field of study is required")
+
+    if expected_major is not None and expected_major != major_code:
+        raise HTTPException(status_code=422, detail="book does not belong to the selected field")
+
+    selected_field_id = selected_field.id if selected_field is not None else -1
+    applicability = await session.scalar(
+        select(BookCurriculumLink.id).where(
+            BookCurriculumLink.book_id == book.id,
+            or_(
+                and_(
+                    BookCurriculumLink.branch_id == branch.id,
+                    BookCurriculumLink.field_of_study_id.is_(None),
+                ),
+                and_(
+                    BookCurriculumLink.branch_id == branch.id,
+                    BookCurriculumLink.field_of_study_id == selected_field_id,
+                ),
+                and_(
+                    BookCurriculumLink.branch_id.is_(None),
+                    BookCurriculumLink.field_of_study_id.is_(None),
+                ),
+            ),
+        ).limit(1)
+    )
+    if applicability is None:
+        # Compatibility for older theoretical books that still only have major_id.
+        if expected_major is None or expected_major != major_code:
+            raise HTTPException(status_code=422, detail="book is not available for the selected curriculum")
+    return book, grade, selected_field.code if selected_field is not None else expected_major

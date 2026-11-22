@@ -78,10 +78,33 @@ type BookStatus = {
   title: string;
   grade_number?: number;
   major_code?: string | null;
+  branch_code?: string | null;
+  academic_year_id?: number | null;
+  edition_label?: string | null;
+  print_year?: number | null;
+  publisher?: string | null;
+  official_source_url?: string | null;
+  source_checksum?: string | null;
+  catalog_status?: string;
+  approved_at?: string | null;
   total_pdf_pages: number;
   status: string;
   pages: Record<string, number>;
 };
+
+type CurriculumBranchOption = {
+  code: string;
+  title: string;
+  min_grade: number;
+  max_grade: number;
+};
+type CurriculumFieldOption = {
+  code: string;
+  title: string;
+  branch_code: string;
+  branch_title: string;
+};
+type CurriculumSubjectOption = { code: string; title: string; description?: string | null };
 
 type VisualElement = {
   label?: string;
@@ -152,12 +175,6 @@ function buildAuthHeaders(token: string | null): Record<string, string> {
     "X-Admin-Token": token,
   };
 }
-
-const majors = [
-  { code: "math_physics", label: "ریاضی‌فیزیک" },
-  { code: "experimental", label: "علوم تجربی" },
-  { code: "humanities", label: "علوم انسانی" },
-];
 
 const statusLabel: Record<string, string> = {
   done: "تأییدشده",
@@ -352,7 +369,20 @@ export default function AdminPage() {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("فیزیک ۳");
   const [grade, setGrade] = useState(12);
-  const [major, setMajor] = useState("math_physics");
+  const [branchCode, setBranchCode] = useState("theoretical");
+  const [branchOptions, setBranchOptions] = useState<CurriculumBranchOption[]>([]);
+  const [fieldOptions, setFieldOptions] = useState<CurriculumFieldOption[]>([]);
+  const [subjectOptions, setSubjectOptions] = useState<CurriculumSubjectOption[]>([]);
+  const [subjectCode, setSubjectCode] = useState("");
+  const [selectedFieldCodes, setSelectedFieldCodes] = useState<string[]>(["math_physics"]);
+  const [academicYearCode, setAcademicYearCode] = useState("");
+  const [editionLabel, setEditionLabel] = useState("");
+  const [printYear, setPrintYear] = useState("");
+  const [publisher, setPublisher] = useState("");
+  const [officialSourceUrl, setOfficialSourceUrl] = useState("");
+  const [isGeneralBook, setIsGeneralBook] = useState(false);
+  const [catalogJson, setCatalogJson] = useState('{"academic_years":[],"fields":[],"subjects":[],"units":[]}');
+  const [catalogSubmitting, setCatalogSubmitting] = useState(false);
   const [startPage, setStartPage] = useState(12);
   const [endPage, setEndPage] = useState(16);
   const [books, setBooks] = useState<BookStatus[]>([]);
@@ -1356,6 +1386,55 @@ export default function AdminPage() {
     };
   }, [activeBookId, authState, getActiveToken, lockAdminPanel, previewOpen, previewStatus, previewVersion]);
 
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    Promise.all([
+      fetch(`/api/v1/curriculum/branches?grade_number=${grade}`, {
+        cache: "no-store",
+        signal: controller.signal,
+      }),
+      fetch("/api/v1/curriculum/fields", {
+        cache: "no-store",
+        signal: controller.signal,
+      }),
+    ])
+      .then(async ([branchResponse, fieldResponse]) => {
+        if (!branchResponse.ok || !fieldResponse.ok) throw new Error("curriculum catalogue unavailable");
+        const branchData = (await branchResponse.json()) as CurriculumBranchOption[];
+        const fieldData = (await fieldResponse.json()) as CurriculumFieldOption[];
+        const subjectFetch = await fetch("/api/v1/curriculum/subjects", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const subjectData = subjectFetch.ok
+          ? ((await subjectFetch.json()) as CurriculumSubjectOption[])
+          : [];
+        if (!active) return;
+        setBranchOptions(branchData);
+        setFieldOptions(fieldData);
+        setSubjectOptions(subjectData);
+        setBranchCode((current) =>
+          branchData.some((item) => item.code === current)
+            ? current
+            : branchData.find((item) => item.code === "theoretical")?.code ?? branchData[0]?.code ?? ""
+        );
+        setSelectedFieldCodes((current) => current.filter((code) => fieldData.some((item) => item.code === code)));
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (active) {
+          setBranchOptions([]);
+          setFieldOptions([]);
+          setSubjectOptions([]);
+        }
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [grade]);
+
   const selectedFileFormat = useMemo(() => detectClientFileFormat(file), [file]);
   const isPdfUpload = selectedFileFormat === "pdf";
 
@@ -1399,7 +1478,21 @@ export default function AdminPage() {
       form.set("start_page", String(startPage));
       form.set("end_page", String(endPage));
     }
-    if (grade >= 10) form.set("major_code", major);
+    if (subjectCode) form.set("subject_code", subjectCode);
+    if (grade >= 10) {
+      if (selectedFieldCodes.length > 0) {
+        for (const code of selectedFieldCodes) form.append("applicable_field_codes", code);
+        if (selectedFieldCodes.length === 1) form.set("major_code", selectedFieldCodes[0]);
+      } else if (branchCode && (branchCode !== "theoretical" || !isGeneralBook)) {
+        form.set("branch_code", branchCode);
+      }
+      if (isGeneralBook) form.set("is_general_book", "true");
+    }
+    if (academicYearCode.trim()) form.set("academic_year_code", academicYearCode.trim());
+    if (editionLabel.trim()) form.set("edition_label", editionLabel.trim());
+    if (printYear.trim()) form.set("print_year", printYear.trim());
+    if (publisher.trim()) form.set("publisher", publisher.trim());
+    if (officialSourceUrl.trim()) form.set("official_source_url", officialSourceUrl.trim());
     try {
       const token = getActiveToken();
       const response = await fetch("/api/v1/admin/books/upload-and-ingest", {
@@ -1428,7 +1521,13 @@ export default function AdminPage() {
         id: payload.book_id,
         title,
         grade_number: grade,
-        major_code: grade >= 10 ? major : null,
+        major_code: grade >= 10 && selectedFieldCodes.length === 1 ? selectedFieldCodes[0] : null,
+        branch_code: grade >= 10 && selectedFieldCodes.length === 0 ? branchCode : null,
+        edition_label: editionLabel.trim() || null,
+        print_year: printYear.trim() ? Number(printYear) : null,
+        publisher: publisher.trim() || null,
+        official_source_url: officialSourceUrl.trim() || null,
+        catalog_status: "pending_review",
         total_pdf_pages: totalPages,
         status: nextStatus,
         pages: payload.pages ?? {},
@@ -1437,6 +1536,88 @@ export default function AdminPage() {
       if (items.length > 0) setBooks(items);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "خطا در ارتباط با سرور");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleImportCurriculumCatalog = async () => {
+    let body: unknown;
+    try {
+      body = JSON.parse(catalogJson);
+    } catch {
+      setError("JSON کاتالوگ معتبر نیست.");
+      return;
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      setError("ساختار کاتالوگ باید یک شیء JSON باشد.");
+      return;
+    }
+    setCatalogSubmitting(true);
+    setError("");
+    try {
+      const token = getActiveToken();
+      const response = await fetch("/api/v1/admin/curriculum/catalog/import", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...buildAuthHeaders(token),
+        },
+        body: JSON.stringify(body),
+      });
+      if (response.status === 401) {
+        lockAdminPanel();
+        throw new Error("نشست مدیریت منقضی شده است؛ دوباره وارد شوید.");
+      }
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail ?? "ورود کاتالوگ برنامهٔ درسی ناموفق بود.");
+      const fieldResponse = await fetch("/api/v1/curriculum/fields", { cache: "no-store" });
+      if (fieldResponse.ok) setFieldOptions((await fieldResponse.json()) as CurriculumFieldOption[]);
+      setUploadMessage("کاتالوگ برنامهٔ درسی با موفقیت به‌روزرسانی شد.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "ورود کاتالوگ برنامهٔ درسی ناموفق بود.");
+    } finally {
+      setCatalogSubmitting(false);
+    }
+  };
+
+  const handleApproveBook = async () => {
+    if (!book) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const token = getActiveToken();
+      const response = await fetch(`/api/v1/admin/books/${book.id}/approval`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...buildAuthHeaders(token),
+        },
+        body: JSON.stringify({ approved: true }),
+      });
+      if (response.status === 401) {
+        lockAdminPanel();
+        throw new Error("نشست مدیریت منقضی شده است؛ دوباره وارد شوید.");
+      }
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail ?? "انتشار نسخهٔ کتاب انجام نشد.");
+      setBook((current) =>
+        current && current.id === book.id
+          ? { ...current, catalog_status: payload.catalog_status, approved_at: payload.approved_at }
+          : current
+      );
+      setBooks((current) =>
+        current.map((item) =>
+          item.id === book.id
+            ? { ...item, catalog_status: payload.catalog_status, approved_at: payload.approved_at }
+            : item
+        )
+      );
+      setUploadMessage("نسخهٔ کتاب پس از بازبینی صفحه‌ها تأیید و برای دانش‌آموزان منتشر شد.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "تأیید نسخهٔ کتاب ناموفق بود.");
     } finally {
       setSubmitting(false);
     }
@@ -2611,7 +2792,14 @@ export default function AdminPage() {
               <div className="form-row">
                 <label className="form-field">
                   <span>پایه</span>
-                  <select value={grade} onChange={(event) => setGrade(Number(event.target.value))}>
+                  <select
+                    value={grade}
+                    onChange={(event) => {
+                      setGrade(Number(event.target.value));
+                      setSelectedFieldCodes([]);
+                      setBranchCode("theoretical");
+                    }}
+                  >
                     {Array.from({ length: 12 }, (_, index) => index + 1).map((number) => (
                       <option key={number} value={number}>
                         {number === 12 ? "دوازدهم" : `پایهٔ ${number}`}
@@ -2619,19 +2807,80 @@ export default function AdminPage() {
                     ))}
                   </select>
                 </label>
-                {grade >= 10 && (
+                {grade >= 10 && selectedFieldCodes.length === 0 && (
                   <label className="form-field">
-                    <span>رشته</span>
-                    <select value={major} onChange={(event) => setMajor(event.target.value)}>
-                      {majors.map((item) => (
-                        <option key={item.code} value={item.code}>
-                          {item.label}
-                        </option>
+                    <span>شاخهٔ تحصیلی</span>
+                    <select value={branchCode} onChange={(event) => setBranchCode(event.target.value)}>
+                      <option value="">انتخاب شاخه</option>
+                      {branchOptions.map((item) => (
+                        <option key={item.code} value={item.code}>{item.title}</option>
                       ))}
                     </select>
                   </label>
                 )}
               </div>
+              {grade >= 10 && (
+                <div className="form-row">
+                  <label className="form-field" style={{ flex: 1 }}>
+                    <span>رشته‌ها / حوزه‌های کاربرد کتاب (برای کتاب مشترک چند مورد انتخاب کن)</span>
+                    <select
+                      multiple
+                      value={selectedFieldCodes}
+                      onChange={(event) =>
+                        setSelectedFieldCodes(Array.from(event.target.selectedOptions, (option) => option.value))
+                      }
+                      style={{ minHeight: 104 }}
+                    >
+                      {fieldOptions.map((item) => (
+                        <option key={item.code} value={item.code}>
+                          {item.branch_title} — {item.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
+              <div className="form-row">
+                <label className="form-field">
+                  <span>درس (برای اتصال به هدف‌های یادگیری)</span>
+                  <select value={subjectCode} onChange={(event) => setSubjectCode(event.target.value)}>
+                    <option value="">بدون تعیین درس</option>
+                    {subjectOptions.map((item) => (
+                      <option key={item.code} value={item.code}>{item.title}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="form-row">
+                <label className="form-field">
+                  <span>کد سال تحصیلی (مثلاً 1405-1406)</span>
+                  <input value={academicYearCode} onChange={(event) => setAcademicYearCode(event.target.value)} placeholder="1405-1406" />
+                </label>
+                <label className="form-field">
+                  <span>ویرایش / نوبت چاپ</span>
+                  <input value={editionLabel} onChange={(event) => setEditionLabel(event.target.value)} placeholder="چاپ اول" />
+                </label>
+                <label className="form-field">
+                  <span>سال چاپ</span>
+                  <input type="number" value={printYear} onChange={(event) => setPrintYear(event.target.value)} placeholder="1405" />
+                </label>
+              </div>
+              <div className="form-row">
+                <label className="form-field">
+                  <span>ناشر</span>
+                  <input value={publisher} onChange={(event) => setPublisher(event.target.value)} />
+                </label>
+                <label className="form-field" style={{ flex: 1 }}>
+                  <span>نشانی منبع رسمی کتاب</span>
+                  <input value={officialSourceUrl} onChange={(event) => setOfficialSourceUrl(event.target.value)} placeholder="https://..." />
+                </label>
+              </div>
+              {grade >= 10 && (
+                <label className="plan-active-toggle">
+                  <input type="checkbox" checked={isGeneralBook} onChange={(event) => setIsGeneralBook(event.target.checked)} />
+                  <span>این کتاب علاوه بر رشته‌های انتخاب‌شده، منبع مشترک عمومی هم هست</span>
+                </label>
+              )}
               {isPdfUpload ? (
                 <div className="form-row">
                   <label className="form-field">
@@ -2700,6 +2949,33 @@ export default function AdminPage() {
                 آپلود و شروع پردازش
               </button>
             </form>
+            <details className="admin-card" style={{ marginTop: 16 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 700, padding: 8 }}>
+                ورود / به‌روزرسانی کاتالوگ رسمی برنامهٔ درسی
+              </summary>
+              <p className="muted-text">
+                داده‌های سال تحصیلی، رشته‌ها، درس‌ها، فصل‌ها و هدف‌های یادگیری را به‌صورت JSON وارد کن.
+                کد هر شاخه باید یکی از مقادیر نظری، فنی‌وحرفه‌ای یا کاردانشِ ثبت‌شده در سامانه باشد.
+              </p>
+              <textarea
+                className="admin-textarea"
+                rows={10}
+                value={catalogJson}
+                onChange={(event) => setCatalogJson(event.target.value)}
+                spellCheck={false}
+                aria-label="کاتالوگ برنامه درسی به فرمت JSON"
+              />
+              <button
+                type="button"
+                className="outline-button"
+                disabled={catalogSubmitting}
+                onClick={() => void handleImportCurriculumCatalog()}
+                style={{ marginTop: 10 }}
+              >
+                {catalogSubmitting ? <LoaderCircle className="spin" size={15} /> : <Database size={15} />}
+                واردکردن کاتالوگ
+              </button>
+            </details>
           </section>
 
           <section className="admin-card progress-card">
@@ -2828,6 +3104,23 @@ export default function AdminPage() {
                     بازکردن پیش‌نمایش مقایسه‌ای
                   </button>
                 )}
+                {book.status === "ready" &&
+                  book.catalog_status === "pending_review" &&
+                  processedPages === book.total_pdf_pages &&
+                  (book.pages.needs_review ?? 0) === 0 &&
+                  (book.pages.failed ?? 0) === 0 &&
+                  (book.pages.pending ?? 0) === 0 && (
+                    <button
+                      className="primary-button"
+                      type="button"
+                      disabled={submitting || !book.official_source_url}
+                      onClick={() => void handleApproveBook()}
+                    >
+                      {submitting ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}
+                      تأیید و انتشار نسخهٔ رسمی
+                    </button>
+                  )}
+
 
                 <div className="admin-book-actions-bar">
                   <button

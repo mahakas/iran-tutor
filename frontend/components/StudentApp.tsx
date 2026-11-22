@@ -66,7 +66,8 @@ import type {
   Exam,
   ExamSummary,
   GradeOption,
-  MajorOption,
+  BranchOption,
+  FieldOption,
   PublicPlansPayload,
   Source,
   TutorMode,
@@ -134,9 +135,12 @@ export default function StudentApp() {
   const tz = preferences.general.timezone || "Asia/Tehran";
 
   const [grades, setGrades] = useState<GradeOption[]>([]);
-  const [majors, setMajors] = useState<MajorOption[]>([]);
+  const [branches, setBranches] = useState<BranchOption[]>([]);
+  const [fields, setFields] = useState<FieldOption[]>([]);
   const [books, setBooks] = useState<BookOption[]>([]);
   const [gradeNumber, setGradeNumber] = useState<number | null>(null);
+  const [branchCode, setBranchCode] = useState("");
+  // Legacy request field retained; the API now interprets it as field_of_study.code.
   const [majorCode, setMajorCode] = useState("");
   const [bookId, setBookId] = useState("");
   const [curriculumError, setCurriculumError] = useState("");
@@ -179,9 +183,10 @@ export default function StudentApp() {
   const audioChunks = useRef<BlobPart[]>([]);
   const appliedDefaultModeRef = useRef(false);
 
-  const currentGrade = grades.find((grade) => grade.number === gradeNumber);
   const selectedBook = books.find((book) => String(book.id) === bookId);
-  const hasMajor = currentGrade?.has_major ?? false;
+  const isUpperSecondary = gradeNumber !== null && gradeNumber >= 10;
+  const hasMajor = Boolean(majorCode);
+  const branchRequiresField = isUpperSecondary && (branchCode === "theoretical" || fields.length > 0);
   const canAsk = Boolean(bookId && !busy);
 
   useEffect(() => {
@@ -236,11 +241,11 @@ export default function StudentApp() {
     let cancelled = false;
     (async () => {
       try {
-        const [gradeResponse, majorResponse] = await Promise.all([
+        const [gradeResponse, branchResponse] = await Promise.all([
           fetch("/api/v1/curriculum/grades"),
-          fetch("/api/v1/curriculum/majors"),
+          fetch("/api/v1/curriculum/branches?grade_number=12"),
         ]);
-        if (!gradeResponse.ok || !majorResponse.ok) {
+        if (!gradeResponse.ok || !branchResponse.ok) {
           throw new Error(
             lang === "en"
               ? "Curriculum catalog is unavailable"
@@ -248,13 +253,14 @@ export default function StudentApp() {
           );
         }
         const gradeData = (await gradeResponse.json()) as GradeOption[];
-        const majorData = (await majorResponse.json()) as MajorOption[];
+        const branchData = (await branchResponse.json()) as BranchOption[];
         if (cancelled) return;
         setGrades(gradeData);
-        setMajors(majorData);
+        setBranches(branchData);
         setGradeNumber(
           gradeData.find((item) => item.number === 12)?.number ?? gradeData[0]?.number ?? null
         );
+        setBranchCode(branchData.find((item) => item.code === "theoretical")?.code ?? branchData[0]?.code ?? "");
       } catch (error) {
         if (!cancelled) {
           setCurriculumError(
@@ -315,10 +321,18 @@ export default function StudentApp() {
   }, [currentUser, router]);
 
   useEffect(() => {
-    if (!gradeNumber || (hasMajor && !majorCode)) return;
+    if (!gradeNumber) return;
+    if (isUpperSecondary && (!branchCode || (branchRequiresField && !majorCode))) {
+      setBooks([]);
+      setBookId("");
+      return;
+    }
     const controller = new AbortController();
     const query = new URLSearchParams({ grade_number: String(gradeNumber) });
-    if (hasMajor) query.set("major_code", majorCode);
+    if (isUpperSecondary) {
+      query.set("branch_code", branchCode);
+      if (majorCode) query.set("field_code", majorCode);
+    }
     fetch(`/api/v1/curriculum/books?${query.toString()}`, { signal: controller.signal })
       .then(async (response) => {
         const payload = await response.json();
@@ -344,7 +358,28 @@ export default function StudentApp() {
         );
       });
     return () => controller.abort();
-  }, [gradeNumber, majorCode, hasMajor, lang]);
+  }, [gradeNumber, branchCode, majorCode, isUpperSecondary, branchRequiresField, lang]);
+
+  useEffect(() => {
+    if (!isUpperSecondary || !branchCode) {
+      setFields([]);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`/api/v1/curriculum/fields?branch_code=${encodeURIComponent(branchCode)}`, {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("field catalogue unavailable");
+        setFields((await response.json()) as FieldOption[]);
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setFields([]);
+      });
+    return () => controller.abort();
+  }, [branchCode, isUpperSecondary]);
 
   const clearAttachments = useCallback(() => {
     setImageFile(null);
@@ -501,6 +536,7 @@ export default function StudentApp() {
         query,
         grade_number: useMulti ? null : gradeNumber,
         major_code: useMulti ? null : hasMajor ? majorCode : null,
+        branch_code: useMulti ? null : isUpperSecondary ? branchCode : null,
         book_id: Number(bookId),
         grade_numbers: useMulti ? multiGrades : null,
         book_ids: null,
@@ -603,6 +639,8 @@ export default function StudentApp() {
       bookId,
       gradeNumber,
       hasMajor,
+      isUpperSecondary,
+      branchCode,
       lang,
       majorCode,
       multiGrades,
@@ -697,6 +735,7 @@ export default function StudentApp() {
             form.set("book_id", bookId);
             form.set("mode", tutoringMode);
             if (hasMajor && majorCode) form.set("major_code", majorCode);
+            if (isUpperSecondary && branchCode) form.set("branch_code", branchCode);
             if (activeChatId) form.set("chat_session_id", activeChatId);
             const endpoint = imageFile ? "/api/v1/tutor/ask-image" : "/api/v1/tutor/ask-audio";
             return authFetch(endpoint, { method: "POST", body: form });
@@ -708,6 +747,7 @@ export default function StudentApp() {
               query,
               grade_number: gradeNumber,
               major_code: hasMajor ? majorCode : null,
+              branch_code: isUpperSecondary ? branchCode : null,
               book_id: Number(bookId),
               mode: tutoringMode,
             }),
@@ -842,6 +882,7 @@ export default function StudentApp() {
         const detail = (await response.json()) as ChatSessionDetail;
         setGradeNumber(detail.grade_number);
         setMajorCode(detail.major_code === "general" ? "" : detail.major_code);
+        setBranchCode(detail.branch_code ?? (detail.major_code !== "general" ? "theoretical" : ""));
         setBookId(String(detail.book_id));
         setTutoringMode(detail.mode);
         setMessages(detail.messages ?? []);
@@ -999,6 +1040,7 @@ export default function StudentApp() {
         body: JSON.stringify({
           grade_number: gradeNumber,
           major_code: hasMajor ? majorCode : null,
+          branch_code: isUpperSecondary ? branchCode : null,
           book_id: Number(bookId),
           question_count: questionCount,
           time_limit_minutes: timeLimit,
@@ -1577,6 +1619,7 @@ export default function StudentApp() {
                 setExamHistoryOpen(false);
                 setExamSetupOpen(false);
                 setGradeNumber(nextGrade);
+                setBranchCode(nextMajor ? "theoretical" : nextGrade >= 10 ? "theoretical" : "");
                 setMajorCode(nextMajor);
                 setBookId(String(nextBookId));
                 setMessages([]);
@@ -1627,7 +1670,9 @@ export default function StudentApp() {
               }))}
               onChange={(nextVal) => {
                 if (!nextVal) return;
-                setGradeNumber(Number(nextVal));
+                const nextGrade = Number(nextVal);
+                setGradeNumber(nextGrade);
+                setBranchCode(nextGrade >= 10 ? "theoretical" : "");
                 setMajorCode("");
                 setBooks([]);
                 setBookId("");
@@ -1636,16 +1681,39 @@ export default function StudentApp() {
                 setMessageError("");
               }}
             />
-            {hasMajor && (
+            {isUpperSecondary && (
               <ThemedSelect
-                label={lang === "en" ? "Major" : "رشته"}
-                value={majorCode}
-                placeholder={lang === "en" ? "Select Major" : "انتخاب رشته"}
-                emptyOptionLabel={lang === "en" ? "Select Major" : "انتخاب رشته"}
-                options={majors.map((major) => ({
-                  value: major.code,
-                  label: major.title,
+                label={lang === "en" ? "Branch" : "شاخه"}
+                value={branchCode}
+                placeholder={lang === "en" ? "Select Branch" : "انتخاب شاخه"}
+                emptyOptionLabel={lang === "en" ? "Select Branch" : "انتخاب شاخه"}
+                options={branches.map((branch) => ({
+                  value: branch.code,
+                  label: branch.title,
                 }))}
+                onChange={(nextVal) => {
+                  setBranchCode(nextVal);
+                  setMajorCode("");
+                  setFields([]);
+                  setBooks([]);
+                  setBookId("");
+                  setMessages([]);
+                  setActiveChatId(null);
+                  setMessageError("");
+                }}
+              />
+            )}
+            {isUpperSecondary && (branchCode === "theoretical" || fields.length > 0) && (
+              <ThemedSelect
+                label={lang === "en" ? "Field" : "رشته"}
+                value={majorCode}
+                placeholder={lang === "en" ? "Select Field" : "انتخاب رشته"}
+                emptyOptionLabel={lang === "en" ? "Select Field" : "انتخاب رشته"}
+                options={fields.map((field) => ({
+                  value: field.code,
+                  label: field.title,
+                }))}
+                disabled={!fields.length}
                 onChange={(nextVal) => {
                   setMajorCode(nextVal);
                   setBooks([]);
@@ -1678,7 +1746,12 @@ export default function StudentApp() {
               }
               options={books.map((book) => ({
                 value: String(book.id),
-                label: book.title,
+                label: [
+                  book.title,
+                  book.academic_year_code,
+                  book.edition_label,
+                  book.print_year ? String(book.print_year) : null,
+                ].filter(Boolean).join(" — "),
               }))}
               disabled={!books.length}
               onChange={(nextVal) => {
