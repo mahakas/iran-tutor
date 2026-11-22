@@ -105,19 +105,35 @@ def build_tutor_messages(
 
 
 def _source_label(page: dict[str, Any]) -> str:
-    """Book and chapter only (no page). Used for the chat sources list; pages stay in structured fields."""
+    """Book, curriculum edition and chapter (page is present in the structured citation)."""
     title = page.get("book_title") or "کتاب درسی"
     if page.get("grade_number"):
         title = f"{title} (پایه {page['grade_number']})"
+    labels = []
+    if page.get("branch_titles"):
+        labels.append("شاخه " + "، ".join(page["branch_titles"]))
+    if page.get("field_titles"):
+        labels.append("رشته " + "، ".join(page["field_titles"]))
+    if page.get("academic_year_code"):
+        labels.append("سال تحصیلی " + str(page["academic_year_code"]))
+    if page.get("edition_label"):
+        labels.append(str(page["edition_label"]))
+    if page.get("print_year"):
+        labels.append("چاپ " + str(page["print_year"]))
+    if page.get("publisher"):
+        labels.append("ناشر " + str(page["publisher"]))
     chapter_number = page.get("chapter_number")
     chapter_title = page.get("chapter_title")
     if chapter_number is not None and chapter_title:
-        return f"{title}، فصل {chapter_number}: {chapter_title}"
-    if chapter_title:
-        return f"{title}، {chapter_title}"
-    if chapter_number is not None:
-        return f"{title}، فصل {chapter_number}"
-    return f"{title}، فصل نامشخص"
+        chapter = f"فصل {chapter_number}: {chapter_title}"
+    elif chapter_title:
+        chapter = chapter_title
+    elif chapter_number is not None:
+        chapter = f"فصل {chapter_number}"
+    else:
+        chapter = "فصل نامشخص"
+    edition = "، " + "، ".join(labels) if labels else ""
+    return f"{title}{edition}، {chapter}"
 
 
 async def _enrich_page_citation_metadata(
