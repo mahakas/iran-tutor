@@ -24,7 +24,7 @@ from app.core.llm_client import track_token_usage
 from app.db.session import get_session
 from app.models.auth import User, UserFile
 from app.models.chat import ChatSession
-from app.models.curriculum import Book
+from app.models.curriculum import Book, BookCurriculumLink, Grade
 from app.services.account_service import (
     ensure_user_file_path,
     normalize_preferences,
@@ -49,7 +49,7 @@ from app.services.chat_stream import (
     stop_stream,
 )
 from app.services.intent_router import route_intent
-from app.services.multi_grade_rag import ScopeError, build_scopes
+from app.services.multi_grade_rag import ScopeError, resolve_curriculum_book_ids
 from app.services.tutor_turns import finish_turn_success
 
 logger = logging.getLogger(__name__)
@@ -282,11 +282,62 @@ async def _resolve_request_scope(
     """
     if body.grade_numbers:
         grades = sorted(set(body.grade_numbers))
+        if body.book_id is None or not body.branch_code:
+            raise HTTPException(
+                status_code=422,
+                detail="multi-grade retrieval requires an anchor book and an explicit education branch",
+            )
+        anchor_book = await session.get(Book, body.book_id)
+        anchor_grade = (
+            await session.get(Grade, anchor_book.grade_id) if anchor_book is not None else None
+        )
+        if anchor_book is None or anchor_grade is None:
+            raise HTTPException(status_code=404, detail="anchor textbook not found")
+        if anchor_grade.number not in grades:
+            raise HTTPException(
+                status_code=422,
+                detail="the anchor textbook grade must be included in grade_numbers",
+            )
+        _resolved_book, _resolved_grade, field_code = await resolve_book_scope(
+            session,
+            book_id=anchor_book.id,
+            grade_number=anchor_grade.number,
+            major_code=body.major_code,
+            branch_code=body.branch_code,
+        )
+        subject_ids = list(
+            (
+                await session.scalars(
+                    select(BookCurriculumLink.subject_id).where(
+                        BookCurriculumLink.book_id == anchor_book.id,
+                        BookCurriculumLink.subject_id.is_not(None),
+                    )
+                )
+            ).all()
+        )
+        if body.book_ids is not None and anchor_book.id not in body.book_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="book_ids must include the selected anchor textbook",
+            )
         try:
-            await build_scopes(session, grade_numbers=grades, book_ids=body.book_ids)
+            authorized_book_ids = await resolve_curriculum_book_ids(
+                session,
+                grade_numbers=grades,
+                branch_code=body.branch_code,
+                field_code=field_code,
+                academic_year_id=anchor_book.academic_year_id,
+                subject_ids=subject_ids,
+                requested_book_ids=body.book_ids,
+            )
         except ScopeError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        return None, None, None, grades, body.book_ids
+        if anchor_book.id not in authorized_book_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="the anchor textbook is outside the selected curriculum scope",
+            )
+        return None, None, field_code, grades, authorized_book_ids
     if body.grade_number is None or body.book_id is None:
         raise HTTPException(
             status_code=422,
