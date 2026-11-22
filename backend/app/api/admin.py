@@ -3137,7 +3137,13 @@ async def list_feature_routes(session: AsyncSession = Depends(get_session)) -> d
     return {
         "routes": [serialize_route(route) for route in rows],
         "providers": [
-            {"id": p.id, "name": p.name, "is_active": p.is_active, "capabilities": list(p.capabilities or [])}
+            {
+                "id": p.id,
+                "name": p.name,
+                "provider_type": p.provider_type,
+                "is_active": p.is_active,
+                "capabilities": list(p.capabilities or []),
+            }
             for p in providers
         ],
         "feature_keys": [
@@ -3167,7 +3173,6 @@ async def upsert_feature_route(
             raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ جایگزین قدیمی در زنجیره تکرار شده است.")
         provider_ids.append(body.fallback_provider_id)
 
-    providers_by_id = {}
     for provider_id in provider_ids:
         provider = await session.get(AiProvider, provider_id)
         if provider is None:
@@ -3177,7 +3182,6 @@ async def upsert_feature_route(
                 status_code=422,
                 detail="این مسیر فعلاً فقط از APIهای سازگار با OpenAI و سرورهای Local پشتیبانی می‌کند؛ برای پروتکل بومی این ارائه‌دهنده Adapter جداگانه لازم است.",
             )
-        providers_by_id[provider_id] = provider
 
     route = await session.scalar(
         select(FeatureModelRoute).where(FeatureModelRoute.feature_key == body.feature_key)
