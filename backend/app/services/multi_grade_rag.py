@@ -69,6 +69,20 @@ async def resolve_curriculum_book_ids(
         raise ScopeError("too many grades")
     if not subject_ids:
         raise ScopeError("the anchor textbook must have an approved subject mapping for multi-grade retrieval")
+    subject_ids = sorted(
+        set(
+            (
+                await session.scalars(
+                    select(Subject.id).where(
+                        Subject.id.in_([int(subject_id) for subject_id in subject_ids]),
+                        Subject.is_active.is_(True),
+                    )
+                )
+            ).all()
+        )
+    )
+    if not subject_ids:
+        raise ScopeError("the anchor textbook has no active subject mapping for multi-grade retrieval")
     if not branch_code:
         raise ScopeError("branch_code is required for multi-grade retrieval")
 
