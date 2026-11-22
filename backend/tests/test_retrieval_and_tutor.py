@@ -203,7 +203,7 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
         async def no_lexical_results(*args, **kwargs):
             return []
 
-        async def passthrough_verified(points, *, scopes):
+        async def passthrough_verified(points, *, scopes, expected_embedding_model=None):
             return [
                 {**(point.payload or {}), "score": float(point.score)}
                 for point in points
