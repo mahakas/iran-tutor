@@ -394,6 +394,13 @@ def _scope_sql_clause(scopes: Sequence[TextbookScope]):
     return or_(*clauses)
 
 
+async def _uses_postgresql_database() -> bool:
+    """Detect the active SQL dialect instead of assuming demo_mode means SQLite."""
+    async with async_session_factory() as session:
+        bind = session.get_bind()
+        return bool(bind is not None and bind.dialect.name == "postgresql")
+
+
 async def _search_postgres_scopes(
     query: str, *, scopes: Sequence[TextbookScope], limit: int
 ) -> list[dict[str, Any]]:
@@ -403,7 +410,7 @@ async def _search_postgres_scopes(
     be explored with SQLite and no PostgreSQL/Qdrant/embedding credentials.
     """
     scope_clause = _scope_sql_clause(scopes)
-    if get_settings().demo_mode:
+    if get_settings().demo_mode or not await _uses_postgresql_database():
         def _terms(value: str) -> set[str]:
             normalized = normalize_persian_text(value).casefold()
             tokens = re.findall(r"[\w۰-۹]+", normalized)
@@ -505,7 +512,7 @@ async def _search_postgres(
     The exact book id is the authoritative edition boundary. major_code remains
     in the signature for compatibility but is not a retrieval filter.
     """
-    if get_settings().demo_mode:
+    if get_settings().demo_mode or not await _uses_postgresql_database():
 
         def _terms(value: str) -> set[str]:
             normalized = normalize_persian_text(value).casefold()
@@ -959,6 +966,7 @@ async def _search_qdrant(
     major_code: str | None,
     book_id: int,
     limit: int,
+    route_session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     embedding_result = await embed_via_gateway(
         ctx=CallContext(feature_key="embedding_query", book_id=book_id),
