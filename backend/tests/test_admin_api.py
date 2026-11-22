@@ -257,6 +257,8 @@ async def test_fix_page_clears_warnings_supports_null_and_serves_admin_lists(mon
         print_year=None,
         publisher=None,
         official_source_url=None,
+        source_checksum=None,
+        approved_at=None,
         catalog_status="approved",
         total_pdf_pages=1,
         status="ready",
