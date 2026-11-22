@@ -26,15 +26,16 @@ class Settings(BaseSettings):
     app_env: str = Field(default="local", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
 
     demo_mode: bool = False
-    llm_base_url: str = Field(min_length=1)
-    llm_api_key: str = Field(min_length=1)
+    # Optional legacy default provider. Managed provider routes can run without these.
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
 
-    # Compare-mode only (test_ingest.py): A/B
-    vision_model_a: str = Field(min_length=1)
-    vision_model_b: str = Field(min_length=1)
+    # Optional legacy vision models used by compare-mode and fallback scripts.
+    vision_model_a: str | None = None
+    vision_model_b: str | None = None
 
-    # Production ingestion: primary + optional escalation
-    vision_model_primary: str = Field(min_length=1)
+    # Optional legacy ingestion model; admin routes take precedence when configured.
+    vision_model_primary: str | None = None
     vision_model_escalation: str | None = None
     tutor_model: str | None = None
     speech_to_text_model: str | None = None
