@@ -249,6 +249,7 @@ async def _run_page(
                 "completion_tokens": gateway_result.tokens_out,
                 "total_tokens": gateway_result.tokens_in + gateway_result.tokens_out,
             }
+            model_used = gateway_result.model_name or model
             latency = time.perf_counter() - started
             try:
                 extraction = PageExtraction.model_validate(parsed)
@@ -259,6 +260,7 @@ async def _run_page(
                     "warnings": [f"JSON validation issue: {str(exc)[:200]}"],
                     "extraction": None,
                     "usage": usage,
+                    "model_name": model_used,
                     "latency": latency,
                 }
         except Exception as exc:  # noqa: BLE001
@@ -313,6 +315,7 @@ async def _run_page(
             "warnings": warnings,
             "extraction": extraction,
             "usage": usage,
+            "model_name": model_used,
             "latency": latency,
         }
 
@@ -423,8 +426,12 @@ async def ingest_book_pages(
     if compare_mode:
         model_names = list(models)
     else:
+        # A configured feature route (ingest_ocr) supplies the actual model at
+        # request time. Keep a stable label for report/storage grouping when no
+        # legacy model_primary is supplied; the gateway overrides it from DB.
         if model_primary is None:
-            raise ValueError("model_primary is required outside compare mode")
+            model_primary = "managed-route"
+            model_escalation = None
         model_names = [model_primary]
         if model_escalation and model_escalation != model_primary:
             model_names.append(model_escalation)
@@ -743,7 +750,7 @@ def _build_page_data(idx: int, model: str, image_path: Path, outcome: dict[str, 
         "printed_page_number": extraction.printed_page_number if extraction else None,
         "chapter_number": extraction.chapter_number if extraction else None,
         "chapter_title": extraction.chapter_title if extraction else None,
-        "model": model,
+        "model": outcome.get("model_name") or model,
         "latency": outcome.get("latency", 0.0),
         "usage": outcome.get("usage"),
         "image_path": str(image_path),
@@ -782,7 +789,7 @@ def _page_values(book_id: int, idx: int, image_path: Path, model: str, outcome: 
         "page_image_path": str(image_path),
         "status": outcome["status"],
         "error_message": outcome.get("error"),
-        "extraction_model": model,
+        "extraction_model": outcome.get("model_name") or model,
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
         "warnings": outcome.get("warnings", []),
