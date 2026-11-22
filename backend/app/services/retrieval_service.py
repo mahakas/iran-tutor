@@ -653,6 +653,7 @@ async def _search_pgvector_scopes(
     params: dict[str, Any] = {
         "query_vector": json.dumps(vector),
         "embedding_model": embedding_model,
+        "catalog_statuses": list(allowed_student_catalog_statuses()),
         "limit": limit,
     }
     clauses: list[str] = []
