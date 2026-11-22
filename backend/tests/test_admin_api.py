@@ -134,7 +134,24 @@ async def test_upload_rejects_invalid_pdf_and_out_of_bounds_page_range(monkeypat
                 return SimpleNamespace(id=12, number=12, has_major=True)
             if "majors" in sql:
                 return SimpleNamespace(id=1, code="math_physics")
+            if "education_branches" in sql:
+                return SimpleNamespace(
+                    id=3, code="theoretical", min_grade=10, max_grade=12, is_active=True
+                )
+            if "fields_of_study" in sql:
+                return SimpleNamespace(
+                    id=2, code="math_physics", branch_id=3, title="ریاضی‌فیزیک", is_active=True
+                )
             return None
+
+        async def scalars(self, stmt):
+            return SimpleNamespace(
+                all=lambda: [
+                    SimpleNamespace(
+                        id=3, code="theoretical", min_grade=10, max_grade=12, is_active=True
+                    )
+                ]
+            )
 
     from app.api import admin as admin_api
 
@@ -454,9 +471,24 @@ async def test_upload_structured_markdown_json_and_html_books(monkeypatch, tmp_p
                 return SimpleNamespace(id=12, number=12, has_major=True)
             if "majors" in sql:
                 return SimpleNamespace(id=1, code="math_physics")
+            if "education_branches" in sql:
+                return SimpleNamespace(
+                    id=3, code="theoretical", min_grade=10, max_grade=12, is_active=True
+                )
+            if "fields_of_study" in sql:
+                return SimpleNamespace(
+                    id=2, code="math_physics", branch_id=3, title="ریاضی‌فیزیک", is_active=True
+                )
             return None
 
         async def scalars(self, stmt):
+            sql = str(stmt)
+            if "education_branches" in sql:
+                return FakeScalarsResult([
+                    SimpleNamespace(
+                        id=3, code="theoretical", min_grade=10, max_grade=12, is_active=True
+                    )
+                ])
             # Return pages for the most recently created book
             latest_id = max(stored_pages) if stored_pages else 0
             return FakeScalarsResult(stored_pages.get(latest_id, []))
