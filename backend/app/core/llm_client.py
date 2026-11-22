@@ -10,7 +10,7 @@ import asyncio
 import base64
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
@@ -43,7 +43,7 @@ _embedding_client: AsyncOpenAI | None = None
 _audio_client: AsyncOpenAI | None = None
 _semaphore: asyncio.Semaphore | None = None
 # Models whose provider rejected `response_format=json_object`.
-_json_mode_unsupported: set[str] = set()
+_json_mode_unsupported: set[tuple[str, str]] = set()
 
 
 @dataclass
@@ -80,6 +80,59 @@ class UsageAccumulator:
 _current_usage: ContextVar[UsageAccumulator | None] = ContextVar("llm_usage", default=None)
 
 
+@dataclass(frozen=True)
+class ProviderClientConfig:
+    """Per-call provider endpoint and credential; never include this object in logs."""
+
+    base_url: str
+    api_key: str = field(repr=False)
+
+
+_provider_override: ContextVar[ProviderClientConfig | None] = ContextVar(
+    "llm_provider_override", default=None
+)
+_routed_clients: dict[tuple[str, str], AsyncOpenAI] = {}
+
+
+@contextmanager
+def use_provider(base_url: str, api_key: str) -> Iterator[None]:
+    """Select a provider client for the current async call without global mutation."""
+    cleaned_base = (base_url or "").strip().rstrip("/")
+    if not cleaned_base:
+        raise ValueError("provider base_url is required")
+    if not api_key:
+        raise ValueError("provider API key is required")
+    token = _provider_override.set(ProviderClientConfig(cleaned_base, api_key))
+    try:
+        yield
+    finally:
+        _provider_override.reset(token)
+
+
+def is_provider_failover_error(error: Exception) -> bool:
+    """Classify transient/provider-availability errors that justify trying a backup."""
+    if isinstance(error, (APITimeoutError, APIConnectionError, InvalidJSONError)):
+        return True
+    if isinstance(error, APIStatusError):
+        return error.status_code in {401, 403, 408, 409, 425, 429} or error.status_code >= 500
+    return False
+
+
+def _get_routed_client(config: ProviderClientConfig) -> AsyncOpenAI:
+    key_fingerprint = hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()
+    cache_key = (config.base_url, key_fingerprint)
+    client = _routed_clients.get(cache_key)
+    if client is None:
+        client = AsyncOpenAI(
+            base_url=config.base_url,
+            api_key=config.api_key,
+            timeout=get_settings().llm_timeout,
+            max_retries=0,
+        )
+        _routed_clients[cache_key] = client
+    return client
+
+
 @contextmanager
 def track_token_usage() -> Iterator[UsageAccumulator]:
     """Collect token usage across all LLM/vision/audio calls within this block."""
@@ -108,6 +161,9 @@ class InvalidJSONError(ValueError):
 
 def _get_client() -> AsyncOpenAI:
     global _client
+    override = _provider_override.get()
+    if override is not None:
+        return _get_routed_client(override)
     if _client is None:
         settings = get_settings()
         _client = AsyncOpenAI(
@@ -206,7 +262,8 @@ async def _complete(
 ) -> tuple[str | None, dict[str, int | None]]:
     """One completion call, falling back to plain text if JSON mode is rejected."""
     client = _get_client()
-    if model not in _json_mode_unsupported:
+    cache_key = (str(client.base_url), model)
+    if cache_key not in _json_mode_unsupported:
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -216,7 +273,7 @@ async def _complete(
             )
             return response.choices[0].message.content, _usage_dict(response.usage)
         except (BadRequestError, UnprocessableEntityError) as error:
-            _json_mode_unsupported.add(model)
+            _json_mode_unsupported.add(cache_key)
             _log(
                 logging.WARNING,
                 "llm.json_mode_rejected",
@@ -301,6 +358,9 @@ async def complete_json(model: str, messages: list[dict[str, str]]) -> dict[str,
 
 def _get_embedding_client() -> AsyncOpenAI:
     global _embedding_client
+    override = _provider_override.get()
+    if override is not None:
+        return _get_routed_client(override)
     if _embedding_client is None:
         settings = get_settings()
         _embedding_client = AsyncOpenAI(
@@ -536,6 +596,9 @@ async def stream_text(
 
 def _get_audio_client() -> AsyncOpenAI:
     global _audio_client
+    override = _provider_override.get()
+    if override is not None:
+        return _get_routed_client(override)
     if _audio_client is None:
         settings = get_settings()
         _audio_client = AsyncOpenAI(
@@ -640,8 +703,15 @@ async def synthesize_speech(
 async def close_llm_clients() -> None:
     """Dispose provider HTTP clients and reset semaphore/capability caches."""
     global _client, _embedding_client, _audio_client, _semaphore
-    clients = (_client, _embedding_client, _audio_client, *_speech_clients.values())
+    clients = (
+        _client,
+        _embedding_client,
+        _audio_client,
+        *_speech_clients.values(),
+        *_routed_clients.values(),
+    )
     _speech_clients.clear()
+    _routed_clients.clear()
     _client = None
     _embedding_client = None
     _audio_client = None
