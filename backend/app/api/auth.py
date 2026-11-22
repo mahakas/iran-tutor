@@ -232,6 +232,15 @@ async def request_otp(
         .where(OtpCode.phone_number == phone, OtpCode.consumed_at.is_(None))
         .values(consumed_at=now)
     )
+    # A newly requested OTP invalidates any older, unredeemed password-setup challenge.
+    await session.execute(
+        update(OtpCode)
+        .where(
+            OtpCode.phone_number == phone,
+            OtpCode.verification_token_hash.is_not(None),
+        )
+        .values(verification_token_hash=None, verification_token_expires_at=None)
+    )
 
     code = f"{secrets.randbelow(900000) + 100000}"
     otp_id = str(uuid4())
@@ -289,8 +298,7 @@ async def verify_otp(
         raise HTTPException(status_code=422, detail="کد تأیید باید ۶ رقم باشد.")
 
     now = datetime.now(timezone.utc)
-    # Lock the active OTP row so parallel verify requests cannot each read the same
-    # attempt counter and bypass max_attempts (SELECT ... FOR UPDATE on PostgreSQL).
+    # Lock the active OTP row so concurrent verification attempts cannot race the counter.
     otp = await session.scalar(
         select(OtpCode)
         .where(OtpCode.phone_number == phone, OtpCode.consumed_at.is_(None))
@@ -303,15 +311,35 @@ async def verify_otp(
 
     if _utc(otp.expires_at) <= now:
         otp.consumed_at = now
+        await session.commit()
+        raise HTTPException(status_code=401, detail="کد تأیید منقضی شده است. لطفاً کد جدید دریافت کنید.")
+
+    if otp.attempts >= otp.max_attempts:
+        otp.consumed_at = now
+        await session.commit()
+        raise HTTPException(status_code=429, detail="تعداد تلاش‌های اشتباه بیش از حد مجاز است. کد جدید بگیرید.")
+
+    if not verify_otp_hash(otp.id, phone, code_clean, otp.code_hash):
+        otp.attempts += 1
+        if otp.attempts >= otp.max_attempts:
+            otp.consumed_at = now
+        await session.commit()
+        remaining = max(0, otp.max_attempts - otp.attempts)
+        message = (
+            f"کد واردشده نادرست است. ({remaining} تلاش باقی‌مانده)"
+            if remaining
+            else "کد باطل شد. کد جدید دریافت کنید."
+        )
+        raise HTTPException(status_code=401, detail=message)
+
+    otp.consumed_at = now
     user = await session.scalar(select(User).where(User.phone_number == phone))
-    is_new_user = user is None
     if user is not None and (not user.is_active or user.deleted_at is not None):
         await session.commit()
         raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال یا حذف شده است.")
 
     if user is None or not user.password_hash:
-        # OTP was consumed; the high-entropy challenge is bound to this phone and OTP row,
-        # expires quickly, and can be redeemed exactly once by complete-registration.
+        # Return a short-lived, one-use setup capability; an OTP alone never creates a user session.
         verification_token = secrets.token_urlsafe(32)
         otp.verified_at = now
         otp.verification_token_hash = hash_phone_verification_token(otp.id, phone, verification_token)
@@ -323,7 +351,7 @@ async def verify_otp(
             "password_setup_required": True,
             "verification_token": verification_token,
             "phone_number": phone,
-            "is_new_user": is_new_user,
+            "is_new_user": user is None,
         }
 
     if body.full_name and body.full_name.strip() and not user.full_name:
@@ -386,6 +414,7 @@ async def complete_registration(
         await session.commit()
         raise HTTPException(status_code=409, detail="برای این حساب قبلاً رمز ثبت شده است؛ از ورود با رمز استفاده کنید.")
 
+    is_new_user = user is None
     if user is None:
         billing = await get_or_init_billing_settings(session)
         user = User(
@@ -422,7 +451,7 @@ async def complete_registration(
         response=response,
         session=session,
         now=now,
-        is_new_user=user.created_at == now,
+        is_new_user=is_new_user,
     )
 
 
