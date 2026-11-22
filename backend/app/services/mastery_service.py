@@ -367,6 +367,9 @@ async def record_objective_evidence(
     if profile == "mixed" and score is None and qualitative_level is None and not rubric:
         raise HTTPException(status_code=422, detail="حداقل یک شاهد کمی، توصیفی یا عملکردی لازم است.")
 
+    if book_id is None:
+        raise HTTPException(status_code=422, detail="برای ثبت شاهد یادگیری، انتخاب کتاب رسمی الزامی است.")
+
     page_id = None
     if book_id is not None:
         book = await session.get(Book, book_id)
@@ -429,7 +432,9 @@ async def record_objective_evidence(
                 select(BookPageObjective.objective_id).where(BookPageObjective.book_page_id == page.id)
             )
         ).all()
-        if mapped_objectives and objective_id not in mapped_objectives:
+        if not mapped_objectives:
+            raise HTTPException(status_code=422, detail="برای این صفحه هنوز نگاشت هدف یادگیری تأیید نشده است.")
+        if objective_id not in mapped_objectives:
             raise HTTPException(status_code=422, detail="این هدف به صفحهٔ انتخاب‌شده متصل نیست.")
         page_id = page.id
 
@@ -530,10 +535,12 @@ async def objective_tree(
         ).all()
     )
     relevance_terms = []
-    if subject_ids:
-        relevance_terms.append(CurriculumUnit.subject_id.in_(subject_ids))
+    # Page-to-objective mappings are authoritative when present. An OR with
+    # subject-wide objectives would nullify these mappings and widen mastery.
     if mapped_objective_ids:
         relevance_terms.append(LearningObjective.id.in_(mapped_objective_ids))
+    elif subject_ids:
+        relevance_terms.append(CurriculumUnit.subject_id.in_(subject_ids))
     if not relevance_terms:
         return {
             "book": {"id": book.id, "title": book.title},
@@ -554,6 +561,20 @@ async def objective_tree(
                 CurriculumUnit.is_active.is_(True),
                 LearningObjective.is_active.is_(True),
                 scope_condition,
+                (
+                    and_(
+                        CurriculumUnit.academic_year_id.is_(None),
+                        CurriculumUnit.scope_code == "unspecified",
+                    )
+                    if book.academic_year_id is None
+                    else and_(
+                        or_(
+                            CurriculumUnit.academic_year_id.is_(None),
+                            CurriculumUnit.academic_year_id == book.academic_year_id,
+                        ),
+                        scope_condition,
+                    )
+                ),
                 branch_scope_condition,
                 or_(*relevance_terms),
             )

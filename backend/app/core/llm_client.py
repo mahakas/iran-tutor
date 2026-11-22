@@ -41,6 +41,7 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 _client: AsyncOpenAI | None = None
 _embedding_client: AsyncOpenAI | None = None
 _audio_client: AsyncOpenAI | None = None
+_route_clients: dict[tuple[str, str], AsyncOpenAI] = {}
 _semaphore: asyncio.Semaphore | None = None
 # Models whose provider rejected `response_format=json_object`.
 _json_mode_unsupported: set[str] = set()
@@ -117,6 +118,28 @@ def _get_client() -> AsyncOpenAI:
             max_retries=0,  # retries are handled here, in one place
         )
     return _client
+
+
+def _get_route_client(base_url: str, api_key: str | None) -> AsyncOpenAI:
+    """Client pinned to an admin-selected provider; never inherit another env key."""
+    normalized_base = base_url.strip().rstrip("/")
+    if not normalized_base:
+        raise ValueError("provider base_url must not be empty")
+    cache_key = (normalized_base, api_key or "")
+    client = _route_clients.get(cache_key)
+    if client is None:
+        client = AsyncOpenAI(
+            base_url=normalized_base,
+            api_key=api_key or "no-auth",
+            timeout=get_settings().llm_timeout,
+            max_retries=0,
+        )
+        _route_clients[cache_key] = client
+    return client
+
+
+def _get_chat_client(base_url: str | None = None, api_key: str | None = None) -> AsyncOpenAI:
+    return _get_route_client(base_url, api_key) if base_url else _get_client()
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -202,34 +225,40 @@ def _is_retryable(error: Exception) -> bool:
 
 
 async def _complete(
-    model: str, messages: list[dict[str, Any]]
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int | None = None,
 ) -> tuple[str | None, dict[str, int | None]]:
-    """One completion call, falling back to plain text if JSON mode is rejected."""
-    client = _get_client()
-    if model not in _json_mode_unsupported:
+    """One JSON completion call against the selected provider."""
+    client = _get_chat_client(base_url, api_key)
+    cache_key = f"{base_url or 'env'}::{model}"
+    request: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+    if max_tokens is not None:
+        request["max_tokens"] = max_tokens
+    if cache_key not in _json_mode_unsupported:
         try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,  # type: ignore[arg-type]
-                temperature=0,
-                response_format={"type": "json_object"},
-            )
+            response = await client.chat.completions.create(**request)
             return response.choices[0].message.content, _usage_dict(response.usage)
         except (BadRequestError, UnprocessableEntityError) as error:
-            _json_mode_unsupported.add(model)
+            _json_mode_unsupported.add(cache_key)
             _log(
                 logging.WARNING,
                 "llm.json_mode_rejected",
                 model=model,
+                provider=base_url or "env",
                 status=error.status_code,
                 error=str(error)[:300],
             )
-
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,  # type: ignore[arg-type]
-        temperature=0,
-    )
+    request.pop("response_format", None)
+    response = await client.chat.completions.create(**request)
     return response.choices[0].message.content, _usage_dict(response.usage)
 
 
@@ -257,7 +286,14 @@ def _demo_questions(messages: list[dict[str, str]]) -> dict[str, Any]:
     return {"questions": questions}
 
 
-async def complete_json(model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+async def complete_json(
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int | None = None,
+) -> dict[str, Any]:
     """Request structured JSON through the shared LLM wrapper with retries."""
     if get_settings().demo_mode:
         demo = _demo_questions(messages)
@@ -270,7 +306,7 @@ async def complete_json(model: str, messages: list[dict[str, str]]) -> dict[str,
             guard = {"role": "system", "content": "Return only one valid JSON object."}
             json_messages.insert(1 if json_messages and json_messages[0]["role"] == "system" else 0, guard)
             async with _get_semaphore():
-                content, _usage = await _complete(model, json_messages)
+                content, _usage = await _complete(model, json_messages, base_url=base_url, api_key=api_key, max_tokens=max_tokens)
             parsed = extract_json(content)
             prompt_est = max(50, sum(len(str(m.get("content", ""))) for m in json_messages) // 4)
             completion_est = max(50, len(content or "") // 4)
@@ -312,7 +348,13 @@ def _get_embedding_client() -> AsyncOpenAI:
     return _embedding_client
 
 
-async def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
+async def embed_texts(
+    texts: list[str],
+    model: str | None = None,
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> list[list[float]]:
     """Create vectors through the configured OpenAI-compatible embedding API."""
     if not texts:
         return []
@@ -329,7 +371,7 @@ async def embed_texts(texts: list[str], model: str | None = None) -> list[list[f
             magnitude = sum(value * value for value in vector) ** 0.5
             vectors.append([value / magnitude for value in vector] if magnitude else vector)
         return vectors
-    client = _get_embedding_client()
+    client = _get_route_client(base_url, api_key) if base_url else _get_embedding_client()
 
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -369,7 +411,15 @@ async def embed_texts(texts: list[str], model: str | None = None) -> list[list[f
     raise RuntimeError("unreachable")  # pragma: no cover
 
 
-async def complete_text(model: str, messages: list[dict[str, str]]) -> str:
+async def complete_text(
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int | None = None,
+) -> str:
     """Create a plain-text chat completion through the shared provider client."""
     if get_settings().demo_mode:
         prompt = messages[-1].get("content", "") if messages else ""
@@ -398,16 +448,19 @@ async def complete_text(model: str, messages: list[dict[str, str]]) -> str:
         completion_est = max(60, len(reply) // 4)
         record_token_usage(fallback_prompt=prompt_est, fallback_completion=completion_est)
         return reply
-    client = _get_client()
+    client = _get_chat_client(base_url, api_key)
     for attempt in range(MAX_RETRIES + 1):
         started = time.perf_counter()
         try:
             async with _get_semaphore():
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,  # type: ignore[arg-type]
-                    temperature=0.2,
-                )
+                request: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                }
+                if max_tokens is not None:
+                    request["max_tokens"] = max_tokens
+                response = await client.chat.completions.create(**request)
             content = response.choices[0].message.content
             if not content or not content.strip():
                 raise InvalidJSONError("empty model response")
@@ -451,6 +504,11 @@ async def stream_text(
     model: str,
     messages: list[dict[str, Any]],
     on_chunk: Callable[[str], Awaitable[None]],
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int | None = None,
 ) -> str:
     """Stream a plain-text chat completion while preserving the shared client policy.
 
@@ -463,7 +521,7 @@ async def stream_text(
             await on_chunk(content[start : start + 40])
         return content
 
-    client = _get_client()
+    client = _get_chat_client(base_url, api_key)
     for attempt in range(MAX_RETRIES + 1):
         started = time.perf_counter()
         emitted = False
@@ -471,12 +529,15 @@ async def stream_text(
         try:
             parts: list[str] = []
             async with _get_semaphore():
-                stream = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,  # type: ignore[arg-type]
-                    temperature=0.2,
-                    stream=True,
-                )
+                request: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "stream": True,
+                }
+                if max_tokens is not None:
+                    request["max_tokens"] = max_tokens
+                stream = await client.chat.completions.create(**request)
                 async for event in stream:
                     choices = getattr(event, "choices", None) or []
                     for choice in choices:
@@ -548,7 +609,13 @@ def _get_audio_client() -> AsyncOpenAI:
 
 
 async def transcribe_audio(
-    audio_bytes: bytes, *, filename: str, content_type: str, model: str | None = None
+    audio_bytes: bytes,
+    *,
+    filename: str,
+    content_type: str,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> str:
     """Transcribe Persian audio through a configurable OpenAI-compatible API."""
     settings = get_settings()
@@ -561,7 +628,7 @@ async def transcribe_audio(
     if not transcription_model:
         raise RuntimeError("SPEECH_TO_TEXT_MODEL must be configured for voice questions")
 
-    client = _get_audio_client()
+    client = _get_route_client(base_url, api_key) if base_url else _get_audio_client()
     async with _get_semaphore():
         response = await client.audio.transcriptions.create(
             model=transcription_model,
@@ -618,7 +685,7 @@ async def synthesize_speech(
         if client is None:
             client = AsyncOpenAI(
                 base_url=base_url,
-                api_key=api_key or settings.llm_api_key,
+                api_key=api_key or "no-auth",
                 timeout=settings.llm_timeout,
                 max_retries=0,
             )
@@ -640,8 +707,9 @@ async def synthesize_speech(
 async def close_llm_clients() -> None:
     """Dispose provider HTTP clients and reset semaphore/capability caches."""
     global _client, _embedding_client, _audio_client, _semaphore
-    clients = (_client, _embedding_client, _audio_client, *_speech_clients.values())
+    clients = (_client, _embedding_client, _audio_client, *_speech_clients.values(), *_route_clients.values())
     _speech_clients.clear()
+    _route_clients.clear()
     _client = None
     _embedding_client = None
     _audio_client = None
@@ -658,6 +726,10 @@ async def vision_json(
     user_text: str,
     image_png_bytes: bytes,
     image_mime_type: str = "image/png",
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, int | None]]:
     """Send one PNG plus text to a vision model and return `(parsed_dict, usage)`.
 
@@ -705,7 +777,7 @@ async def vision_json(
         started = time.perf_counter()
         try:
             async with _get_semaphore():
-                content, usage = await _complete(model, messages)
+                content, usage = await _complete(model, messages, base_url=base_url, api_key=api_key, max_tokens=max_tokens)
             parsed = extract_json(content)
         except Exception as error:  # noqa: BLE001 - classified just below
             if not _is_retryable(error) or attempt == MAX_RETRIES:

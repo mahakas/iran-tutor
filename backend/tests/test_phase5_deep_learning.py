@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+
+from fastapi import HTTPException
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +18,10 @@ from app.db.seed import seed_billing_settings, seed_curriculum_taxonomy, seed_gr
 from app.db.session import get_session
 from app.main import app
 from app.models.auth import User
-from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.models.curriculum import (
+    Book, BookCurriculumLink, BookPage, BookPageObjective, BookStatus,
+    CurriculumUnit, Grade, LearningObjective, Major, PageStatus, Subject,
+)
 from app.models.exam import ExamSession, ExamStatus
 from app.models.flashcards import Flashcard, FlashcardDeck
 from app.models.governance import AiAuditLog
@@ -99,7 +104,8 @@ async def env(tmp_path, monkeypatch):
                                  markdown_content=text, page_image_path="/tmp/none.png",
                                  status=PageStatus.done))
         student = User(phone_number="09121000001", full_name="دانش‌آموز", role="student",
-                       tokens_remaining=1_000_000, plan_expires_at=NOW + timedelta(days=30), is_active=True)
+                       tokens_remaining=1_000_000, plan_expires_at=NOW + timedelta(days=30),
+                       grade_level=10, is_active=True)
         session.add(student)
         await session.flush()
         ids.update(student_id=student.id, book_id=book.id)
@@ -498,7 +504,7 @@ async def test_deep_solve_repairs_one_invalid_structured_plan(env):
 async def test_deep_solve_invalid_model_plan_creates_no_orphan_row(env):
     env.fake.json_reply = lambda messages: {"steps": "not a list"}
     async with _client() as client:
-        response = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
+        response = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله", "book_id": env.ids["book_id"]})
     assert response.status_code == 502
     assert await _count(env.factory, DeepSolveSession) == 0
 
@@ -512,7 +518,7 @@ async def test_disabled_capability_blocks_student_and_admin_edit_is_logged(env):
         off = await client.put("/api/v1/admin/capabilities/deep_solve",
                                json={"is_enabled": False}, headers=ADMIN_HEADERS)
         assert off.status_code == 200
-        blocked = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
+        blocked = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله", "book_id": env.ids["book_id"]})
         assert blocked.status_code == 403
         logs = await client.get("/api/v1/admin/action-logs", params={"target": "capability:deep_solve"},
                                 headers=ADMIN_HEADERS)
@@ -591,7 +597,7 @@ async def test_admin_sees_student_mistakes_sessions_and_validator_rejections(env
         await session.commit()
     async with _client() as client:
         await client.post(f"/api/v1/exams/{exam_id}/submit", json={"answers": {"q1": "B"}})
-        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
+        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله", "book_id": env.ids["book_id"]})
         mistakes = await client.get(f"/api/v1/admin/users/{student}/mistakes", headers=ADMIN_HEADERS)
         sessions = await client.get(f"/api/v1/admin/users/{student}/deep-solve-sessions", headers=ADMIN_HEADERS)
         rejected = await client.get(f"/api/v1/admin/users/{student}/quiz-validation",
@@ -620,7 +626,7 @@ async def test_phase5_ai_calls_route_through_runtime_and_gateway(env, monkeypatc
     monkeypatch.setattr(deep_solve_service, "run_capability_json", spy)
     env.fake.json_reply = lambda messages: PLAN
     async with _client() as client:
-        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله"})
+        await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئله", "book_id": env.ids["book_id"]})
     assert seen == ["deep_solve"]
     assert await _count(env.factory, AiAuditLog, AiAuditLog.feature_key == "deep_solve") >= 1
 
@@ -660,7 +666,7 @@ async def test_ai_capabilities_consume_user_quota_rows(env):
     async with _client() as client:
         r1 = await client.post(f"/api/v1/immersive/books/{book_id}/assist",
                                json={"action": "summarize", "pdf_page_index": 2})
-        r2 = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئلهٔ آزمایشی"})
+        r2 = await client.post("/api/v1/deep-solve/sessions", json={"problem_text": "مسئلهٔ آزمایشی", "book_id": env.ids["book_id"]})
     assert r1.status_code == 200
     assert r2.status_code in (201, 502)  # plan may be invalid in the stub; quota must still be touched
     async with env.factory() as session:
@@ -699,3 +705,142 @@ async def test_admin_views_expose_phase5_data_per_student(env):
     assert mastery.status_code == 200 and mastery.json()["chapters"]
     assert sessions.status_code == 200 and "items" in sessions.json()
     assert validation.status_code == 200 and "items" in validation.json()
+
+
+@pytest.mark.asyncio
+async def test_mastery_tree_and_evidence_obey_exact_page_objective_mapping(env):
+    async with env.factory() as session:
+        book = await session.get(Book, env.ids["book_id"])
+        grade = await session.scalar(select(Grade).where(Grade.number == 10))
+        subject = Subject(code="hotfix_mastery_scope", title="درس آزمون اصلاحی", is_active=True)
+        session.add(subject)
+        await session.flush()
+
+        unit = CurriculumUnit(
+            grade_id=grade.id,
+            subject_id=subject.id,
+            scope_code="unspecified",
+            code="hotfix-mastery-unit",
+            title="واحد آزمون اصلاحی",
+            unit_type="chapter",
+            is_active=True,
+        )
+        session.add(unit)
+        await session.flush()
+
+        mapped = LearningObjective(
+            unit_id=unit.id,
+            code="hotfix-objective-mapped",
+            title="هدف متصل به صفحه",
+            assessment_profile="written",
+            is_active=True,
+        )
+        unmapped = LearningObjective(
+            unit_id=unit.id,
+            code="hotfix-objective-unmapped",
+            title="هدف بدون اتصال به صفحه",
+            assessment_profile="written",
+            is_active=True,
+        )
+        session.add_all([mapped, unmapped])
+        await session.flush()
+
+        session.add(
+            BookCurriculumLink(
+                book_id=book.id,
+                subject_id=subject.id,
+                scope_code="general:hotfix:mastery",
+            )
+        )
+        page = await session.scalar(
+            select(BookPage).where(
+                BookPage.book_id == book.id,
+                BookPage.pdf_page_index == 2,
+                BookPage.status == PageStatus.done,
+            )
+        )
+        assert page is not None
+        session.add(BookPageObjective(book_page_id=page.id, objective_id=mapped.id))
+        await session.commit()
+
+        tree = await mastery_service.objective_tree(
+            session, user_id=env.ids["student_id"], book_id=book.id
+        )
+        returned_ids = {item["id"] for item in tree["objectives"]}
+        assert mapped.id in returned_ids
+        assert unmapped.id not in returned_ids
+
+        valid = await mastery_service.record_objective_evidence(
+            session,
+            user_id=env.ids["student_id"],
+            objective_id=mapped.id,
+            source_type="reading",
+            source_ref="hotfix-evidence-valid",
+            score=95,
+            qualitative_level=None,
+            rubric={},
+            feedback=None,
+            book_id=book.id,
+            pdf_page_index=page.pdf_page_index,
+        )
+        assert valid.verification_status == "unverified"
+        assert valid.book_id == book.id
+
+        with pytest.raises(HTTPException) as mismatch:
+            await mastery_service.record_objective_evidence(
+                session,
+                user_id=env.ids["student_id"],
+                objective_id=unmapped.id,
+                source_type="reading",
+                source_ref="hotfix-evidence-mismatch",
+                score=95,
+                qualitative_level=None,
+                rubric={},
+                feedback=None,
+                book_id=book.id,
+                pdf_page_index=page.pdf_page_index,
+            )
+        assert mismatch.value.status_code == 422
+
+        with pytest.raises(HTTPException) as missing_book:
+            await mastery_service.record_objective_evidence(
+                session,
+                user_id=env.ids["student_id"],
+                objective_id=unmapped.id,
+                source_type="reading",
+                source_ref="hotfix-evidence-no-book",
+                score=95,
+                qualitative_level=None,
+                rubric={},
+                feedback=None,
+                book_id=None,
+            )
+        assert missing_book.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_deep_solve_refuses_books_without_processed_source_pages(env):
+    async with env.factory() as session:
+        pages = (
+            await session.scalars(
+                select(BookPage).where(BookPage.book_id == env.ids["book_id"])
+            )
+        ).all()
+        assert pages
+        for page in pages:
+            page.status = PageStatus.needs_review
+        await session.commit()
+
+    async with _client() as client:
+        missing_book = await client.post(
+            "/api/v1/deep-solve/sessions",
+            json={"problem_text": "مسئله بدون کتاب"},
+        )
+        no_processed_pages = await client.post(
+            "/api/v1/deep-solve/sessions",
+            json={"problem_text": "مسئله", "book_id": env.ids["book_id"]},
+        )
+
+    assert missing_book.status_code == 422
+    assert no_processed_pages.status_code == 409
+    assert await _count(env.factory, DeepSolveSession) == 0

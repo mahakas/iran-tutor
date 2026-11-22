@@ -9,6 +9,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.core.config import get_settings
 from app.models.auth import User, UserSession
 from app.models.curriculum import Book, BookCurriculumLink, BookStatus, EducationBranch, FieldOfStudy, Grade, Major
 from app.services.auth_billing_service import USER_COOKIE_NAME, parse_user_session_token
@@ -87,13 +88,16 @@ async def require_student(
 
 
 def enforce_student_grade_level(user: User, grade_number: int) -> None:
-    """Prevent a profiled student from accessing content above their assigned grade.
-
-    A missing grade_level is deliberately not guessed here; deployments should
-    complete student grade profiles to activate this restriction.
-    """
+    """Enforce a hard upper-grade boundary for every production student."""
     assigned_grade = getattr(user, "grade_level", None)
-    if assigned_grade is not None and grade_number > assigned_grade:
+    if assigned_grade is None:
+        if get_settings().demo_mode:
+            return
+        raise HTTPException(
+            status_code=403,
+            detail="current student grade is not assigned; ask the school administrator to complete the student profile",
+        )
+    if grade_number > assigned_grade:
         raise HTTPException(
             status_code=422,
             detail="the selected textbook is above the student's assigned grade level",

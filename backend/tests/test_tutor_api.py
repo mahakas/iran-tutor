@@ -114,10 +114,14 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_sessions_roundtrip_crud(tmp_path):
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
     from app.db.base import Base
     from app.db.seed import seed_curriculum_taxonomy, seed_grades, seed_majors
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chat_test.sqlite3'}")
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'chat_test.sqlite3'}",
+        poolclass=NullPool,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -146,6 +150,7 @@ async def test_chat_sessions_roundtrip_crud(tmp_path):
             tokens_total=15000,
             tokens_remaining=15000,
             plan_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            grade_level=12,
         )
         session.add_all([book, user])
         await session.commit()
