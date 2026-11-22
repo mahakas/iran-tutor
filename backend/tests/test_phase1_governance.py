@@ -556,6 +556,7 @@ async def test_gateway_uses_admin_route_model_over_env_default(tmp_path, monkeyp
                 name="Router",
                 provider_type="openai_compatible",
                 base_url="https://router.invalid/v1",
+                encrypted_api_key=crypto.encrypt_secret("route-test-api-key"),
                 capabilities=["chat"],
             )
             seen: dict[str, str] = {}
