@@ -124,11 +124,15 @@ export default function AdminPhase5Panel({ authHeaders, onUnauthorized }: Props)
   const rows = (data?.items as Json[] | undefined) ?? [];
 
   const reviewEvidence = async (evidenceId: number, verificationStatus: "verified" | "rejected") => {
+    if (verificationStatus === "rejected" && !reviewNote.trim()) {
+      setMessage("برای رد شاهد یادگیری، دلیل بازبینی را وارد کنید.");
+      return;
+    }
     const payload = await call(`/api/v1/admin/mastery/evidence/${evidenceId}/review`, {
       method: "PATCH",
       body: JSON.stringify({
         verification_status: verificationStatus,
-        review_note: reviewNote.trim() || (verificationStatus === "verified" ? "شاهد یادگیری تأیید شد." : "شاهد یادگیری نیازمند اصلاح است."),
+        review_note: reviewNote.trim() || null,
       }),
     });
     if (payload) {
@@ -171,7 +175,7 @@ export default function AdminPhase5Panel({ authHeaders, onUnauthorized }: Props)
           </select>
         ) : null}
         {section === "evidence" ? (
-          <input value={reviewNote} onChange={(e) => setReviewNote(e.target.value)} placeholder="یادداشت بازبینی (اختیاری)" aria-label="یادداشت بازبینی" />
+          <input value={reviewNote} onChange={(e) => setReviewNote(e.target.value)} placeholder="یادداشت بازبینی؛ برای رد شاهد الزامی است" aria-label="یادداشت بازبینی؛ برای رد شاهد الزامی است" />
         ) : null}
         <button type="button" className="btn-primary" disabled={busy} onClick={() => void load()}>
           نمایش
@@ -201,6 +205,8 @@ export default function AdminPhase5Panel({ authHeaders, onUnauthorized }: Props)
                 <div style={{ fontSize: 12, opacity: 0.75 }}>صفحه PDF: {String(row.pdf_page_index)} · صفحه چاپی: {String(row.printed_page_number ?? "—")}</div>
               ) : null}
               {row.feedback ? <div style={{ fontSize: 13 }}>توضیح دانش‌آموز: {String(row.feedback)}</div> : null}
+              {row.review_note ? <div style={{ fontSize: 13 }}>یادداشت بازبین: {String(row.review_note)}</div> : null}
+              {row.reviewed_by ? <div style={{ fontSize: 11, opacity: 0.65 }}>بازبین: {String(row.reviewed_by)}</div> : null}
               {row.observed_at ? <div style={{ fontSize: 11, opacity: 0.65 }}>تاریخ ثبت: {String(row.observed_at)}</div> : null}
               {row.verification_status === "unverified" ? (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

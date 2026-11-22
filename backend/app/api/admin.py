@@ -423,19 +423,22 @@ async def review_learning_evidence(
             )
         ).all()
         subject_ids = {link.subject_id for link in book_links if link.subject_id is not None}
-        if subject_ids and unit.subject_id not in subject_ids:
+        if not subject_ids or unit.subject_id not in subject_ids:
             raise HTTPException(
                 status_code=409,
-                detail="درس هدف یادگیری در محدودهٔ موضوعی این کتاب نیست.",
+                detail="برای تأیید شاهد، درس هدف باید صریحاً به همین نسخهٔ کتاب متصل شده باشد.",
             )
         scoped_links = [link for link in book_links if link.branch_id is not None]
-        if scoped_links and not any(
-            link.branch_id == unit.branch_id
-            and (
-                link.field_of_study_id is None
-                or link.field_of_study_id == unit.field_of_study_id
+        if scoped_links and not (
+            (unit.branch_id is None and unit.field_of_study_id is None)
+            or any(
+                link.branch_id == unit.branch_id
+                and (
+                    link.field_of_study_id is None
+                    or link.field_of_study_id == unit.field_of_study_id
+                )
+                for link in scoped_links
             )
-            for link in scoped_links
         ):
             raise HTTPException(
                 status_code=409,

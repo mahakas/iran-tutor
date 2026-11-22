@@ -876,6 +876,13 @@ async def test_admin_can_list_and_review_student_learning_evidence(env):
         )
         session.add(unit)
         await session.flush()
+        session.add(
+            BookCurriculumLink(
+                book_id=book.id,
+                subject_id=subject.id,
+                scope_code="admin-review:subject-link",
+            )
+        )
         objective = LearningObjective(
             unit_id=unit.id, code="admin-evidence-review-objective",
             title="هدف نیازمند بازبینی", assessment_profile="written", is_active=True,
