@@ -109,6 +109,11 @@ async def _load_official_book_context(
         ranked.append((score, page, page_text))
     if not ranked:
         raise HTTPException(status_code=409, detail="محتوای متنیِ قابل استناد در صفحات انتخاب‌شده موجود نیست.")
+    if max(score for score, _page, _text in ranked) <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail="در صفحات تأییدشدهٔ کتاب، منبع مرتبط با صورت مسئله پیدا نشد؛ لطفاً مسئله یا فصل را دقیق‌تر انتخاب کنید.",
+        )
 
     ranked.sort(key=lambda item: (-item[0], item[1].pdf_page_index))
     selected = ranked[:8]

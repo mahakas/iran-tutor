@@ -844,3 +844,17 @@ async def test_deep_solve_refuses_books_without_processed_source_pages(env):
     assert missing_book.status_code == 422
     assert no_processed_pages.status_code == 409
     assert await _count(env.factory, DeepSolveSession) == 0
+
+
+@pytest.mark.asyncio
+async def test_deep_solve_does_not_claim_unrelated_pages_as_sources(env):
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/deep-solve/sessions",
+            json={
+                "problem_text": "چرا گیاهان در فرایند فتوسنتز اکسیژن آزاد می‌کنند؟",
+                "book_id": env.ids["book_id"],
+            },
+        )
+    assert response.status_code == 409
+    assert await _count(env.factory, DeepSolveSession) == 0
