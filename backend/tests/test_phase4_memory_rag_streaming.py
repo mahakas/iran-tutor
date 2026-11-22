@@ -432,6 +432,54 @@ async def test_multi_grade_book_resolution_enforces_branch_field_year_and_catalo
 
 
 @pytest.mark.asyncio
+async def test_multi_grade_resolution_caps_automatically_matched_books(env):
+    async with env.factory() as session:
+        year = await session.scalar(
+            select(AcademicYear).where(AcademicYear.code == "1405-1406")
+        )
+        grade10 = await session.scalar(select(Grade).where(Grade.number == 10))
+        branch = await session.scalar(
+            select(EducationBranch).where(EducationBranch.code == "theoretical")
+        )
+        field = await session.scalar(
+            select(FieldOfStudy).where(FieldOfStudy.code == "math_physics")
+        )
+        for index in range(10):
+            book = Book(
+                title=f"کتاب تکمیلی فیزیک {index}",
+                grade_id=grade10.id,
+                major_id=None,
+                academic_year_id=year.id,
+                pdf_file_path=f"/tmp/extra-{index}.pdf",
+                total_pdf_pages=1,
+                status=BookStatus.ready,
+                catalog_status="approved",
+            )
+            session.add(book)
+            await session.flush()
+            session.add(
+                BookCurriculumLink(
+                    book_id=book.id,
+                    branch_id=branch.id,
+                    field_of_study_id=field.id,
+                    subject_id=env.ids["subject_id"],
+                    scope_code=f"field:math_physics:extra:{index}",
+                )
+            )
+        await session.commit()
+
+        with pytest.raises(ScopeError, match="too many textbooks"):
+            await multi_grade_rag.resolve_curriculum_book_ids(
+                session,
+                grade_numbers=[10, 11, 12],
+                branch_code="theoretical",
+                field_code="math_physics",
+                academic_year_id=year.id,
+                subject_ids=[env.ids["subject_id"]],
+            )
+
+
+@pytest.mark.asyncio
 async def test_grade_filter_is_strict_and_never_widened(env):
     async with env.factory() as session:
         result = await multi_grade_rag.search_multi_grade(
