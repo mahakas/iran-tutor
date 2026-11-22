@@ -29,7 +29,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      APP_ENV: test
       DEMO_MODE: "false"
       DATABASE_URL: postgresql+asyncpg://iran_tutor:iran_tutor_test@127.0.0.1:5432/iran_tutor_test
       LLM_BASE_URL: https://example.invalid/v1
