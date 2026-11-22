@@ -203,8 +203,17 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
         async def no_lexical_results(*args, **kwargs):
             return []
 
+        async def passthrough_verified(points, *, scopes):
+            return [
+                {**(point.payload or {}), "score": float(point.score)}
+                for point in points
+            ]
+
         monkeypatch.setattr(retrieval_service, "embed_via_gateway", fake_embed_gateway)
         monkeypatch.setattr(retrieval_service, "_search_postgres", no_lexical_results)
+        # This test isolates Qdrant's exact curriculum filter. Current-page
+        # approval/snapshot reconciliation is covered by the DB-backed tests.
+        monkeypatch.setattr(retrieval_service, "_filter_qdrant_points", passthrough_verified)
         results = await retrieval_service.search_textbook(
             "شتاب چیست؟",
             grade_number=12,
