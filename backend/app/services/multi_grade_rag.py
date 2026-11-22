@@ -140,20 +140,28 @@ async def resolve_curriculum_book_ids(
         )
 
         # Compatibility for legacy theoretical editions that still use Major.
-        legacy_major_id = await session.scalar(
-            select(Major.id).where(Major.code == selected_field.code)
-        )
-        legacy_field_match = (
-            Book.major_id == legacy_major_id if legacy_major_id is not None else None
-        )
+        if branch.code == "theoretical":
+            legacy_major_id = await session.scalar(
+                select(Major.id).where(Major.code == selected_field.code)
+            )
+            legacy_field_match = (
+                Book.major_id == legacy_major_id if legacy_major_id is not None else None
+            )
+        else:
+            legacy_field_match = None
     else:
         legacy_field_match = None
 
+    year_condition = (
+        Book.academic_year_id == academic_year_id
+        if academic_year_id is not None
+        else Book.academic_year_id.is_(None)
+    )
     predicates = [
         Book.status == BookStatus.ready,
         student_book_catalog_clause(),
         Grade.number.in_(grades),
-        Book.academic_year_id.is_(academic_year_id),
+        year_condition,
         or_(*applicable_links, legacy_field_match)
         if legacy_field_match is not None
         else or_(*applicable_links),
