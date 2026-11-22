@@ -122,6 +122,11 @@ def _source_label(page: dict[str, Any]) -> str:
         labels.append("چاپ " + str(page["print_year"]))
     if page.get("publisher"):
         labels.append("ناشر " + str(page["publisher"]))
+    printed = page.get("printed_page_number")
+    if printed is not None:
+        labels.append("صفحه " + str(printed))
+    else:
+        labels.append("صفحه PDF " + str(page.get("pdf_page_index", "?")))
     chapter_number = page.get("chapter_number")
     chapter_title = page.get("chapter_title")
     if chapter_number is not None and chapter_title:
