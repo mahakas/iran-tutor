@@ -618,9 +618,12 @@ async def import_curriculum_catalog(
         book_year = await session.get(AcademicYear, book.academic_year_id) if book.academic_year_id else None
         expected_year_code = book_year.code if book_year is not None else None
         if expected_year_code:
-            if unit.scope_code not in {expected_year_code, "unspecified"}:
+            if unit.scope_code not in {expected_year_code, "unspecified"} or unit.academic_year_id not in {
+                None,
+                book.academic_year_id,
+            }:
                 raise HTTPException(status_code=422, detail="سال تحصیلی هدف با نسخهٔ کتاب سازگار نیست.")
-        elif unit.scope_code != "unspecified":
+        elif unit.scope_code != "unspecified" or unit.academic_year_id is not None:
             raise HTTPException(status_code=422, detail="هدف نسخه‌دار به کتاب بدون سال تحصیلی متصل نمی‌شود.")
         if unit.branch_id is not None:
             book_links = (
