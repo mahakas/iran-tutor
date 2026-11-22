@@ -196,6 +196,20 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
                         "embedding_model": settings.embedding_model,
                     },
                 ),
+                # A closer vector from an older embedding model must not
+                # occupy the top-k slot for a query using the current model.
+                models.PointStruct(
+                    id=4,
+                    vector=[1.0, 0.0],
+                    payload={
+                        "book_id": 8,
+                        "grade_number": 12,
+                        "major_code": "math_physics",
+                        "book_title": "فیزیک ۳",
+                        "pdf_page_index": 4,
+                        "embedding_model": "old-embedding-model",
+                    },
+                ),
             ],
             wait=True,
         )
@@ -222,11 +236,12 @@ async def test_qdrant_search_applies_curriculum_filter_without_external_services
             grade_number=12,
             major_code="math_physics",
             book_id=8,
-            top_k=5,
+            top_k=1,
         )
         assert len(results) == 1
         assert results[0]["book_id"] == 8
         assert results[0]["major_code"] == "math_physics"
+        assert results[0]["pdf_page_index"] == 1
     finally:
         await client.close()
         retrieval_service._qdrant = old_client
