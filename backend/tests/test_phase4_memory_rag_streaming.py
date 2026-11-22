@@ -467,6 +467,38 @@ async def test_ask_endpoint_multi_grade_cites_two_grades(env):
 
 
 @pytest.mark.asyncio
+async def test_multi_grade_endpoint_requires_anchor_and_branch(env):
+    async with _client() as client:
+        no_anchor = await client.post(
+            "/api/v1/tutor/ask",
+            json={"query": "نیرو", "grade_numbers": [10, 11, 12]},
+        )
+        no_branch = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 11, 12],
+                "book_id": env.ids["book12"],
+                "major_code": "math_physics",
+            },
+        )
+        wrong_field_branch = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 11, 12],
+                "book_id": env.ids["book12"],
+                "branch_code": "technical_vocational",
+                "major_code": "math_physics",
+            },
+        )
+
+    assert no_anchor.status_code == 422
+    assert no_branch.status_code == 422
+    assert wrong_field_branch.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_ask_endpoint_rejects_missing_scope(env):
     async with _client() as client:
         resp = await client.post("/api/v1/tutor/ask", json={"query": "نیرو", "mode": "tutor"})
