@@ -108,7 +108,7 @@ async def test_tutor_passes_server_verified_curriculum_to_rag(monkeypatch):
 async def test_chat_sessions_roundtrip_crud(tmp_path):
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from app.db.base import Base
-    from app.db.seed import seed_grades, seed_majors
+    from app.db.seed import seed_curriculum_taxonomy, seed_grades, seed_majors
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chat_test.sqlite3'}")
     async with engine.begin() as conn:
@@ -118,6 +118,7 @@ async def test_chat_sessions_roundtrip_crud(tmp_path):
     async with factory() as session:
         await seed_grades(session)
         await seed_majors(session)
+        await seed_curriculum_taxonomy(session)
         await session.flush()
         grade = await session.get(Grade, 12)
         major = await session.get(Major, 1)
