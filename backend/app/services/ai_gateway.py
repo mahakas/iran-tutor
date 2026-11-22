@@ -179,9 +179,9 @@ async def _invoke_with_failover(
 ) -> tuple[ResolvedRoute | None, str, Any]:
     """Run one inference operation against an ordered provider chain exactly once per candidate.
 
-    The low-level client retains its bounded retries. This layer only moves to another
-    provider for availability/authentication failures. Validation and caller errors do
-    not trigger failover.
+    Managed provider calls disable low-level retry loops so this layer can move promptly
+    to the next candidate. Only provider availability/authentication responses trigger
+    failover; validation and caller errors do not.
     """
     if candidates is None:
         if not legacy_model:
