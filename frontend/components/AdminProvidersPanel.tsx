@@ -52,7 +52,13 @@ type ProviderListPayload = {
 
 type RouteListPayload = {
   routes: AdminFeatureRoute[];
-  providers: { id: number; name: string; is_active: boolean; capabilities: string[] }[];
+  providers: {
+    id: number;
+    name: string;
+    provider_type: string;
+    is_active: boolean;
+    capabilities: string[];
+  }[];
   feature_keys: { key: string; label_fa: string }[];
 };
 
@@ -504,8 +510,9 @@ export default function AdminProvidersPanel({
           <div>
             <h2>مسیر مدل هر قابلیت</h2>
             <p>
-              برای هر قابلیت (گفت‌وگو، حل تمرین، آزمون، تصویر، گفتار، بردارسازی) مشخص کنید کدام
-              ارائه‌دهنده و مدل استفاده شود. بدون مسیر، مقدار پیش‌فرض سرور به کار می‌رود.
+              برای هر قابلیت، ارائه‌دهندهٔ اصلی و زنجیرهٔ جایگزین را به ترتیب اجرا مشخص کنید.
+              فعلاً مسیر اجرا از APIهای سازگار با OpenAI و سرورهای Local پشتیبانی می‌کند؛
+              پروتکل بومی Anthropic و Gemini تا زمان افزودن Adapter قابل انتخاب نیست.
             </p>
           </div>
           <span className="step-badge">
@@ -644,11 +651,15 @@ function RouteMatrix({
                     }
                   >
                     <option value="">— انتخاب کنید —</option>
-                    {providers.map((provider) => (
-                      <option key={provider.id} value={provider.id}>
-                        {provider.name}
-                      </option>
-                    ))}
+                    {providers
+                      .filter((provider) =>
+                        ["openai", "openai_compatible", "local"].includes(provider.provider_type),
+                      )
+                      .map((provider) => (
+                        <option key={provider.id} value={provider.id}>
+                          {provider.name}
+                        </option>
+                      ))}
                   </select>
                   <div className="admin-muted" style={{ marginTop: 8 }}>
                     <span>زنجیرهٔ جایگزین (به ترتیب اجرا)</span>
@@ -671,6 +682,7 @@ function RouteMatrix({
                       {providers
                         .filter(
                           (provider) =>
+                            ["openai", "openai_compatible", "local"].includes(provider.provider_type) &&
                             String(provider.id) !== draft.providerId &&
                             !draft.fallbackProviderIds.includes(String(provider.id)),
                         )
