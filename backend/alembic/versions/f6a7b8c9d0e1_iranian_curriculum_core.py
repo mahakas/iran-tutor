@@ -172,6 +172,8 @@ def upgrade() -> None:
         sa.Column("score", sa.Float(), nullable=True),
         sa.Column("qualitative_level", sa.String(32), nullable=True),
         sa.Column("rubric_json", sa.JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False, server_default=sa.text("'{}'")),
+        sa.Column("verification_status", sa.String(24), nullable=False, server_default="unverified"),
+        sa.Column("reviewed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("feedback", sa.Text(), nullable=True),
         sa.Column("observed_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),

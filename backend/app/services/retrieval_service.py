@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.services.ai_gateway import CallContext, embed_via_gateway
 from app.db.session import async_session_factory
 from app.models.curriculum import Book, BookPage, BookStatus, Grade, Major, PageStatus
+from app.services.curriculum_access import student_book_catalog_clause
 
 logger = logging.getLogger(__name__)
 
@@ -382,7 +383,7 @@ def _scope_sql_clause(scopes: Sequence[TextbookScope]):
         conditions = [
             Book.id == scope.book_id,
             Book.status == BookStatus.ready,
-            Book.catalog_status != "pending_review",
+            student_book_catalog_clause(),
             Grade.number == scope.grade_number,
             func.coalesce(Major.code, "general") == (scope.major_code or "general"),
         ]

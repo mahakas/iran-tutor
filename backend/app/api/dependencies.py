@@ -13,6 +13,7 @@ from app.models.auth import User, UserSession
 from app.models.curriculum import Book, BookCurriculumLink, BookStatus, EducationBranch, FieldOfStudy, Grade, Major
 from app.services.auth_billing_service import USER_COOKIE_NAME, parse_user_session_token
 from app.services.validation import validate_major_code
+from app.services.curriculum_access import is_student_visible_book
 
 
 def extract_user_token(request: Request) -> str | None:
@@ -100,7 +101,7 @@ async def resolve_book_scope(
     always checked against its explicit applicability links.
     """
     book = await session.get(Book, book_id)
-    if book is None or book.status != BookStatus.ready or book.catalog_status == "pending_review":
+    if not is_student_visible_book(book):
         raise HTTPException(status_code=404, detail="book not found")
     grade = await session.get(Grade, book.grade_id)
     if grade is None or grade.number != grade_number:

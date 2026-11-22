@@ -203,11 +203,13 @@ class CurriculumUnit(Base):
     """Canonical chapter/lesson tree, independent from the PDF page layout."""
 
     __tablename__ = "curriculum_units"
-    __table_args__ = (UniqueConstraint("grade_id", "subject_id", "code", name="uq_curriculum_unit_code"),)
+    __table_args__ = (UniqueConstraint("grade_id", "subject_id", "scope_code", "code", name="uq_curriculum_unit_code"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     grade_id: Mapped[int] = mapped_column(ForeignKey("grades.id"), nullable=False, index=True)
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"), nullable=False, index=True)
+    academic_year_id: Mapped[int | None] = mapped_column(ForeignKey("academic_years.id"), nullable=True, index=True)
+    scope_code: Mapped[str] = mapped_column(String(24), nullable=False, default="unspecified", server_default="unspecified")
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("curriculum_units.id"), nullable=True, index=True)
     code: Mapped[str] = mapped_column(String(120), nullable=False)
     unit_type: Mapped[str] = mapped_column(String(24), nullable=False, default="chapter")
@@ -294,6 +296,10 @@ class LearningEvidence(Base):
     rubric_json: Mapped[dict] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"), default=dict, nullable=False
     )
+    verification_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="unverified", server_default="unverified"
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     observed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

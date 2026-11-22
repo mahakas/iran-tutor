@@ -28,6 +28,7 @@ from app.models.curriculum import (
     Subject,
 )
 from app.services.capability_service import check_capability_access
+from app.services.curriculum_access import is_student_visible_book, student_book_catalog_clause
 from app.services.kb_ingestion_service import figures_dir
 from app.services.search_normalize import search_key, sql_search_key
 
@@ -267,7 +268,7 @@ async def list_books(
     conditions = [
         Book.grade_id == grade.id,
         Book.status == BookStatus.ready,
-        Book.catalog_status != "pending_review",
+        student_book_catalog_clause(),
     ]
     if selected_year is not None:
         conditions.append(Book.academic_year_id == selected_year.id)
@@ -364,7 +365,7 @@ async def search_curriculum(
         select(Book, Grade.number, Grade.title, Major.code, Major.title)
         .join(Grade, Book.grade_id == Grade.id)
         .outerjoin(Major, Book.major_id == Major.id)
-        .where(Book.status == BookStatus.ready, Book.catalog_status != "pending_review")
+        .where(Book.status == BookStatus.ready, student_book_catalog_clause())
     )
     if pattern is not None:
         book_stmt = book_stmt.where(
@@ -381,7 +382,7 @@ async def search_curriculum(
         .join(Book, BookPage.book_id == Book.id)
         .join(Grade, Book.grade_id == Grade.id)
         .outerjoin(Major, Book.major_id == Major.id)
-        .where(Book.status == BookStatus.ready, Book.catalog_status != "pending_review", BookPage.status == PageStatus.done)
+        .where(Book.status == BookStatus.ready, student_book_catalog_clause(), BookPage.status == PageStatus.done)
     )
     if pattern is not None:
         topic_stmt = topic_stmt.where(

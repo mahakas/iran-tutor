@@ -31,6 +31,7 @@ from app.models.curriculum import (
     Subject,
 )
 from app.models.phase5 import MasteryBookSettings, MasteryChapterProgress
+from app.services.curriculum_access import is_student_visible_book
 
 WEIGHTS: dict[str, float] = {"exam": 0.5, "flash": 0.3, "solve": 0.2}
 DEFAULT_THRESHOLD = 0.7
@@ -271,13 +272,22 @@ def _evidence_progress(
     threshold: float,
 ) -> dict[str, Any]:
     ordered = sorted(rows, key=lambda item: item.observed_at, reverse=True)
-    latest = ordered[0] if ordered else None
+    latest_submission = ordered[0] if ordered else None
+    verified_rows = [row for row in ordered if getattr(row, "verification_status", "unverified") == "verified"]
+    latest = verified_rows[0] if verified_rows else latest_submission
     level = None
     if latest is not None:
         level = latest.qualitative_level or (latest.rubric_json or {}).get("overall_level")
 
     if not ordered:
         status = "not_started"
+        score = None
+    elif not verified_rows:
+        # Student-submitted self-assessments and practical work cannot independently
+        # certify mastery. An authorized reviewer must verify the evidence first.
+        status = "submitted_for_review" if any(
+            getattr(row, "verification_status", "unverified") == "unverified" for row in ordered
+        ) else "needs_support"
         score = None
     elif assessment_profile in {"qualitative_descriptive", "performance"}:
         if level in QUALITATIVE_MASTERED_LEVELS:
@@ -288,7 +298,7 @@ def _evidence_progress(
             status = "developing"
         score = None
     else:
-        scored = [float(row.score) for row in ordered if row.score is not None][:5]
+        scored = [float(row.score) for row in verified_rows if row.score is not None][:5]
         score = round(sum(scored) / len(scored), 2) if scored else None
         if score is None:
             status = "developing"
@@ -319,6 +329,8 @@ def _evidence_progress(
                 "source_type": row.source_type,
                 "score": row.score,
                 "qualitative_level": row.qualitative_level,
+                "verification_status": getattr(row, "verification_status", "unverified"),
+                "reviewed_at": row.reviewed_at.isoformat() if getattr(row, "reviewed_at", None) else None,
                 "rubric": dict(row.rubric_json or {}),
                 "feedback": row.feedback,
                 "observed_at": row.observed_at.isoformat() if row.observed_at else None,
@@ -358,7 +370,7 @@ async def record_objective_evidence(
     page_id = None
     if book_id is not None:
         book = await session.get(Book, book_id)
-        if book is None or book.status != BookStatus.ready or book.catalog_status == "pending_review":
+        if not is_student_visible_book(book):
             raise HTTPException(status_code=404, detail="کتاب آماده و منتشرشده یافت نشد.")
         unit = await session.get(CurriculumUnit, objective.unit_id)
         if unit is None or unit.grade_id != book.grade_id:
@@ -407,6 +419,8 @@ async def record_objective_evidence(
     row.score = score
     row.qualitative_level = qualitative_level
     row.rubric_json = dict(rubric or {})
+    row.verification_status = "unverified"
+    row.reviewed_at = None
     row.feedback = feedback
     row.observed_at = datetime.now(timezone.utc)
     await session.commit()

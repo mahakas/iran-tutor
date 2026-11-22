@@ -48,6 +48,7 @@ from app.models.curriculum import (
     FieldOfStudy,
     Grade,
     LearningObjective,
+    LearningEvidence,
     CurriculumUnit,
     ObjectivePrerequisite,
     Subject,
@@ -288,6 +289,33 @@ class CurriculumCatalogImportBody(BaseModel):
 
 class BookApprovalBody(BaseModel):
     approved: bool
+\n\nclass LearningEvidenceReviewBody(BaseModel):
+    verification_status: Literal["verified", "rejected"]
+    review_note: str | None = Field(default=None, max_length=2000)
+
+
+@protected_router.patch("/mastery/evidence/{evidence_id}/review")
+async def review_learning_evidence(
+    evidence_id: int,
+    body: LearningEvidenceReviewBody,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    evidence = await session.get(LearningEvidence, evidence_id)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="learning evidence not found")
+    evidence.verification_status = body.verification_status
+    evidence.reviewed_at = datetime.now(timezone.utc)
+    if body.review_note:
+        prior = (evidence.feedback or "").strip()
+        evidence.feedback = (prior + "\\n\\nبازبینی مدیر: " + body.review_note.strip()).strip()
+    await session.commit()
+    return {
+        "evidence_id": evidence.id,
+        "verification_status": evidence.verification_status,
+        "reviewed_at": evidence.reviewed_at.isoformat() if evidence.reviewed_at else None,
+    }
+
+
 
 
 @protected_router.post("/curriculum/catalog/import")

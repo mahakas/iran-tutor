@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from app.api.curriculum import list_books
 from app.api.dependencies import resolve_book_scope
 from app.models.curriculum import BookStatus, Book, EducationBranch, FieldOfStudy, Grade, BookCurriculumLink
+from app.services.curriculum_access import is_student_visible_book
 
 
 class FakeSession:
@@ -185,3 +186,70 @@ async def test_resolve_book_scope_hides_pending_review_book():
         )
 
     assert error.value.status_code == 404
+\n
+from app.services.mastery_service import _evidence_progress
+
+
+def test_learning_evidence_is_not_mastery_until_verified():
+    row = SimpleNamespace(
+        observed_at=None,
+        verification_status="unverified",
+        qualitative_level="advanced",
+        rubric_json={"overall_level": "advanced"},
+        score=None,
+        source_type="performance_task",
+        feedback="student submitted",
+        id=1,
+        reviewed_at=None,
+    )
+
+    progress = _evidence_progress(
+        [row],
+        assessment_profile="performance",
+        threshold=70,
+    )
+
+    assert progress["status"] == "submitted_for_review"
+    assert progress["score"] is None
+
+
+def test_verified_performance_evidence_can_mark_mastery():
+    row = SimpleNamespace(
+        observed_at=None,
+        verification_status="verified",
+        qualitative_level="advanced",
+        rubric_json={"overall_level": "advanced"},
+        score=None,
+        source_type="performance_task",
+        feedback="teacher verified",
+        id=2,
+        reviewed_at=None,
+    )
+
+    progress = _evidence_progress(
+        [row],
+        assessment_profile="performance",
+        threshold=70,
+    )
+
+    assert progress["status"] == "mastered"
+    assert progress["qualitative_level"] == "advanced"
+
+
+
+def test_legacy_unverified_book_is_hidden_outside_demo(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.curriculum_access.allowed_student_catalog_statuses",
+        lambda: ("approved",),
+    )
+    book = SimpleNamespace(status=BookStatus.ready, catalog_status="legacy_unverified")
+    assert not is_student_visible_book(book)
+
+
+def test_demo_book_is_visible_only_when_demo_status_is_allowed(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.curriculum_access.allowed_student_catalog_statuses",
+        lambda: ("approved", "demo"),
+    )
+    book = SimpleNamespace(status=BookStatus.ready, catalog_status="demo")
+    assert is_student_visible_book(book)

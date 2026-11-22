@@ -281,6 +281,7 @@ export type ExamSummary = {
   book_title: string | null;
   grade_number: number;
   major_code: string;
+  branch_code?: string | null;
   exam_type: "konkoor" | "final";
   status: "active" | "submitted" | "expired";
   question_count: number;

@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import require_student
 from app.db.session import get_session
 from app.models.auth import User
+from app.models.curriculum import Book
+from app.services.curriculum_access import is_student_visible_book
 from app.services import deep_solve_service as ds
 from app.services import immersive_service as imm
 from app.services import mastery_service
@@ -34,7 +36,7 @@ class LearningEvidenceBody(BaseModel):
     objective_id: int = Field(gt=0)
     book_id: int | None = Field(default=None, gt=0)
     pdf_page_index: int | None = Field(default=None, ge=0)
-    source_type: Literal["exam", "solve", "flashcard", "self_assessment", "performance_task", "reading"]
+    source_type: Literal["self_assessment", "performance_task", "reading"]
     source_ref: str | None = Field(default=None, max_length=128)
     score: float | None = Field(default=None, ge=0, le=100)
     qualitative_level: Literal["needs_support", "developing", "proficient", "advanced", "not_observed"] | None = None
@@ -170,6 +172,10 @@ async def create_deep_solve(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     await check_capability_access(session, "deep_solve", current_user)
+    if body.book_id is not None:
+        book = await session.get(Book, body.book_id)
+        if not is_student_visible_book(book):
+            raise HTTPException(status_code=404, detail="کتاب رسمی و منتشرشده یافت نشد.")
     row = await ds.create_session(
         session,
         current_user,
