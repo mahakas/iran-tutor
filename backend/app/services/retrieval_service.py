@@ -124,11 +124,10 @@ def make_scope_filter(scopes: Sequence[TextbookScope]) -> models.Filter:
         raise ValueError("at least one textbook scope is required")
     options: list[models.Filter] = []
     for scope in scopes:
+        # book_id is the authoritative edition boundary. The legacy major_code
+        # payload field cannot represent every branch/field in the normalized K-12 catalogue.
         must: list[models.Condition] = [
             models.FieldCondition(key="grade_number", match=models.MatchValue(value=scope.grade_number)),
-            models.FieldCondition(
-                key="major_code", match=models.MatchValue(value=scope.major_code or "general")
-            ),
             models.FieldCondition(key="book_id", match=models.MatchValue(value=scope.book_id)),
         ]
         if scope.chapter_numbers:
@@ -148,14 +147,16 @@ def make_textbook_filter(
     *, grade_number: int, major_code: str | None, book_id: int | None = None
 ) -> models.Filter:
     """Build mandatory curriculum filters (grades 1-9 use the `general` key)."""
-    conditions = [
-        models.FieldCondition(key="grade_number", match=models.MatchValue(value=grade_number)),
-        models.FieldCondition(
-            key="major_code", match=models.MatchValue(value=major_code or "general")
-        ),
-    ]
+    conditions = [models.FieldCondition(key="grade_number", match=models.MatchValue(value=grade_number))]
     if book_id is not None:
+        # Exact book edition scope supersedes the deprecated major_code field.
         conditions.append(models.FieldCondition(key="book_id", match=models.MatchValue(value=book_id)))
+    else:
+        conditions.append(
+            models.FieldCondition(
+                key="major_code", match=models.MatchValue(value=major_code or "general")
+            )
+        )
     return models.Filter(must=conditions)
 
 
@@ -375,7 +376,7 @@ async def index_book(book_id: int, batch_size: int = 32) -> dict[str, int]:
 
 
 def _scope_sql_clause(scopes: Sequence[TextbookScope]):
-    """SQLAlchemy OR-clause for PostgreSQL/demo queries over joined book/grade/major/page."""
+    """SQLAlchemy OR-clause over exact book editions and grade; branch scope is prevalidated by the API."""
     from sqlalchemy import and_, or_
 
     clauses = []
@@ -385,7 +386,6 @@ def _scope_sql_clause(scopes: Sequence[TextbookScope]):
             Book.status == BookStatus.ready,
             student_book_catalog_clause(),
             Grade.number == scope.grade_number,
-            func.coalesce(Major.code, "general") == (scope.major_code or "general"),
         ]
         if scope.chapter_numbers:
             conditions.append(BookPage.chapter_number.in_(sorted(scope.chapter_numbers)))
@@ -501,11 +501,10 @@ async def _search_postgres(
 ) -> list[dict[str, Any]]:
     """Keyword/full-text channel over approved textbook pages.
 
-    Demo mode uses a small deterministic token-overlap scorer so the project can
-    be explored with SQLite and no PostgreSQL/Qdrant/embedding credentials.
+    The exact book id is the authoritative edition boundary. major_code remains
+    in the signature for compatibility but is not a retrieval filter.
     """
     if get_settings().demo_mode:
-        selected_major = major_code or "general"
 
         def _terms(value: str) -> set[str]:
             normalized = normalize_persian_text(value).casefold()
@@ -524,7 +523,8 @@ async def _search_postgres(
                     .where(
                         Book.id == book_id,
                         Grade.number == grade_number,
-                        func.coalesce(Major.code, "general") == selected_major,
+                        Book.status == BookStatus.ready,
+                        student_book_catalog_clause(),
                         BookPage.status == PageStatus.done,
                     )
                     .order_by(BookPage.pdf_page_index.asc())
@@ -570,7 +570,6 @@ async def _search_postgres(
         return []
     ts_query = func.websearch_to_tsquery("simple", lexical_query)
     rank = func.ts_rank_cd(ts_document, ts_query).label("lexical_score")
-    selected_major = major_code or "general"
 
     async with async_session_factory() as session:
         statement = (
@@ -581,7 +580,8 @@ async def _search_postgres(
             .where(
                 Book.id == book_id,
                 Grade.number == grade_number,
-                func.coalesce(Major.code, "general") == selected_major,
+                Book.status == BookStatus.ready,
+                student_book_catalog_clause(),
                 BookPage.status == PageStatus.done,
                 ts_document.op("@@")(ts_query),
             )
@@ -656,13 +656,9 @@ async def _search_pgvector_scopes(
     }
     clauses: list[str] = []
     for index, scope in enumerate(scopes):
-        clause = (
-            f"(e.book_id = :book_id_{index} AND e.grade_number = :grade_{index} "
-            f"AND e.major_code = :major_{index}"
-        )
+        clause = f"(e.book_id = :book_id_{index} AND e.grade_number = :grade_{index}"
         params[f"book_id_{index}"] = scope.book_id
         params[f"grade_{index}"] = scope.grade_number
-        params[f"major_{index}"] = scope.major_code or "general"
         if scope.chapter_numbers:
             clause += f" AND bp.chapter_number = ANY(:chapters_{index})"
             params[f"chapters_{index}"] = sorted(scope.chapter_numbers)
@@ -738,7 +734,6 @@ async def _search_pgvector(
     embedding_model = (
         getattr(embedding_result, "model_name", None) or get_settings().embedding_model
     )
-    selected_major = major_code or "general"
     statement = sql_text(
         """
         SELECT
@@ -758,7 +753,6 @@ async def _search_pgvector(
         JOIN public.books b ON b.id = bp.book_id
         WHERE e.book_id = :book_id
           AND e.grade_number = :grade_number
-          AND e.major_code = :major_code
           AND bp.status = 'done'
           AND b.status = 'ready'
           AND b.catalog_status = ANY(:catalog_statuses)
@@ -776,7 +770,6 @@ async def _search_pgvector(
                     "query_vector": json.dumps(vector),
                     "book_id": book_id,
                     "grade_number": grade_number,
-                    "major_code": selected_major,
                     "catalog_statuses": list(allowed_student_catalog_statuses()),
                     "embedding_model": embedding_model,
                     "limit": limit,
