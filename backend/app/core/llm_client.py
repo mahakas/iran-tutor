@@ -270,7 +270,7 @@ async def _complete(
 ) -> tuple[str | None, dict[str, int | None]]:
     """One completion call, falling back to plain text if JSON mode is rejected."""
     client = _get_client()
-    cache_key = (str(client.base_url), model)
+    cache_key = (str(getattr(client, "base_url", "")), model)
     if cache_key not in _json_mode_unsupported:
         try:
             response = await client.chat.completions.create(
