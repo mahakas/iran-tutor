@@ -21,6 +21,11 @@ async def test_demo_seed_is_repeatable_and_supports_scoped_retrieval(monkeypatch
     monkeypatch.setattr(seed_module, "get_settings", lambda: SimpleNamespace(demo_mode=True))
     monkeypatch.setattr(retrieval_service, "async_session_factory", factory)
     monkeypatch.setattr(retrieval_service, "get_settings", lambda: SimpleNamespace(demo_mode=True))
+    # Curriculum access owns its own settings lookup; explicitly enable demo catalog visibility.
+    monkeypatch.setattr(
+        "app.services.curriculum_access.get_settings",
+        lambda: SimpleNamespace(demo_mode=True),
+    )
 
     try:
         await seed_module.seed_database()
