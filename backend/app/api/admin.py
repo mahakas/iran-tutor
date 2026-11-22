@@ -307,7 +307,7 @@ async def review_learning_evidence(
     evidence.reviewed_at = datetime.now(timezone.utc)
     if body.review_note:
         prior = (evidence.feedback or "").strip()
-        evidence.feedback = (prior + "\\n\\nبازبینی مدیر: " + body.review_note.strip()).strip()
+        evidence.feedback = (prior + "\n\nبازبینی مدیر: " + body.review_note.strip()).strip()
     await session.commit()
     return {
         "evidence_id": evidence.id,
