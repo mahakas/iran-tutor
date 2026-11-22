@@ -155,8 +155,8 @@ async def _chapters(session: AsyncSession, book_id: int) -> list[dict[str, Any]]
 
 async def book_tree(session: AsyncSession, *, user_id: str, book_id: int) -> dict[str, Any]:
     book = await session.get(Book, book_id)
-    if book is None:
-        raise HTTPException(status_code=404, detail="کتاب یافت نشد.")
+    if not is_student_visible_book(book):
+        raise HTTPException(status_code=404, detail="کتاب آماده و منتشرشده یافت نشد.")
     settings = await get_settings(session, book_id)
     threshold = float(settings.threshold)
     overrides = dict(settings.chapter_overrides_json or {})
@@ -375,6 +375,34 @@ async def record_objective_evidence(
         unit = await session.get(CurriculumUnit, objective.unit_id)
         if unit is None or unit.grade_id != book.grade_id:
             raise HTTPException(status_code=422, detail="هدف یادگیری با پایهٔ این کتاب سازگار نیست.")
+
+        book_year = await session.get(AcademicYear, book.academic_year_id) if book.academic_year_id else None
+        expected_year_code = book_year.code if book_year is not None else None
+        if expected_year_code:
+            if unit.scope_code not in {expected_year_code, "unspecified"}:
+                raise HTTPException(status_code=422, detail="نسخهٔ سال تحصیلی هدف با نسخهٔ کتاب سازگار نیست.")
+        elif unit.scope_code != "unspecified":
+            raise HTTPException(status_code=422, detail="هدف نسخه‌دار به کتابی بدون سال تحصیلی متصل نمی‌شود.")
+
+        book_links = (
+            await session.scalars(
+                select(BookCurriculumLink).where(BookCurriculumLink.book_id == book_id)
+            )
+        ).all()
+        linked_subject_ids = {link.subject_id for link in book_links if link.subject_id is not None}
+        if linked_subject_ids and unit.subject_id not in linked_subject_ids:
+            raise HTTPException(status_code=422, detail="درس هدف یادگیری با درس این کتاب سازگار نیست.")
+        if unit.branch_id is not None:
+            branch_match = any(
+                link.branch_id == unit.branch_id
+                and (
+                    (link.field_of_study_id is None and unit.field_of_study_id is None)
+                    or link.field_of_study_id == unit.field_of_study_id
+                )
+                for link in book_links
+            )
+            if not branch_match:
+                raise HTTPException(status_code=422, detail="شاخه یا رشتهٔ هدف یادگیری با کتاب سازگار نیست.")
     if pdf_page_index is not None:
         if book_id is None:
             raise HTTPException(status_code=422, detail="برای ثبت شمارهٔ صفحه، شناسهٔ کتاب لازم است.")
@@ -448,15 +476,29 @@ async def objective_tree(
         if year_code
         else CurriculumUnit.scope_code == "unspecified"
     )
-    subject_ids = set(
-        (
-            await session.scalars(
-                select(BookCurriculumLink.subject_id).where(
-                    BookCurriculumLink.book_id == book_id,
-                    BookCurriculumLink.subject_id.is_not(None),
-                )
-            )
-        ).all()
+    book_links = (
+        await session.scalars(
+            select(BookCurriculumLink).where(BookCurriculumLink.book_id == book_id)
+        )
+    ).all()
+    subject_ids = {link.subject_id for link in book_links if link.subject_id is not None}
+    branch_terms = []
+    for link in book_links:
+        if link.branch_id is None:
+            continue
+        branch_conditions = [CurriculumUnit.branch_id == link.branch_id]
+        if link.field_of_study_id is None:
+            branch_conditions.append(CurriculumUnit.field_of_study_id.is_(None))
+        else:
+            branch_conditions.append(CurriculumUnit.field_of_study_id == link.field_of_study_id)
+        branch_terms.append(and_(*branch_conditions))
+    branch_scope_condition = (
+        or_(
+            and_(CurriculumUnit.branch_id.is_(None), CurriculumUnit.field_of_study_id.is_(None)),
+            *branch_terms,
+        )
+        if branch_terms
+        else and_(CurriculumUnit.branch_id.is_(None), CurriculumUnit.field_of_study_id.is_(None))
     )
     mapped_objective_ids = set(
         (
@@ -498,6 +540,7 @@ async def objective_tree(
                 CurriculumUnit.is_active.is_(True),
                 LearningObjective.is_active.is_(True),
                 scope_condition,
+                branch_scope_condition,
                 or_(*relevance_terms),
             )
             .order_by(Subject.title, CurriculumUnit.sort_order, LearningObjective.code)
@@ -530,6 +573,7 @@ async def objective_tree(
                 CurriculumUnit.grade_id == book.grade_id,
                 LearningObjective.is_active.is_(True),
                 scope_condition,
+                branch_scope_condition,
             )
         )
     ).all()
@@ -551,21 +595,19 @@ async def objective_tree(
 
     settings = await get_settings(session, book_id)
     threshold = float(settings.threshold) * 100
+    profile_by_id = {objective.id: objective.assessment_profile for objective in objectives}
+    profile_by_id.update({row[1]: row[4] for row in prereq_rows})
     progress_by_id = {
         objective_id: _evidence_progress(
             evidence_by_objective.get(objective_id, []),
-            assessment_profile=next(
-                (objective.assessment_profile for objective in objectives if objective.id == objective_id),
-                profile_by_id.get(objective_id, "mixed"),
-            ),
+            assessment_profile=profile_by_id.get(objective_id, "mixed"),
             threshold=threshold,
         )
         for objective_id in all_evidence_ids
     }
     titles_by_id = {row[1]: {"code": row[2], "title": row[3]} for row in prereq_rows}
-    profile_by_id = {row[1]: row[4] for row in prereq_rows}
     prerequisites_by_objective: dict[int, list[int]] = {}
-    for objective_id, prerequisite_id, _code, _title in prereq_rows:
+    for objective_id, prerequisite_id, _code, _title, _profile in prereq_rows:
         prerequisites_by_objective.setdefault(objective_id, []).append(prerequisite_id)
 
     nodes: list[dict[str, Any]] = []
