@@ -250,6 +250,10 @@ def _usage_dict(usage: Any) -> dict[str, int | None]:
 
 
 def _is_retryable(error: Exception) -> bool:
+    # When the gateway selected a managed provider, let the outer failover chain
+    # move to the next provider instead of spending the full retry budget here.
+    if _provider_override.get() is not None:
+        return False
     if isinstance(error, (APITimeoutError, APIConnectionError, InvalidJSONError)):
         return True
     if isinstance(error, APIStatusError):
