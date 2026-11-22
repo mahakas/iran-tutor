@@ -910,10 +910,28 @@ async def _search_qdrant_scopes(
     expected_embedding_model = (
         getattr(embedding_result, "model_name", None) or settings.embedding_model
     )
+    scope_filter = make_scope_filter(scopes)
+    model_condition = models.FieldCondition(
+        key="embedding_model",
+        match=models.MatchValue(value=expected_embedding_model),
+    )
+    # Apply model identity before top-k selection; otherwise stale vectors can
+    # occupy the candidate window and hide usable points from the current model.
+    if scope_filter.must:
+        query_filter = models.Filter(
+            must=[*scope_filter.must, model_condition],
+            must_not=scope_filter.must_not,
+        )
+    else:
+        query_filter = models.Filter(
+            must=[model_condition],
+            should=scope_filter.should,
+            must_not=scope_filter.must_not,
+        )
     response = await _get_qdrant().query_points(
         collection_name=settings.qdrant_collection,
         query=vector,
-        query_filter=make_scope_filter(scopes),
+        query_filter=query_filter,
         limit=limit,
         with_payload=True,
         score_threshold=0.15,
@@ -942,12 +960,23 @@ async def _search_qdrant(
     expected_embedding_model = (
         getattr(embedding_result, "model_name", None) or settings.embedding_model
     )
+    textbook_filter = make_textbook_filter(
+        grade_number=grade_number, major_code=major_code, book_id=book_id
+    )
+    query_filter = models.Filter(
+        must=[
+            *(textbook_filter.must or []),
+            models.FieldCondition(
+                key="embedding_model",
+                match=models.MatchValue(value=expected_embedding_model),
+            ),
+        ],
+        must_not=textbook_filter.must_not,
+    )
     response = await _get_qdrant().query_points(
         collection_name=settings.qdrant_collection,
         query=vector,
-        query_filter=make_textbook_filter(
-            grade_number=grade_number, major_code=major_code, book_id=book_id
-        ),
+        query_filter=query_filter,
         limit=limit,
         with_payload=True,
         score_threshold=0.15,
