@@ -110,7 +110,7 @@ async def test_pgvector_search_compiles_scoped_cosine_query_and_routes_when_enab
     monkeypatch.setattr(
         retrieval_service,
         "get_settings",
-        lambda: SimpleNamespace(demo_mode=False, vector_backend="pgvector"),
+        lambda: SimpleNamespace(demo_mode=False, vector_backend="pgvector", embedding_model="test-embedding"),
     )
 
     results = await retrieval_service.search_textbook(
@@ -123,6 +123,8 @@ async def test_pgvector_search_compiles_scoped_cosine_query_and_routes_when_enab
 
     assert "book_page_embeddings" in observed["sql"]
     assert "<=>" in observed["sql"]
+    assert "catalog_status = ANY" in observed["sql"]
+    assert observed["params"]["catalog_statuses"] == ["approved"]
     assert observed["params"]["book_id"] == 2
     assert observed["params"]["grade_number"] == 12
     assert observed["params"]["major_code"] == "math_physics"
