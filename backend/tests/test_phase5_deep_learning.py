@@ -944,3 +944,44 @@ async def test_admin_can_list_and_review_student_learning_evidence(env):
     assert verified.json()["items"][0]["verification_status"] == "verified"
     assert verified.json()["items"][0]["feedback"] == "پاسخ خودارزیابی دانش‌آموز"
     assert verified.json()["items"][0]["review_note"] == "شاهد بررسی شد."
+
+
+def test_mastery_score_uses_verified_rows_but_latest_evidence_shows_latest_submission():
+    verified_at = NOW - timedelta(minutes=10)
+    verified = SimpleNamespace(
+        id=1,
+        source_type="self_assessment",
+        score=92.0,
+        qualitative_level=None,
+        rubric_json={},
+        verification_status="verified",
+        reviewed_at=verified_at,
+        review_note="شاهد قبلی تأیید شد.",
+        feedback="شاهد قبلی",
+        observed_at=verified_at,
+    )
+    pending = SimpleNamespace(
+        id=2,
+        source_type="self_assessment",
+        score=20.0,
+        qualitative_level=None,
+        rubric_json={},
+        verification_status="unverified",
+        reviewed_at=None,
+        review_note=None,
+        feedback="ارسال جدید در انتظار بازبینی",
+        observed_at=NOW,
+    )
+
+    progress = mastery_service._evidence_progress(
+        [verified, pending],
+        assessment_profile="written",
+        threshold=80,
+    )
+
+    assert progress["status"] == "mastered"
+    assert progress["score"] == 92.0
+    assert progress["latest_evidence"]["score"] == 20.0
+    assert progress["latest_evidence"]["verification_status"] == "unverified"
+    assert progress["latest_evidence"]["feedback"] == "ارسال جدید در انتظار بازبینی"
+    assert progress["evidence"][0]["verification_status"] == "unverified"

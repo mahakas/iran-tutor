@@ -314,16 +314,29 @@ def _evidence_progress(
         "evidence_count": len(ordered),
         "latest_evidence": (
             {
-                "source_type": latest.source_type,
-                "score": latest.score,
-                "qualitative_level": level,
-                "verification_status": getattr(latest, "verification_status", "unverified"),
-                "review_note": getattr(latest, "review_note", None),
-                "reviewed_at": latest.reviewed_at.isoformat() if getattr(latest, "reviewed_at", None) else None,
-                "feedback": latest.feedback,
-                "observed_at": latest.observed_at.isoformat() if latest.observed_at else None,
+                # Display the latest submission, even when an older verified
+                # submission continues to determine the mastery score/status.
+                "source_type": latest_submission.source_type,
+                "score": latest_submission.score,
+                "qualitative_level": (
+                    latest_submission.qualitative_level
+                    or (latest_submission.rubric_json or {}).get("overall_level")
+                ),
+                "verification_status": getattr(latest_submission, "verification_status", "unverified"),
+                "review_note": getattr(latest_submission, "review_note", None),
+                "reviewed_at": (
+                    latest_submission.reviewed_at.isoformat()
+                    if getattr(latest_submission, "reviewed_at", None)
+                    else None
+                ),
+                "feedback": latest_submission.feedback,
+                "observed_at": (
+                    latest_submission.observed_at.isoformat()
+                    if latest_submission.observed_at
+                    else None
+                ),
             }
-            if latest is not None
+            if latest_submission is not None
             else None
         ),
         "evidence": [
