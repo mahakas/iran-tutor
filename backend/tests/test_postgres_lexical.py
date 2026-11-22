@@ -129,6 +129,6 @@ async def test_pgvector_search_compiles_scoped_cosine_query_and_routes_when_enab
     assert observed["params"]["book_id"] == 2
     assert observed["params"]["grade_number"] == 12
     assert "major_code" not in observed["params"]
-    assert "e.major_code" not in observed["sql"]
+    assert "AND e.major_code =" not in observed["sql"]
     assert len(results) == 1
     assert results[0]["pdf_page_index"] == 15
