@@ -106,10 +106,11 @@ def page_embedding_text(markdown: str, visual_elements: Sequence[dict[str, Any]]
 
 @dataclass(frozen=True)
 class TextbookScope:
-    """One permitted (book, grade, major) slice, optionally limited to some chapters.
+    """One permitted book-edition and grade slice, optionally limited to chapters.
 
-    Multi-grade Konkoor retrieval passes several scopes at once; every channel
-    (PostgreSQL lexical, pgvector, Qdrant) applies the OR of these slices.
+    The API validates branch/field applicability before constructing a scope.
+    A globally unique book_id is then the hard retrieval boundary across every
+    backend; major_code remains only as legacy descriptive metadata.
     """
 
     book_id: int
@@ -119,7 +120,7 @@ class TextbookScope:
 
 
 def make_scope_filter(scopes: Sequence[TextbookScope]) -> models.Filter:
-    """Qdrant filter: OR over scopes; each scope = exact grade + major + book (+ chapters)."""
+    """Qdrant filter: OR over exact book-edition and grade scopes (+ chapters)."""
     if not scopes:
         raise ValueError("at least one textbook scope is required")
     options: list[models.Filter] = []
@@ -1001,7 +1002,7 @@ async def search_textbook_scopes(
     scopes: Sequence[TextbookScope],
     top_k: int = 5,
 ) -> list[dict[str, Any]]:
-    """Hybrid search across one or more exact (book, grade, major[, chapters]) scopes.
+    """Hybrid search across one or more exact (book, grade[, chapters]) scopes.
 
     PostgreSQL's `simple` full-text search and the vector backend are fused with
     reciprocal-rank fusion. If the vector provider/backend is unavailable,
@@ -1044,7 +1045,7 @@ async def search_textbook(
     book_id: int,
     top_k: int = 5,
 ) -> list[dict[str, Any]]:
-    """Hybrid search, always scoped to the exact selected grade, major, and book.
+    """Hybrid search, always scoped to the exact selected grade and book edition.
 
     PostgreSQL's `simple` full-text search and Qdrant vector search are fused
     with reciprocal-rank fusion. If the vector provider/Qdrant is unavailable,
