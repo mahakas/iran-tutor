@@ -828,6 +828,33 @@ async def _run_ingest_background(
                 await session.commit()
 
 
+def _book_curriculum_scope_rows(
+    *,
+    grade_number: int,
+    is_general_book: bool,
+    subject_id: int | None,
+    branch_wide_branches: list[EducationBranch],
+    selected_fields: list[FieldOfStudy],
+) -> list[tuple[int | None, int | None, int | None, str]]:
+    """Build exact applicability links without widening field-only editions to a whole branch."""
+    rows: list[tuple[int | None, int | None, int | None, str]] = []
+    if is_general_book or grade_number < 10:
+        rows.append((None, None, subject_id, "general"))
+    rows.extend(
+        (branch.id, None, subject_id, f"branch:{branch.code}")
+        for branch in branch_wide_branches
+    )
+    rows.extend(
+        (field.branch_id, field.id, subject_id, f"field:{field.code}")
+        for field in selected_fields
+    )
+    # Stable scope_code uniqueness makes this idempotent even if inputs repeat.
+    unique_rows: dict[str, tuple[int | None, int | None, int | None, str]] = {}
+    for row in rows:
+        unique_rows[row[3]] = row
+    return list(unique_rows.values())
+
+
 @protected_router.post("/books/upload-and-ingest")
 async def upload_and_ingest(
     background_tasks: BackgroundTasks,
@@ -877,6 +904,15 @@ async def upload_and_ingest(
         selected_field_codes = list(dict.fromkeys(
             [code.strip() for code in [*applicable_field_codes, field_code, major_code] if code and code.strip()]
         ))
+        # branch_code is a required validation/parent selector for field-specific
+        # uploads; it is NOT itself a branch-wide applicability grant. A branch-wide
+        # link is created only for explicit applicable_branch_codes, or for a
+        # branch-only upload where no fields were selected.
+        branch_wide_codes = {
+            code.strip() for code in applicable_branch_codes if code and code.strip()
+        }
+        if not selected_field_codes and branch_code and branch_code.strip():
+            branch_wide_codes.add(branch_code.strip())
         if official_source_url:
             parsed_source_url = urlparse(official_source_url.strip())
             if parsed_source_url.scheme not in {"http", "https"} or not parsed_source_url.netloc:
@@ -937,6 +973,9 @@ async def upload_and_ingest(
             selected_branches = (
                 await session.scalars(select(EducationBranch).where(EducationBranch.id.in_(branch_ids)))
             ).all()
+        branch_wide_branches = [
+            item for item in selected_branches if item.code in branch_wide_codes
+        ]
 
         # Book.major_id remains a compatibility alias only when the edition applies
         # to exactly one old-style field. Multi-field editions use the link table.
@@ -999,13 +1038,13 @@ async def upload_and_ingest(
             session.add(book)
             await session.flush()
             book_id = book.id
-            scope_rows = []
             linked_subject_id = selected_subject.id if selected_subject is not None else None
-            if is_general_book or grade.number < 10:
-                scope_rows.append((None, None, linked_subject_id, "general"))
-            scope_rows.extend((item.id, None, linked_subject_id, f"branch:{item.code}") for item in selected_branches)
-            scope_rows.extend(
-                (item.branch_id, item.id, linked_subject_id, f"field:{item.code}") for item in selected_fields
+            scope_rows = _book_curriculum_scope_rows(
+                grade_number=grade.number,
+                is_general_book=is_general_book,
+                subject_id=linked_subject_id,
+                branch_wide_branches=branch_wide_branches,
+                selected_fields=selected_fields,
             )
             for linked_branch_id, linked_field_id, link_subject_id, scope_code in scope_rows:
                 session.add(
@@ -1089,13 +1128,13 @@ async def upload_and_ingest(
         session.add(book)
         await session.flush()
         book_id = book.id
-        scope_rows = []
         linked_subject_id = selected_subject.id if selected_subject is not None else None
-        if is_general_book or grade.number < 10:
-            scope_rows.append((None, None, linked_subject_id, "general"))
-        scope_rows.extend((item.id, None, linked_subject_id, f"branch:{item.code}") for item in selected_branches)
-        scope_rows.extend(
-            (item.branch_id, item.id, linked_subject_id, f"field:{item.code}") for item in selected_fields
+        scope_rows = _book_curriculum_scope_rows(
+            grade_number=grade.number,
+            is_general_book=is_general_book,
+            subject_id=linked_subject_id,
+            branch_wide_branches=branch_wide_branches,
+            selected_fields=selected_fields,
         )
         for linked_branch_id, linked_field_id, link_subject_id, scope_code in scope_rows:
             session.add(
