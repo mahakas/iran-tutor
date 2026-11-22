@@ -43,6 +43,9 @@ export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
 export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
 export VECTOR_BACKEND="${VECTOR_BACKEND:-qdrant}"
 export EMBEDDING_DIMENSION="${EMBEDDING_DIMENSION:-1536}"
+if [[ -n "${CODESPACE_NAME:-}" && -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]]; then
+  export NEXT_ALLOWED_DEV_ORIGINS="${CODESPACE_NAME}-${FRONTEND_PORT}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}"
+fi
 
 # Do not inherit an old Demo or legacy single-provider .env by accident.
 # Managed provider endpoints, keys and models are configured in the admin vault/routes.
