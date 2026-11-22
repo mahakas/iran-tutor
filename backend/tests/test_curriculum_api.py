@@ -281,3 +281,97 @@ def test_demo_book_is_visible_only_when_demo_status_is_allowed(monkeypatch):
     )
     book = SimpleNamespace(status=BookStatus.ready, catalog_status="demo")
     assert is_student_visible_book(book)
+
+
+@pytest.mark.asyncio
+async def test_list_books_normalizes_major_code_when_branch_is_also_supplied():
+    grade = SimpleNamespace(id=10, number=10, has_major=True)
+    branch = SimpleNamespace(
+        id=3,
+        code="technical_vocational",
+        min_grade=10,
+        max_grade=12,
+        is_active=True,
+    )
+    field = SimpleNamespace(id=9, code="electronics", branch_id=3, is_active=True)
+    book = SimpleNamespace(id=60, title="الکترونیک", status=BookStatus.ready)
+    session = FakeSession(grade, scalar_values=[branch, field.id, field, None], books=[book])
+
+    response = await list_books(
+        10,
+        "electronics",
+        session,
+        branch_code="technical_vocational",
+        field_code=None,
+        academic_year_code=None,
+    )
+
+    assert response[0]["id"] == 60
+    assert response[0]["branch_code"] == "technical_vocational"
+    assert response[0]["field_code"] == "electronics"
+
+
+@pytest.mark.asyncio
+async def test_list_books_requires_field_for_any_branch_that_has_active_fields():
+    grade = SimpleNamespace(id=10, number=10, has_major=True)
+    branch = SimpleNamespace(
+        id=3,
+        code="technical_vocational",
+        min_grade=10,
+        max_grade=12,
+        is_active=True,
+    )
+    session = FakeSession(grade, scalar_values=[branch, 9])
+
+    with pytest.raises(HTTPException) as error:
+        await list_books(
+            10,
+            None,
+            session,
+            branch_code="technical_vocational",
+            field_code=None,
+            academic_year_code=None,
+        )
+
+    assert error.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_resolve_book_scope_does_not_let_legacy_major_override_conflicting_links():
+    from app.models.curriculum import Major
+
+    book = SimpleNamespace(
+        id=70,
+        grade_id=12,
+        major_id=5,
+        status=BookStatus.ready,
+        catalog_status="approved",
+    )
+    grade = SimpleNamespace(id=12, number=12, has_major=True)
+    major = SimpleNamespace(id=5, code="math_physics")
+    branch = SimpleNamespace(id=3, code="theoretical", min_grade=10, max_grade=12, is_active=True)
+    field = SimpleNamespace(id=8, code="math_physics", branch_id=3, is_active=True)
+    session = FakeSession(
+        grade,
+        scalar_values=[branch, field.id, field, None, 999],
+    )
+
+    async def fake_get(model, identifier):
+        return {Book: book, Grade: grade, Major: major}.get(model)
+
+    async def fake_scalar(statement):
+        return session.scalar_values.pop(0) if session.scalar_values else None
+
+    session.get = fake_get
+    session.scalar = fake_scalar
+
+    with pytest.raises(HTTPException) as error:
+        await resolve_book_scope(
+            session,
+            book_id=70,
+            grade_number=12,
+            major_code="math_physics",
+            branch_code="theoretical",
+        )
+
+    assert error.value.status_code == 422
