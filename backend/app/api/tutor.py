@@ -315,6 +315,14 @@ async def _resolve_request_scope(
                 )
             ).all()
         )
+        if not subject_ids:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "the anchor textbook must be mapped to an official subject before "
+                    "multi-grade retrieval can be used"
+                ),
+            )
         if body.book_ids is not None and anchor_book.id not in body.book_ids:
             raise HTTPException(
                 status_code=422,
