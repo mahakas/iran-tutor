@@ -28,7 +28,7 @@ The route API accepts up to eight fallback providers per feature, in addition to
 
 ## Failover rules
 
-The gateway proceeds to the next configured provider for connection failures, timeouts, malformed/empty JSON responses, HTTP 401/403, 408, 409, 425, 429 and 5xx responses.
+The gateway proceeds to the next configured provider for connection failures, timeouts, malformed/empty JSON responses, HTTP 401/402/403/404, 408, 409, 425, 429 and 5xx responses.
 
 It does not fail over on ordinary request-validation/client errors such as HTTP 400. These usually indicate a bad request or incompatible model configuration and should not be hidden by retrying other providers.
 
