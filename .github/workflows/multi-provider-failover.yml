@@ -16,7 +16,6 @@ jobs:
       run:
         working-directory: backend
     env:
-      APP_ENV: local
       DEMO_MODE: "false"
       DATABASE_URL: sqlite+aiosqlite:///./ci-test.sqlite3
       LLM_BASE_URL: https://example.invalid/v1
