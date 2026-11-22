@@ -30,7 +30,7 @@ export default function ImmersiveReader({ bookId }: Props) {
   const { authFetch } = useAppContext();
   const [overview, setOverview] = useState<ImmersiveOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pageIndex, setPageIndex] = useState(0);
+  const [pageIndex, setPageIndex] = useState(1);
   const [detail, setDetail] = useState<ImmersivePageDetail | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [selection, setSelection] = useState("");
@@ -44,6 +44,11 @@ export default function ImmersiveReader({ bookId }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    setOverview(null);
+    setDetail(null);
+    setImageUrl(null);
+    setPageIndex(1);
+    setError(null);
     (async () => {
       const res = await authFetch(`/api/v1/immersive/books/${bookId}`);
       const payload = await res.json().catch(() => null);
@@ -52,7 +57,11 @@ export default function ImmersiveReader({ bookId }: Props) {
         setError(phase5ErrorMessage(payload, "کتاب در دسترس نیست."));
         return;
       }
-      setOverview(payload as ImmersiveOverview);
+      const nextOverview = payload as ImmersiveOverview;
+      setOverview(nextOverview);
+      // The API's pdf_page_index is one-based and may not start at 1 when
+      // only a selected range of the original PDF was ingested.
+      setPageIndex(nextOverview.pages[0]?.pdf_page_index ?? 1);
     })();
     return () => {
       cancelled = true;
@@ -64,6 +73,8 @@ export default function ImmersiveReader({ bookId }: Props) {
     if (!overview) return;
     let cancelled = false;
     let objectUrl: string | null = null;
+    setDetail(null);
+    setImageUrl(null);
     (async () => {
       const [detailRes, imageRes] = await Promise.all([
         authFetch(`/api/v1/immersive/books/${bookId}/pages/${pageIndex}`),
@@ -86,16 +97,17 @@ export default function ImmersiveReader({ bookId }: Props) {
   }, [authFetch, bookId, overview, pageIndex]);
 
   const pages = useMemo(() => overview?.pages ?? [], [overview]);
-  const pageCount = overview?.page_count ?? 0;
+  const pageCount = pages.length;
+  const pagePosition = pages.findIndex((page) => page.pdf_page_index === pageIndex);
 
   const goToPage = useCallback(
     (index: number) => {
-      if (index < 0 || (pageCount && index >= pageCount)) return;
+      if (!pages.some((page) => page.pdf_page_index === index)) return;
       setPageIndex(index);
       setNotice(null);
       contentRef.current?.scrollTo({ top: 0 });
     },
-    [pageCount],
+    [pages],
   );
 
   const navigateToCitation = useCallback(
@@ -196,7 +208,7 @@ export default function ImmersiveReader({ bookId }: Props) {
           page_start: pageIndex,
           page_end: pageIndex,
           count: 5,
-          new_deck_title: `${overview?.title ?? "کتاب"} - صفحه ${toPersianDigits(detail?.printed_page_number ?? pageIndex + 1)}`,
+          new_deck_title: `${overview?.title ?? "کتاب"} - صفحه ${toPersianDigits(detail?.printed_page_number ?? pageIndex)}`,
         }),
       });
       const payload = await res.json().catch(() => null);
@@ -219,7 +231,7 @@ export default function ImmersiveReader({ bookId }: Props) {
   };
 
   const figureList: SourceFigure[] = detail?.figures ?? [];
-  const currentPrinted = detail?.printed_page_number ?? pages[pageIndex]?.printed_page_number ?? null;
+  const currentPrinted = detail?.printed_page_number ?? pages[pagePosition]?.printed_page_number ?? pageIndex;
   const chapterList = useMemo(() => overview?.chapters ?? [], [overview]);
 
   if (error) {
@@ -245,14 +257,32 @@ export default function ImmersiveReader({ bookId }: Props) {
         <header style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between", flexWrap: "wrap" }}>
           <strong>{overview.title}</strong>
           <span style={{ fontSize: 13, opacity: 0.8 }}>
-            صفحهٔ {toPersianDigits(currentPrinted ?? pageIndex + 1)} · {toPersianDigits(pageIndex + 1)} / {toPersianDigits(pageCount)} (فایل)
+            صفحهٔ {toPersianDigits(currentPrinted)} · {toPersianDigits(pagePosition + 1)} / {toPersianDigits(pageCount)} (فایل)
           </span>
         </header>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button type="button" className="btn-ghost" onClick={() => goToPage(pageIndex + 1)} aria-label="صفحهٔ بعد">
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={() => {
+              const next = pages[pagePosition + 1];
+              if (next) goToPage(next.pdf_page_index);
+            }}
+            disabled={pagePosition < 0 || pagePosition >= pageCount - 1}
+            aria-label="صفحهٔ بعد"
+          >
             <ChevronRight size={16} /> بعدی
           </button>
-          <button type="button" className="btn-ghost" onClick={() => goToPage(pageIndex - 1)} aria-label="صفحهٔ قبل">
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={() => {
+              const previous = pages[pagePosition - 1];
+              if (previous) goToPage(previous.pdf_page_index);
+            }}
+            disabled={pagePosition <= 0}
+            aria-label="صفحهٔ قبل"
+          >
             قبلی <ChevronLeft size={16} />
           </button>
           {notice ? <span role="status" style={{ fontSize: 13 }}>{notice}</span> : null}
