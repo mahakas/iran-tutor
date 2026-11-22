@@ -24,11 +24,13 @@ from app.services.auth_billing_service import (
     get_or_init_billing_settings,
     get_user_today_tokens,
     hash_otp_code,
+    hash_phone_verification_token,
     normalize_iranian_phone,
     parse_user_session_token,
     serialize_user,
     verify_otp_hash,
 )
+from app.services.passwords import hash_password, verify_password
 from app.services.sms_provider import get_sms_provider
 from app.core.client_ip import client_ip
 from app.services.rate_limiter import check_rate_limit
@@ -49,6 +51,23 @@ class VerifyOtpBody(BaseModel):
 
 class UpdateProfileBody(BaseModel):
     full_name: str = Field(min_length=1, max_length=120)
+
+
+class PasswordLoginBody(BaseModel):
+    phone_number: str = Field(min_length=9, max_length=24)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class CompleteRegistrationBody(BaseModel):
+    phone_number: str = Field(min_length=9, max_length=24)
+    verification_token: str = Field(min_length=32, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
+    full_name: str | None = Field(default=None, max_length=120)
+
+
+class PasswordChangeBody(BaseModel):
+    current_password: str | None = Field(default=None, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
 
 
 def _is_https(request: Request) -> bool:
@@ -83,6 +102,94 @@ async def _enforce_ip_limit(request: Request, *, bucket: str, limit: int, window
         raise HTTPException(
             status_code=429,
             detail="تعداد درخواست‌ها بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.",
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
+
+
+async def _create_user_session_response(
+    *,
+    user: User,
+    request: Request,
+    response: Response,
+    session: AsyncSession,
+    now: datetime,
+    is_new_user: bool = False,
+) -> dict[str, object]:
+    """Create a revocable DB-backed user session and return the normal account payload."""
+    settings = get_settings()
+    billing = await get_or_init_billing_settings(session)
+    user.last_login_at = now
+    user.deleted_at = None
+    await session.flush()
+
+    token_nonce = secrets.token_hex(12)
+    token = create_user_session_token(user.id, nonce=token_nonce)
+    user_agent = (request.headers.get("user-agent") or "")[:512] or None
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    ip_address = (forwarded_for or (request.client.host if request.client else ""))[:64] or None
+    session.add(
+        UserSession(
+            user_id=user.id,
+            token_nonce=token_nonce,
+            user_agent=user_agent,
+            ip_address=ip_address,
+            last_seen_at=now,
+            expires_at=now + timedelta(seconds=settings.user_session_ttl_seconds),
+            created_at=now,
+        )
+    )
+    await session.commit()
+    await session.refresh(user)
+
+    https = _is_https(request)
+    response.headers["Cache-Control"] = "no-store"
+    response.set_cookie(
+        key=USER_COOKIE_NAME,
+        value=token,
+        max_age=settings.user_session_ttl_seconds,
+        httponly=True,
+        samesite="none" if https else "lax",
+        secure=https,
+        path="/",
+    )
+    today_tokens = await get_user_today_tokens(session, user.id)
+    storage_quota = await get_user_storage_quota_bytes(session, user, billing)
+    return {
+        "authenticated": True,
+        "is_new_user": is_new_user,
+        "token": token,
+        "user": serialize_user(
+            user,
+            today_tokens=today_tokens,
+            token_price_per_1k_toman=billing.token_price_per_1k_toman,
+            storage_quota_bytes=storage_quota,
+            now=now,
+        ),
+    }
+
+
+PASSWORD_LOGIN_IP_LIMIT = 30
+PASSWORD_LOGIN_ACCOUNT_LIMIT = 8
+PASSWORD_LOGIN_WINDOW_SECONDS = 900
+
+
+async def _enforce_password_login_limits(request: Request, phone: str) -> None:
+    await _enforce_ip_limit(
+        request,
+        bucket="password_login_ip",
+        limit=PASSWORD_LOGIN_IP_LIMIT,
+        window=PASSWORD_LOGIN_WINDOW_SECONDS,
+    )
+    decision = await check_rate_limit(
+        identity=f"password_login_phone:{phone}",
+        bucket="password_login_phone",
+        limit=PASSWORD_LOGIN_ACCOUNT_LIMIT,
+        window_seconds=PASSWORD_LOGIN_WINDOW_SECONDS,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="تعداد تلاش‌های ورود برای این شماره بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.",
             headers={"Retry-After": str(decision.retry_after_seconds)},
         )
 
@@ -196,35 +303,98 @@ async def verify_otp(
 
     if _utc(otp.expires_at) <= now:
         otp.consumed_at = now
-        await session.commit()
-        raise HTTPException(status_code=401, detail="کد تأیید منقضی شده است. لطفاً کد جدید دریافت کنید.")
-
-    if otp.attempts >= otp.max_attempts:
-        otp.consumed_at = now
-        await session.commit()
-        raise HTTPException(status_code=429, detail="تعداد تلاش‌های اشتباه بیش از حد مجاز است. کد جدید بگیرید.")
-
-    if not verify_otp_hash(otp.id, phone, code_clean, otp.code_hash):
-        otp.attempts += 1
-        if otp.attempts >= otp.max_attempts:
-            otp.consumed_at = now
-        await session.commit()
-        remaining = max(0, otp.max_attempts - otp.attempts)
-        raise HTTPException(
-            status_code=401,
-            detail=f"کد واردشده نادرست است. ({remaining} تلاش باقی‌مانده)" if remaining else "کد باطل شد. کد جدید دریافت کنید.",
-        )
-
-    otp.consumed_at = now
-
-    billing = await get_or_init_billing_settings(session)
     user = await session.scalar(select(User).where(User.phone_number == phone))
     is_new_user = user is None
+    if user is not None and (not user.is_active or user.deleted_at is not None):
+        await session.commit()
+        raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال یا حذف شده است.")
+
+    if user is None or not user.password_hash:
+        # OTP was consumed; the high-entropy challenge is bound to this phone and OTP row,
+        # expires quickly, and can be redeemed exactly once by complete-registration.
+        verification_token = secrets.token_urlsafe(32)
+        otp.verified_at = now
+        otp.verification_token_hash = hash_phone_verification_token(otp.id, phone, verification_token)
+        otp.verification_token_expires_at = now + timedelta(minutes=10)
+        await session.commit()
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "authenticated": False,
+            "password_setup_required": True,
+            "verification_token": verification_token,
+            "phone_number": phone,
+            "is_new_user": is_new_user,
+        }
+
+    if body.full_name and body.full_name.strip() and not user.full_name:
+        user.full_name = body.full_name.strip()
+    user.phone_verified_at = user.phone_verified_at or now
+    return await _create_user_session_response(
+        user=user,
+        request=request,
+        response=response,
+        session=session,
+        now=now,
+        is_new_user=False,
+    )
+
+
+@router.post("/complete-registration")
+async def complete_registration(
+    body: CompleteRegistrationBody,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    try:
+        phone = normalize_iranian_phone(body.phone_number)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    now = datetime.now(timezone.utc)
+    otp = await session.scalar(
+        select(OtpCode)
+        .where(
+            OtpCode.phone_number == phone,
+            OtpCode.verified_at.is_not(None),
+            OtpCode.verification_token_hash.is_not(None),
+        )
+        .order_by(OtpCode.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    if otp is None:
+        raise HTTPException(status_code=401, detail="تأیید شماره منقضی شده است؛ دوباره کد پیامکی دریافت کنید.")
+    token_expiry = _utc(otp.verification_token_expires_at) if otp.verification_token_expires_at else None
+    if token_expiry is None or token_expiry <= now:
+        otp.verification_token_hash = None
+        otp.verification_token_expires_at = None
+        await session.commit()
+        raise HTTPException(status_code=401, detail="مهلت ثبت رمز پایان یافته است؛ دوباره شماره را تأیید کنید.")
+
+    expected = hash_phone_verification_token(otp.id, phone, body.verification_token)
+    if not secrets.compare_digest(expected, otp.verification_token_hash or ""):
+        raise HTTPException(status_code=401, detail="مجوز ثبت رمز معتبر نیست.")
+
+    user = await session.scalar(select(User).where(User.phone_number == phone))
+    if user is not None and (not user.is_active or user.deleted_at is not None):
+        await session.commit()
+        raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال یا حذف شده است.")
+    if user is not None and user.password_hash:
+        otp.verification_token_hash = None
+        otp.verification_token_expires_at = None
+        await session.commit()
+        raise HTTPException(status_code=409, detail="برای این حساب قبلاً رمز ثبت شده است؛ از ورود با رمز استفاده کنید.")
+
     if user is None:
+        billing = await get_or_init_billing_settings(session)
         user = User(
             phone_number=phone,
             full_name=body.full_name.strip() if body.full_name and body.full_name.strip() else None,
+            role="student",
             is_active=True,
+            phone_verified_at=now,
+            password_hash=hash_password(body.password),
             created_at=now,
             updated_at=now,
         )
@@ -239,60 +409,80 @@ async def verify_otp(
         )
         session.add(user)
     else:
-        if not user.is_active:
-            await session.commit()
-            raise HTTPException(status_code=403, detail="حساب کاربری شما غیرفعال شده است.")
         if body.full_name and body.full_name.strip() and not user.full_name:
             user.full_name = body.full_name.strip()
+        user.password_hash = hash_password(body.password)
+        user.phone_verified_at = user.phone_verified_at or now
 
-    user.last_login_at = now
-    await session.flush()
-
-    settings = get_settings()
-    token_nonce = secrets.token_hex(12)
-    token = create_user_session_token(user.id, nonce=token_nonce)
-    user_agent = (request.headers.get("user-agent") or "")[:512] or None
-    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    client_ip = (forwarded_for or (request.client.host if request.client else ""))[:64] or None
-    session.add(
-        UserSession(
-            user_id=user.id,
-            token_nonce=token_nonce,
-            user_agent=user_agent,
-            ip_address=client_ip,
-            last_seen_at=now,
-            expires_at=now + timedelta(seconds=settings.user_session_ttl_seconds),
-            created_at=now,
-        )
+    otp.verification_token_hash = None
+    otp.verification_token_expires_at = None
+    return await _create_user_session_response(
+        user=user,
+        request=request,
+        response=response,
+        session=session,
+        now=now,
+        is_new_user=user.created_at == now,
     )
+
+
+@router.post("/login")
+async def password_login(
+    body: PasswordLoginBody,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    try:
+        phone = normalize_iranian_phone(body.phone_number)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    await _enforce_password_login_limits(request, phone)
+    user = await session.scalar(select(User).where(User.phone_number == phone))
+    if (
+        user is None
+        or not user.is_active
+        or user.deleted_at is not None
+        or not verify_password(body.password, user.password_hash if user is not None else None)
+    ):
+        raise HTTPException(status_code=401, detail="شماره موبایل یا رمز عبور نادرست است.")
+
+    return await _create_user_session_response(
+        user=user,
+        request=request,
+        response=response,
+        session=session,
+        now=datetime.now(timezone.utc),
+        is_new_user=False,
+    )
+
+
+@router.put("/me/password")
+async def change_password(
+    body: PasswordChangeBody,
+    request: Request,
+    user: User = Depends(require_student),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    if user.password_hash and (
+        not body.current_password or not verify_password(body.current_password, user.password_hash)
+    ):
+        raise HTTPException(status_code=401, detail="رمز فعلی صحیح نیست.")
+    user.password_hash = hash_password(body.new_password)
+    now = datetime.now(timezone.utc)
+    current_nonce = getattr(request.state, "user_session_nonce", None)
+    statement = update(UserSession).where(
+        UserSession.user_id == user.id,
+        UserSession.revoked_at.is_(None),
+    )
+    if current_nonce:
+        statement = statement.where(UserSession.token_nonce != current_nonce)
+    await session.execute(statement.values(revoked_at=now))
     await session.commit()
-    await session.refresh(user)
+    return {"password_updated": True}
 
-    https = _is_https(request)
-    response.headers["Cache-Control"] = "no-store"
-    response.set_cookie(
-        key=USER_COOKIE_NAME,
-        value=token,
-        max_age=settings.user_session_ttl_seconds,
-        httponly=True,
-        samesite="none" if https else "lax",
-        secure=https,
-        path="/",
-    )
-    today_tokens = await get_user_today_tokens(session, user.id)
-    storage_quota = await get_user_storage_quota_bytes(session, user, billing)
-    return {
-        "authenticated": True,
-        "is_new_user": is_new_user,
-        "token": token,
-        "user": serialize_user(
-            user,
-            today_tokens=today_tokens,
-            token_price_per_1k_toman=billing.token_price_per_1k_toman,
-            storage_quota_bytes=storage_quota,
-            now=now,
-        ),
-    }
+
 
 
 @router.get("/me")
