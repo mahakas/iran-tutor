@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import require_student, resolve_book_scope
+from app.api.dependencies import enforce_student_grade_level, require_student, resolve_book_scope
 from app.core.llm_client import track_token_usage
 from app.db.session import get_session
 from app.models.auth import User, UserFile
@@ -304,8 +304,9 @@ async def _resolve_request_scope(
         # The anchor book and every cross-grade citation must stay at or below
         # the learner's current grade. When no grade is on the profile, the
         # selected anchor textbook is the conservative upper bound.
+        enforce_student_grade_level(current_user, anchor_grade.number)
         learner_grade = current_user.grade_level or anchor_grade.number
-        if anchor_grade.number > learner_grade or any(grade > learner_grade for grade in grades):
+        if any(grade > learner_grade for grade in grades):
             raise HTTPException(
                 status_code=422,
                 detail="multi-grade retrieval cannot include textbooks above the student's current grade",
@@ -370,6 +371,7 @@ async def _resolve_request_scope(
         major_code=body.major_code,
         branch_code=body.branch_code,
     )
+    enforce_student_grade_level(current_user, grade.number)
     return book, grade.number, major_code, None, None
 
 
@@ -470,6 +472,7 @@ async def ask_tutor_with_image(
         major_code=major_code,
         branch_code=branch_code,
     )
+    enforce_student_grade_level(current_user, grade.number)
     await check_capability_access(session, "multimodal", current_user)
     await enforce_ai_quota(session, user=current_user, feature_key="vision_ocr")
     image_bytes = await _read_upload_limited(image, MAX_IMAGE_BYTES)
@@ -543,6 +546,7 @@ async def ask_tutor_with_audio(
         major_code=major_code,
         branch_code=branch_code,
     )
+    enforce_student_grade_level(current_user, grade.number)
     await check_capability_access(session, "multimodal", current_user)
     await enforce_ai_quota(session, user=current_user, feature_key="stt")
     filename = Path(audio.filename or "question.webm").name
@@ -704,6 +708,7 @@ async def create_chat_session(
         major_code=body.major_code,
         branch_code=body.branch_code,
     )
+    enforce_student_grade_level(current_user, grade.number)
     now = datetime.now(timezone.utc)
     chat = ChatSession(
         book_id=book.id,
