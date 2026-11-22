@@ -191,12 +191,12 @@ export default function StudentApp() {
   // Phase 4: Auto-Mode router, multi-grade filter, streaming, chat search / bin.
   const [autoMode, setAutoMode] = useState(false);
   const [multiGrades, setMultiGrades] = useState<number[]>([]);
-  const selectGradeNumber = (nextGrade: number | null) => {
+  const selectGradeNumber = useCallback((nextGrade: number | null) => {
     setGradeNumber(nextGrade);
     setMultiGrades((previous) =>
       nextGrade === null ? [] : previous.filter((grade) => grade <= nextGrade)
     );
-  };
+  }, []);
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [chatBinTab, setChatBinTab] = useState<"search" | "bin" | null>(null);
   // Capability Registry (Phase 2): null = registry unreachable -> keep the legacy menu.
@@ -326,7 +326,7 @@ export default function StudentApp() {
     return () => {
       cancelled = true;
     };
-  }, [lang]);
+  }, [lang, selectGradeNumber]);
 
   const currentUserId = currentUser?.id ?? null;
 
