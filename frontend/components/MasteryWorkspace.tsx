@@ -134,8 +134,9 @@ export default function MasteryWorkspace() {
     }
   };
 
-  const shownTree = bookId ? tree : null;
-  const shownObjectives = bookId ? objectiveTree : null;
+  const shownTree = bookId && tree?.book.id === bookId ? tree : null;
+  const shownObjectives =
+    bookId && objectiveTree?.book.id === bookId ? objectiveTree : null;
 
   return (
     <div dir="rtl" style={{ display: "grid", gap: 16 }}>
@@ -207,7 +208,13 @@ export default function MasteryWorkspace() {
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <span style={{ fontSize: 12 }}>تعداد شواهد: {toPersianDigits(objective.evidence_count)}</span>
                 <button type="button" className="btn-ghost" disabled={busy || objective.status === "locked"}
-                  onClick={() => { setSelectedObjective(selectedObjective === objective.id ? null : objective.id); setNotice(null); }}>
+                  onClick={() => {
+                    setSelectedObjective(selectedObjective === objective.id ? null : objective.id);
+                    setScore("");
+                    setQualitativeLevel("");
+                    setFeedback("");
+                    setNotice(null);
+                  }}>
                   {selectedObjective === objective.id ? "بستن خودارزیابی" : "ثبت خودارزیابی"}
                 </button>
               </div>
