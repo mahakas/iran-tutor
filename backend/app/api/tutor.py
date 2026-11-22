@@ -305,7 +305,7 @@ async def _resolve_request_scope(
         # the learner's current grade. When no grade is on the profile, the
         # selected anchor textbook is the conservative upper bound.
         enforce_student_grade_level(current_user, anchor_grade.number)
-        learner_grade = current_user.grade_level or anchor_grade.number
+        learner_grade = getattr(current_user, "grade_level", None) or anchor_grade.number
         if any(grade > learner_grade for grade in grades):
             raise HTTPException(
                 status_code=422,
