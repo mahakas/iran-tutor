@@ -419,10 +419,17 @@ async def test_concept_link_expands_only_to_selected_grades(env):
             allowed_grades=[10],
             allowed_book_ids={env.ids["book10"]},
         )
+        disallowed_book = await multi_grade_rag.expand_with_concept_links(
+            session,
+            seeds=[(env.ids["book10"], 3)],
+            allowed_grades=[10, 12],
+            allowed_book_ids={env.ids["book10"]},
+        )
     assert len(allowed_both) == 1
     assert allowed_both[0].grade_number == 12
     assert allowed_both[0].chapter_numbers == frozenset({1})
     assert allowed_ten == []  # the grade-12 filter is not silently widened
+    assert disallowed_book == []  # a valid grade cannot widen the authorized book allowlist
 
 
 @pytest.mark.asyncio
