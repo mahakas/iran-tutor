@@ -3200,9 +3200,9 @@ export default function AdminPage() {
                             value={editBookMajor}
                             onChange={(e) => setEditBookMajor(e.target.value)}
                           >
-                            {majors.map((m) => (
-                              <option key={m.code} value={m.code}>
-                                {m.label}
+                            {fieldOptions.map((field) => (
+                              <option key={field.code} value={field.code}>
+                                {field.branch_title} — {field.title}
                               </option>
                             ))}
                           </select>
