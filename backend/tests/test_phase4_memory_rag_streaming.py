@@ -128,6 +128,7 @@ async def env(tmp_path, monkeypatch):
             books[grade_number] = book
         student = User(
             phone_number="09121000001", full_name="دانش‌آموز", role="student",
+            grade_level=12,
             tokens_remaining=1_000_000, plan_expires_at=NOW + timedelta(days=30), is_active=True,
         )
         other = User(
@@ -534,6 +535,61 @@ async def test_ask_endpoint_multi_grade_cites_two_grades(env):
     assert len(cited_grades) >= 2
     assert body["scope_count"] == 3
     assert "پایه" in body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_multi_grade_endpoint_enforces_student_grade_ceiling(env):
+    async with env.factory() as session:
+        student = await session.get(User, env.ids["student_id"])
+        student.grade_level = 10
+        await session.commit()
+
+    async with _client() as client:
+        too_high_anchor = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 12],
+                "book_id": env.ids["book12"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+            },
+        )
+        too_high_cross_grade = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 11],
+                "book_id": env.ids["book10"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+            },
+        )
+
+    assert too_high_anchor.status_code == 422
+    assert too_high_cross_grade.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_multi_grade_unknown_profile_uses_anchor_grade_as_ceiling(env):
+    async with env.factory() as session:
+        student = await session.get(User, env.ids["student_id"])
+        student.grade_level = None
+        await session.commit()
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/v1/tutor/ask",
+            json={
+                "query": "نیرو",
+                "grade_numbers": [10, 12],
+                "book_id": env.ids["book10"],
+                "branch_code": "theoretical",
+                "major_code": "math_physics",
+            },
+        )
+
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
