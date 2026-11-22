@@ -203,11 +203,27 @@ class CurriculumUnit(Base):
     """Canonical chapter/lesson tree, independent from the PDF page layout."""
 
     __tablename__ = "curriculum_units"
-    __table_args__ = (UniqueConstraint("grade_id", "subject_id", "scope_code", "code", name="uq_curriculum_unit_code"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "grade_id",
+            "subject_id",
+            "scope_code",
+            "branch_id",
+            "field_of_study_id",
+            "code",
+            name="uq_curriculum_unit_code",
+        ),
+        CheckConstraint(
+            "field_of_study_id IS NULL OR branch_id IS NOT NULL",
+            name="ck_curriculum_unit_field_requires_branch",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     grade_id: Mapped[int] = mapped_column(ForeignKey("grades.id"), nullable=False, index=True)
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"), nullable=False, index=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("education_branches.id"), nullable=True, index=True)
+    field_of_study_id: Mapped[int | None] = mapped_column(ForeignKey("fields_of_study.id"), nullable=True, index=True)
     academic_year_id: Mapped[int | None] = mapped_column(ForeignKey("academic_years.id"), nullable=True, index=True)
     scope_code: Mapped[str] = mapped_column(String(24), nullable=False, default="unspecified", server_default="unspecified")
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("curriculum_units.id"), nullable=True, index=True)
