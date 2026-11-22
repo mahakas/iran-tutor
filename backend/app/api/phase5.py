@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import require_student
+from app.api.dependencies import enforce_student_book_grade_level, require_student
 from app.db.session import get_session
 from app.models.auth import User
 from app.models.curriculum import Book
@@ -116,6 +116,7 @@ async def my_mastery_path(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    await enforce_student_book_grade_level(session, current_user, book_id)
     await check_capability_access(session, "mastery_path", current_user)
     return await mastery_service.book_tree(session, user_id=current_user.id, book_id=book_id)
 
@@ -127,6 +128,7 @@ async def my_objective_mastery_path(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    await enforce_student_book_grade_level(session, current_user, book_id)
     await check_capability_access(session, "mastery_path", current_user)
     return await mastery_service.objective_tree(session, user_id=current_user.id, book_id=book_id)
 
@@ -137,6 +139,8 @@ async def record_mastery_evidence(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    if body.book_id is not None:
+        await enforce_student_book_grade_level(session, current_user, body.book_id)
     await check_capability_access(session, "mastery_path", current_user)
     row = await mastery_service.record_objective_evidence(
         session,
@@ -173,9 +177,7 @@ async def create_deep_solve(
 ) -> dict[str, Any]:
     await check_capability_access(session, "deep_solve", current_user)
     if body.book_id is not None:
-        book = await session.get(Book, body.book_id)
-        if not is_student_visible_book(book):
-            raise HTTPException(status_code=404, detail="کتاب رسمی و منتشرشده یافت نشد.")
+        await enforce_student_book_grade_level(session, current_user, body.book_id)
     row = await ds.create_session(
         session,
         current_user,
@@ -228,6 +230,7 @@ async def immersive_overview(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    await enforce_student_book_grade_level(session, current_user, book_id)
     await check_capability_access(session, "immersive_reader", current_user)
     return await imm.book_overview(session, book_id)
 
@@ -239,6 +242,7 @@ async def immersive_page(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    await enforce_student_book_grade_level(session, current_user, book_id)
     await check_capability_access(session, "immersive_reader", current_user)
     return await imm.page_detail(session, book_id, pdf_page_index)
 
@@ -252,6 +256,7 @@ async def immersive_page_image(
 ) -> FileResponse:
     from pathlib import Path
 
+    await enforce_student_book_grade_level(session, current_user, book_id)
     await check_capability_access(session, "immersive_reader", current_user)
     path = await imm.page_image_path(session, book_id, pdf_page_index)
     if not Path(path).is_file():
@@ -266,6 +271,7 @@ async def immersive_assist(
     current_user: User = Depends(require_student),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    await enforce_student_book_grade_level(session, current_user, book_id)
     await check_capability_access(session, "immersive_reader", current_user)
     return await imm.assist(
         session,
