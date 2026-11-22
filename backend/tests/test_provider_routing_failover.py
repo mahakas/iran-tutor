@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from app.api import dependencies
 from app.core import llm_client
@@ -164,7 +165,7 @@ def test_missing_student_grade_fails_closed_in_production(monkeypatch):
         "get_settings",
         lambda: SimpleNamespace(demo_mode=False),
     )
-    with pytest.raises(Exception) as blocked:
+    with pytest.raises(HTTPException) as blocked:
         dependencies.enforce_student_grade_level(SimpleNamespace(grade_level=None), 12)
     assert getattr(blocked.value, "status_code", None) == 403
 
@@ -176,3 +177,54 @@ def test_demo_student_may_use_demo_grade_selection(monkeypatch):
         lambda: SimpleNamespace(demo_mode=True),
     )
     dependencies.enforce_student_grade_level(SimpleNamespace(grade_level=None), 12)
+
+
+@pytest.mark.asyncio
+async def test_provider_route_resolves_ordered_multi_fallback_chain(monkeypatch):
+    from app.services import ai_provider_service
+
+    route = SimpleNamespace(
+        provider_id=1,
+        model_name="main-model",
+        temperature=0.3,
+        max_tokens=700,
+        fallback_chain_json=[
+            {"provider_id": 2, "model_name": "backup-two"},
+            {"provider_id": 3, "model_name": None},
+            {"provider_id": 2, "model_name": "duplicate"},
+        ],
+        fallback_provider_id=3,
+        fallback_model_name="legacy-backup-three",
+    )
+    providers = {
+        1: SimpleNamespace(id=1, name="primary", provider_type="openai_compatible",
+                           base_url="https://primary.example/v1", encrypted_api_key="p",
+                           is_active=True, capabilities=["chat"]),
+        2: SimpleNamespace(id=2, name="backup-2", provider_type="openai_compatible",
+                           base_url="https://backup2.example/v1", encrypted_api_key="b2",
+                           is_active=True, capabilities=["chat"]),
+        3: SimpleNamespace(id=3, name="backup-3", provider_type="openai_compatible",
+                           base_url="https://backup3.example/v1", encrypted_api_key="b3",
+                           is_active=True, capabilities=["chat"]),
+    }
+
+    class FakeSession:
+        async def get(self, model, provider_id):
+            return providers.get(provider_id)
+
+    async def active_route(_session, _feature):
+        return route
+
+    monkeypatch.setattr(ai_provider_service, "get_active_route", active_route)
+    monkeypatch.setattr(ai_provider_service, "decrypt_secret", lambda secret: f"key:{secret}")
+
+    resolved = await ai_provider_service.resolve_feature_route_candidates(
+        FakeSession(), "chat"
+    )
+
+    assert [(item.provider_id, item.model_name) for item in resolved] == [
+        (1, "main-model"),
+        (2, "backup-two"),
+        (3, "main-model"),
+    ]
+    assert [item.api_key for item in resolved] == ["key:p", "key:b2", "key:b3"]

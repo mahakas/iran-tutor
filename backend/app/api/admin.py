@@ -2944,6 +2944,13 @@ class AiProviderUpdateBody(BaseModel):
     is_active: bool | None = None
 
 
+class FallbackRouteProviderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: int = Field(gt=0)
+    model_name: str | None = Field(default=None, max_length=255)
+
+
 class FeatureRouteBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2952,6 +2959,8 @@ class FeatureRouteBody(BaseModel):
     model_name: str = Field(min_length=1, max_length=255)
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1, le=200_000)
+    fallback_chain: list[FallbackRouteProviderBody] | None = Field(default=None, max_length=8)
+    # Backward-compatible single-fallback fields.
     fallback_provider_id: int | None = Field(default=None, gt=0)
     fallback_model_name: str | None = Field(default=None, max_length=255)
     is_active: bool = True
@@ -3153,10 +3162,34 @@ async def upsert_feature_route(
 
     if body.feature_key not in ROUTABLE_FEATURE_KEYS:
         raise HTTPException(status_code=422, detail="کلید قابلیت انتخاب‌شده معتبر نیست.")
-    if await session.get(AiProvider, body.provider_id) is None:
-        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ انتخاب‌شده پیدا نشد.")
-    if body.fallback_provider_id is not None and await session.get(AiProvider, body.fallback_provider_id) is None:
-        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ جایگزین پیدا نشد.")
+    primary = await session.get(AiProvider, body.provider_id)
+    if primary is None or not primary.is_active:
+        raise HTTPException(status_code=422, detail="ارائه‌دهندهٔ اصلی وجود ندارد یا غیرفعال است.")
+
+    if body.fallback_chain is None:
+        fallback_chain = (
+            [FallbackRouteProviderBody(
+                provider_id=body.fallback_provider_id,
+                model_name=body.fallback_model_name,
+            )]
+            if body.fallback_provider_id is not None
+            else []
+        )
+    else:
+        fallback_chain = list(body.fallback_chain)
+
+    fallback_ids = [item.provider_id for item in fallback_chain]
+    if len(fallback_chain) > 8:
+        raise HTTPException(status_code=422, detail="حداکثر ۸ ارائه‌دهندهٔ جایگزین قابل ثبت است.")
+    if body.provider_id in fallback_ids or len(set(fallback_ids)) != len(fallback_ids):
+        raise HTTPException(status_code=422, detail="ارائه‌دهنده‌های جایگزین باید یکتا و متفاوت از ارائه‌دهندهٔ اصلی باشند.")
+    for fallback in fallback_chain:
+        provider = await session.get(AiProvider, fallback.provider_id)
+        if provider is None or not provider.is_active:
+            raise HTTPException(
+                status_code=422,
+                detail=f"ارائه‌دهندهٔ جایگزین {fallback.provider_id} وجود ندارد یا غیرفعال است.",
+            )
 
     route = await session.scalar(
         select(FeatureModelRoute).where(FeatureModelRoute.feature_key == body.feature_key)
@@ -3168,8 +3201,20 @@ async def upsert_feature_route(
     route.model_name = body.model_name.strip()
     route.temperature = body.temperature
     route.max_tokens = body.max_tokens
-    route.fallback_provider_id = body.fallback_provider_id
-    route.fallback_model_name = (body.fallback_model_name or "").strip() or None
+    route.fallback_chain_json = [
+        {
+            "provider_id": item.provider_id,
+            "model_name": (item.model_name or "").strip() or None,
+        }
+        for item in fallback_chain
+    ]
+    # Mirror the first fallback into legacy columns for older API clients.
+    route.fallback_provider_id = fallback_chain[0].provider_id if fallback_chain else None
+    route.fallback_model_name = (
+        (fallback_chain[0].model_name or "").strip() or None
+        if fallback_chain
+        else None
+    )
     route.is_active = body.is_active
     await session.commit()
     await session.refresh(route)

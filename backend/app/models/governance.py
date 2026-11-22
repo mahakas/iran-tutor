@@ -78,6 +78,9 @@ class FeatureModelRoute(Base):
         ForeignKey("ai_providers.id"), nullable=True
     )
     fallback_model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    fallback_chain_json: Mapped[list[dict]] = mapped_column(
+        _json_type, default=list, server_default="[]", nullable=False
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="1", nullable=False
     )
