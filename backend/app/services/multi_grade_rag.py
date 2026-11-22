@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.concepts import ConceptLink
 from app.models.curriculum import (
-    AcademicYear,
     Book,
     BookCurriculumLink,
     BookPage,
@@ -35,7 +34,6 @@ from app.models.curriculum import (
     Grade,
     Major,
     PageStatus,
-    Subject,
 )
 from app.services.curriculum_access import student_book_catalog_clause
 from app.services.retrieval_service import TextbookScope, search_textbook_scopes
@@ -140,7 +138,7 @@ async def resolve_curriculum_book_ids(
         )
 
         # Compatibility for legacy theoretical editions that still use Major.
-        if branch.code == "theoretical":
+        if branch.code == "theoretical" and not subject_ids:
             legacy_major_id = await session.scalar(
                 select(Major.id).where(Major.code == selected_field.code)
             )
