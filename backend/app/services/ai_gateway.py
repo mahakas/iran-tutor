@@ -39,11 +39,13 @@ from app.core.llm_client import (
     stream_text,
     transcribe_audio,
     vision_json,
+    use_provider,
+    is_provider_failover_error,
 )
 from app.db.session import async_session_factory
 from app.models.governance import AiAuditLog
 from app.services import quota_service
-from app.services.ai_provider_service import ResolvedRoute, resolve_feature_route
+from app.services.ai_provider_service import ResolvedRoute, resolve_feature_route_chain
 
 logger = logging.getLogger(__name__)
 
@@ -150,15 +152,61 @@ def _citations_payload(citations: list[dict[str, Any]] | None) -> list[dict[str,
     return trimmed
 
 
-async def _resolve(feature_key: str, session: AsyncSession | None) -> ResolvedRoute | None:
-    """Resolve an admin route for the feature, if a DB session is available."""
+async def _resolve_candidates(
+    feature_key: str, session: AsyncSession | None
+) -> list[ResolvedRoute] | None:
+    """Resolve an ordered provider chain; None means use legacy environment settings."""
     if session is None:
         return None
     try:
-        return await resolve_feature_route(session, feature_key)
-    except Exception:  # noqa: BLE001 - routing must never break inference
+        return await resolve_feature_route_chain(session, feature_key)
+    except Exception:  # noqa: BLE001 - routing lookup must not break inference
         logger.exception("ai_gateway.route_lookup_failed feature=%s", feature_key)
         return None
+
+
+async def _invoke_with_failover(
+    candidates: list[ResolvedRoute] | None,
+    legacy_model: str | None,
+    operation: Callable[[str, ResolvedRoute | None], Awaitable[Any]],
+    *,
+    can_failover: Callable[[Exception], bool] | None = None,
+) -> tuple[ResolvedRoute | None, str, Any]:
+    """Run one inference operation against an ordered provider chain exactly once per candidate.
+
+    The low-level client retains its bounded retries. This layer only moves to another
+    provider for availability/authentication failures. Validation and caller errors do
+    not trigger failover.
+    """
+    if candidates is None:
+        if not legacy_model:
+            raise RuntimeError("no model is configured for this feature")
+        return None, legacy_model, await operation(legacy_model, None)
+    if not candidates:
+        raise RuntimeError("the feature route has no active, compatible, credentialed provider")
+
+    last_error: Exception | None = None
+    for index, candidate in enumerate(candidates):
+        if not candidate.configured or not candidate.base_url or not candidate.model_name:
+            continue
+        try:
+            with use_provider(candidate.base_url, candidate.api_key or "local-no-auth"):
+                result = await operation(candidate.model_name, candidate)
+            return candidate, candidate.model_name, result
+        except Exception as error:  # noqa: BLE001 - classified below
+            last_error = error
+            allowed = is_provider_failover_error(error)
+            if can_failover is not None:
+                allowed = allowed and can_failover(error)
+            if not allowed or index >= len(candidates) - 1:
+                raise
+            logger.warning(
+                "ai_gateway.provider_failover feature=%s failed_provider_id=%s error_type=%s next_index=%s",
+                candidate.feature_key, candidate.provider_id, type(error).__name__, index + 1,
+            )
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("the feature route has no usable provider candidate")
 
 
 async def _write_audit(
@@ -261,75 +309,39 @@ async def complete_text_via_gateway(
     session: AsyncSession | None = None,
     usage_hook: Callable[[int, int], None] | None = None,
 ) -> GatewayResult:
-    """Plain-text chat completion with routing, quota, audit, and error capture."""
+    """Plain-text completion with ordered provider failover, quota and audit."""
     settings = get_settings()
-    route = await _resolve(ctx.feature_key, session)
-    effective_model = (route.model_name if route and route.configured else None) or model or settings.tutor_model
+    candidates = await _resolve_candidates(ctx.feature_key, session)
     started = time.perf_counter()
-    tokens_in = tokens_out = 0
+    legacy_model = model or settings.tutor_model
 
-    if not effective_model:
-        latency = max(1, int(round((time.perf_counter() - started) * 1000)))
-        await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=None,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
-            latency_ms=latency,
-            status=STATUS_ERROR,
-            error_message="no model configured for feature",
-            session=session,
-        )
-        raise RuntimeError("no model is configured for this feature; ask an admin to set a route")
+    async def invoke(selected_model: str, _candidate: ResolvedRoute | None) -> str:
+        return await complete_text(selected_model, messages)
 
     try:
-        text = await complete_text(effective_model, messages)
+        route, effective_model, content = await _invoke_with_failover(candidates, legacy_model, invoke)
     except Exception as error:
-        latency = max(1, int(round((time.perf_counter() - started) * 1000)))
         await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=effective_model,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
-            latency_ms=latency,
-            status=STATUS_ERROR,
-            error_message=f"{type(error).__name__}: {error}",
-            session=session,
+            ctx=ctx, route=candidates[0] if candidates else None, model_name=legacy_model,
+            messages=messages, response_text=None, tokens_in=0, tokens_out=0,
+            latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
+            status=STATUS_ERROR, error_message=f"{type(error).__name__}: {error}", session=session,
         )
         raise
 
     latency = max(1, int(round((time.perf_counter() - started) * 1000)))
-    tokens_in = max(50, sum(len(str(m.get("content", ""))) for m in messages) // 4)
-    tokens_out = max(20, len(text) // 4)
+    tokens_in = max(50, sum(len(str(item.get("content", ""))) for item in messages) // 4)
+    tokens_out = max(20, len(content) // 4)
     if usage_hook is not None:
         usage_hook(tokens_in, tokens_out)
     audit_id = await _write_audit(
-        ctx=ctx,
-        route=route,
-        model_name=effective_model,
-        messages=messages,
-        response_text=text,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
-        status=STATUS_SUCCESS,
-        session=session,
+        ctx=ctx, route=route, model_name=effective_model, messages=messages, response_text=content,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency, status=STATUS_SUCCESS, session=session,
     )
     return GatewayResult(
-        content=text,
-        audit_id=audit_id,
-        provider_id=route.provider_id if route else None,
-        provider_name=route.provider_name if route else None,
-        model_name=effective_model,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
+        content=content, audit_id=audit_id, provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None, model_name=effective_model,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency,
     )
 
 
@@ -342,72 +354,47 @@ async def stream_text_via_gateway(
     session: AsyncSession | None = None,
     usage_hook: Callable[[int, int], None] | None = None,
 ) -> GatewayResult:
-    """Stream model text while retaining feature routing, audit, and usage accounting."""
+    """Stream completion; failover is allowed only before the first visible chunk."""
     settings = get_settings()
-    route = await _resolve(ctx.feature_key, session)
-    effective_model = (route.model_name if route and route.configured else None) or model or settings.tutor_model
+    candidates = await _resolve_candidates(ctx.feature_key, session)
     started = time.perf_counter()
+    legacy_model = model or settings.tutor_model
+    emitted = False
 
-    if not effective_model:
-        await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=None,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
-            latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
-            status=STATUS_ERROR,
-            error_message="no model configured for feature",
-            session=session,
-        )
-        raise RuntimeError("no model is configured for this feature; ask an admin to set a route")
+    async def guarded_chunk(chunk: str) -> None:
+        nonlocal emitted
+        emitted = True
+        await on_chunk(chunk)
+
+    async def invoke(selected_model: str, _candidate: ResolvedRoute | None) -> str:
+        return await stream_text(selected_model, messages, guarded_chunk)
 
     try:
-        content = await stream_text(effective_model, messages, on_chunk)
+        route, effective_model, content = await _invoke_with_failover(
+            candidates, legacy_model, invoke, can_failover=lambda _error: not emitted
+        )
     except Exception as error:
         await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=effective_model,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
+            ctx=ctx, route=candidates[0] if candidates else None, model_name=legacy_model, messages=messages,
+            response_text=None, tokens_in=0, tokens_out=0,
             latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
-            status=STATUS_ERROR,
-            error_message=f"{type(error).__name__}: {error}",
-            session=session,
+            status=STATUS_ERROR, error_message=f"{type(error).__name__}: {error}", session=session,
         )
         raise
 
     latency = max(1, int(round((time.perf_counter() - started) * 1000)))
-    tokens_in = max(50, sum(len(str(m.get("content", ""))) for m in messages) // 4)
+    tokens_in = max(50, sum(len(str(item.get("content", ""))) for item in messages) // 4)
     tokens_out = max(20, len(content) // 4)
     if usage_hook is not None:
         usage_hook(tokens_in, tokens_out)
     audit_id = await _write_audit(
-        ctx=ctx,
-        route=route,
-        model_name=effective_model,
-        messages=messages,
-        response_text=content,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
-        status=STATUS_SUCCESS,
-        session=session,
+        ctx=ctx, route=route, model_name=effective_model, messages=messages, response_text=content,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency, status=STATUS_SUCCESS, session=session,
     )
     return GatewayResult(
-        content=content,
-        audit_id=audit_id,
-        provider_id=route.provider_id if route else None,
-        provider_name=route.provider_name if route else None,
-        model_name=effective_model,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
+        content=content, audit_id=audit_id, provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None, model_name=effective_model,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency,
     )
 
 
@@ -419,73 +406,40 @@ async def complete_json_via_gateway(
     session: AsyncSession | None = None,
     usage_hook: Callable[[int, int], None] | None = None,
 ) -> GatewayResult:
-    """Structured-JSON completion with routing, quota, audit, and error capture."""
+    """Structured JSON completion with ordered provider failover and auditing."""
     settings = get_settings()
-    route = await _resolve(ctx.feature_key, session)
-    effective_model = (route.model_name if route and route.configured else None) or model or settings.tutor_model
+    candidates = await _resolve_candidates(ctx.feature_key, session)
     started = time.perf_counter()
+    legacy_model = model or settings.tutor_model
 
-    if not effective_model:
-        await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=None,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
-            latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
-            status=STATUS_ERROR,
-            error_message="no model configured for feature",
-            session=session,
-        )
-        raise RuntimeError("no model is configured for this feature; ask an admin to set a route")
+    async def invoke(selected_model: str, _candidate: ResolvedRoute | None) -> dict[str, Any]:
+        return await complete_json(selected_model, messages)
 
     try:
-        parsed = await complete_json(effective_model, messages)
+        route, effective_model, parsed = await _invoke_with_failover(candidates, legacy_model, invoke)
     except Exception as error:
         await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=effective_model,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
+            ctx=ctx, route=candidates[0] if candidates else None, model_name=legacy_model, messages=messages,
+            response_text=None, tokens_in=0, tokens_out=0,
             latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
-            status=STATUS_ERROR,
-            error_message=f"{type(error).__name__}: {error}",
-            session=session,
+            status=STATUS_ERROR, error_message=f"{type(error).__name__}: {error}", session=session,
         )
         raise
 
-    latency = max(1, int(round((time.perf_counter() - started) * 1000)))
     serialized = json.dumps(parsed, ensure_ascii=False)
-    tokens_in = max(50, sum(len(str(m.get("content", ""))) for m in messages) // 4)
+    latency = max(1, int(round((time.perf_counter() - started) * 1000)))
+    tokens_in = max(50, sum(len(str(item.get("content", ""))) for item in messages) // 4)
     tokens_out = max(30, len(serialized) // 4)
     if usage_hook is not None:
         usage_hook(tokens_in, tokens_out)
     audit_id = await _write_audit(
-        ctx=ctx,
-        route=route,
-        model_name=effective_model,
-        messages=messages,
-        response_text=serialized,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
-        status=STATUS_SUCCESS,
-        session=session,
+        ctx=ctx, route=route, model_name=effective_model, messages=messages, response_text=serialized,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency, status=STATUS_SUCCESS, session=session,
     )
     return GatewayResult(
-        content=parsed,
-        audit_id=audit_id,
-        provider_id=route.provider_id if route else None,
-        provider_name=route.provider_name if route else None,
-        model_name=effective_model,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
+        content=parsed, audit_id=audit_id, provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None, model_name=effective_model,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency,
     )
 
 
@@ -500,36 +454,25 @@ async def vision_json_via_gateway(
     session: AsyncSession | None = None,
     usage_hook: Callable[[int, int], None] | None = None,
 ) -> GatewayResult:
-    """Vision extraction (textbook OCR / student photo) with full auditing."""
+    """Vision extraction with ordered provider failover and auditing."""
     settings = get_settings()
-    route = await _resolve(ctx.feature_key, session)
-    effective_model = (
-        (route.model_name if route and route.configured else None)
-        or model
-        or settings.vision_model_primary
-    )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_text},
-    ]
+    candidates = await _resolve_candidates(ctx.feature_key, session)
+    legacy_model = model or settings.vision_model_primary
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}]
     started = time.perf_counter()
+
+    async def invoke(selected_model: str, _candidate: ResolvedRoute | None):
+        return await vision_json(selected_model, system_prompt, user_text, image_bytes, image_mime_type)
+
     try:
-        parsed, usage = await vision_json(
-            effective_model, system_prompt, user_text, image_bytes, image_mime_type
-        )
+        route, effective_model, result = await _invoke_with_failover(candidates, legacy_model, invoke)
+        parsed, usage = result
     except Exception as error:
         await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=effective_model,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
+            ctx=ctx, route=candidates[0] if candidates else None, model_name=legacy_model, messages=messages,
+            response_text=None, tokens_in=0, tokens_out=0,
             latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
-            status=STATUS_ERROR,
-            error_message=f"{type(error).__name__}: {error}",
-            session=session,
+            status=STATUS_ERROR, error_message=f"{type(error).__name__}: {error}", session=session,
         )
         raise
 
@@ -539,26 +482,14 @@ async def vision_json_via_gateway(
     if usage_hook is not None:
         usage_hook(tokens_in, tokens_out)
     audit_id = await _write_audit(
-        ctx=ctx,
-        route=route,
-        model_name=effective_model,
-        messages=messages,
-        response_text=json.dumps(parsed, ensure_ascii=False),
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
-        status=STATUS_SUCCESS,
-        session=session,
+        ctx=ctx, route=route, model_name=effective_model, messages=messages,
+        response_text=json.dumps(parsed, ensure_ascii=False), tokens_in=tokens_in, tokens_out=tokens_out,
+        latency_ms=latency, status=STATUS_SUCCESS, session=session,
     )
     return GatewayResult(
-        content=parsed,
-        audit_id=audit_id,
-        provider_id=route.provider_id if route else None,
-        provider_name=route.provider_name if route else None,
-        model_name=effective_model,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
+        content=parsed, audit_id=audit_id, provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None, model_name=effective_model,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency,
     )
 
 
@@ -572,67 +503,40 @@ async def transcribe_audio_via_gateway(
     session: AsyncSession | None = None,
     usage_hook: Callable[[int, int], None] | None = None,
 ) -> GatewayResult:
-    """Speech-to-text with auditing (audio bytes are never stored in the log)."""
+    """Speech-to-text with ordered provider failover; audio bytes are not audited."""
     settings = get_settings()
-    route = await _resolve(ctx.feature_key, session)
-    effective_model = (
-        (route.model_name if route and route.configured else None)
-        or model
-        or settings.speech_to_text_model
-    )
-    messages = [
-        {
-            "role": "user",
-            "content": f"[audio attachment] name={filename} type={content_type} bytes={len(audio_bytes)}",
-        }
-    ]
+    candidates = await _resolve_candidates(ctx.feature_key, session)
+    legacy_model = model or settings.speech_to_text_model
+    messages = [{"role": "user", "content": f"[audio attachment] name={filename} type={content_type} bytes={len(audio_bytes)}"}]
     started = time.perf_counter()
+
+    async def invoke(selected_model: str, _candidate: ResolvedRoute | None) -> str:
+        return await transcribe_audio(audio_bytes, filename=filename, content_type=content_type, model=selected_model)
+
     try:
-        text = await transcribe_audio(
-            audio_bytes, filename=filename, content_type=content_type, model=effective_model
-        )
+        route, effective_model, content = await _invoke_with_failover(candidates, legacy_model, invoke)
     except Exception as error:
         await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=effective_model,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
+            ctx=ctx, route=candidates[0] if candidates else None, model_name=legacy_model, messages=messages,
+            response_text=None, tokens_in=0, tokens_out=0,
             latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
-            status=STATUS_ERROR,
-            error_message=f"{type(error).__name__}: {error}",
-            session=session,
+            status=STATUS_ERROR, error_message=f"{type(error).__name__}: {error}", session=session,
         )
         raise
 
     latency = max(1, int(round((time.perf_counter() - started) * 1000)))
     tokens_in = max(100, len(audio_bytes) // 1024 * 12)
-    tokens_out = max(20, len(text) // 4)
+    tokens_out = max(20, len(content) // 4)
     if usage_hook is not None:
         usage_hook(tokens_in, tokens_out)
     audit_id = await _write_audit(
-        ctx=ctx,
-        route=route,
-        model_name=effective_model,
-        messages=messages,
-        response_text=text,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
-        status=STATUS_SUCCESS,
-        session=session,
+        ctx=ctx, route=route, model_name=effective_model, messages=messages, response_text=content,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency, status=STATUS_SUCCESS, session=session,
     )
     return GatewayResult(
-        content=text,
-        audit_id=audit_id,
-        provider_id=route.provider_id if route else None,
-        provider_name=route.provider_name if route else None,
-        model_name=effective_model,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency,
+        content=content, audit_id=audit_id, provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None, model_name=effective_model,
+        tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency,
     )
 
 
@@ -644,39 +548,28 @@ async def speech_via_gateway(
     session: AsyncSession | None = None,
     usage_hook: Callable[[int, int], None] | None = None,
 ) -> tuple[bytes, GatewayResult]:
-    """Text-to-speech with routing and auditing. Returns `(audio_bytes, result)`.
-
-    The admin's `audio_tts` route supplies provider URL, key and model. The audit row
-    stores the text (truncated) and the voice; audio bytes are never logged.
-    """
+    """Text-to-speech with ordered provider failover and auditing."""
     settings = get_settings()
-    route = await _resolve(ctx.feature_key, session)
-    effective_model = (route.model_name if route and route.configured else None) or getattr(
-        settings, "speech_synthesis_model", None
-    )
+    candidates = await _resolve_candidates(ctx.feature_key, session)
+    legacy_model = getattr(settings, "speech_synthesis_model", None)
     messages = [{"role": "user", "content": f"[tts] voice={voice} chars={len(text)} text={text[:500]}"}]
     started = time.perf_counter()
-    try:
-        audio = await synthesize_speech(
-            text,
-            voice=voice,
-            model=effective_model or "",
-            base_url=route.base_url if route and route.configured else None,
-            api_key=route.api_key if route and route.configured else None,
+
+    async def invoke(selected_model: str, candidate: ResolvedRoute | None) -> bytes:
+        return await synthesize_speech(
+            text, voice=voice, model=selected_model,
+            base_url=candidate.base_url if candidate else None,
+            api_key=candidate.api_key if candidate else None,
         )
+
+    try:
+        route, effective_model, audio = await _invoke_with_failover(candidates, legacy_model, invoke)
     except Exception as error:
         await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=effective_model,
-            messages=messages,
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
+            ctx=ctx, route=candidates[0] if candidates else None, model_name=legacy_model, messages=messages,
+            response_text=None, tokens_in=0, tokens_out=0,
             latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
-            status=STATUS_ERROR,
-            error_message=f"{type(error).__name__}: {error}",
-            session=session,
+            status=STATUS_ERROR, error_message=f"{type(error).__name__}: {error}", session=session,
         )
         raise
 
@@ -684,27 +577,15 @@ async def speech_via_gateway(
     tokens_in = max(1, len(text) // 4)
     if usage_hook is not None:
         usage_hook(tokens_in, 0)
+    audio_summary = f"[audio {len(audio)} bytes]"
     audit_id = await _write_audit(
-        ctx=ctx,
-        route=route,
-        model_name=effective_model,
-        messages=messages,
-        response_text=f"[audio {len(audio)} bytes]",
-        tokens_in=tokens_in,
-        tokens_out=0,
-        latency_ms=latency,
-        status=STATUS_SUCCESS,
-        session=session,
+        ctx=ctx, route=route, model_name=effective_model, messages=messages, response_text=audio_summary,
+        tokens_in=tokens_in, tokens_out=0, latency_ms=latency, status=STATUS_SUCCESS, session=session,
     )
     return audio, GatewayResult(
-        content=f"[audio {len(audio)} bytes]",
-        audit_id=audit_id,
-        provider_id=route.provider_id if route else None,
-        provider_name=route.provider_name if route else None,
-        model_name=effective_model,
-        tokens_in=tokens_in,
-        tokens_out=0,
-        latency_ms=latency,
+        content=audio_summary, audit_id=audit_id, provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None, model_name=effective_model,
+        tokens_in=tokens_in, tokens_out=0, latency_ms=latency,
     )
 
 
@@ -715,56 +596,38 @@ async def embed_via_gateway(
     model: str | None = None,
     session: AsyncSession | None = None,
 ) -> GatewayResult:
-    """Embedding generation with auditing (response stores counts, not vectors)."""
+    """Embedding generation with ordered provider failover and auditing."""
     settings = get_settings()
-    route = await _resolve(ctx.feature_key, session)
-    effective_model = (
-        (route.model_name if route and route.configured else None)
-        or model
-        or settings.embedding_model
-    )
+    candidates = await _resolve_candidates(ctx.feature_key, session)
+    legacy_model = model or settings.embedding_model
+    messages = [{"role": "user", "content": f"[embedding] {len(texts)} texts"}]
     started = time.perf_counter()
+
+    async def invoke(selected_model: str, _candidate: ResolvedRoute | None) -> list[list[float]]:
+        return await embed_texts(texts, model=selected_model)
+
     try:
-        vectors = await embed_texts(texts, model=effective_model)
+        route, effective_model, vectors = await _invoke_with_failover(candidates, legacy_model, invoke)
     except Exception as error:
         await _write_audit(
-            ctx=ctx,
-            route=route,
-            model_name=effective_model,
-            messages=[{"role": "user", "content": f"[embedding] {len(texts)} texts"}],
-            response_text=None,
-            tokens_in=0,
-            tokens_out=0,
+            ctx=ctx, route=candidates[0] if candidates else None, model_name=legacy_model, messages=messages,
+            response_text=None, tokens_in=0, tokens_out=0,
             latency_ms=max(1, int(round((time.perf_counter() - started) * 1000))),
-            status=STATUS_ERROR,
-            error_message=f"{type(error).__name__}: {error}",
-            session=session,
+            status=STATUS_ERROR, error_message=f"{type(error).__name__}: {error}", session=session,
         )
         raise
 
     latency = max(1, int(round((time.perf_counter() - started) * 1000)))
-    tokens_in = max(1, sum(len(text) for text in texts) // 4)
+    tokens_in = max(1, sum(len(item) for item in texts) // 4)
+    vector_summary = f"[{len(vectors)} vectors, dim={len(vectors[0]) if vectors else 0}]"
     audit_id = await _write_audit(
-        ctx=ctx,
-        route=route,
-        model_name=effective_model,
-        messages=[{"role": "user", "content": f"[embedding] {len(texts)} texts"}],
-        response_text=f"[{len(vectors)} vectors, dim={len(vectors[0]) if vectors else 0}]",
-        tokens_in=tokens_in,
-        tokens_out=0,
-        latency_ms=latency,
-        status=STATUS_SUCCESS,
-        session=session,
+        ctx=ctx, route=route, model_name=effective_model, messages=messages, response_text=vector_summary,
+        tokens_in=tokens_in, tokens_out=0, latency_ms=latency, status=STATUS_SUCCESS, session=session,
     )
     return GatewayResult(
-        content=vectors,
-        audit_id=audit_id,
-        provider_id=route.provider_id if route else None,
-        provider_name=route.provider_name if route else None,
-        model_name=effective_model,
-        tokens_in=tokens_in,
-        tokens_out=0,
-        latency_ms=latency,
+        content=vectors, audit_id=audit_id, provider_id=route.provider_id if route else None,
+        provider_name=route.provider_name if route else None, model_name=effective_model,
+        tokens_in=tokens_in, tokens_out=0, latency_ms=latency,
     )
 
 
