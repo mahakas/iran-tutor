@@ -39,6 +39,8 @@ export type AdminFeatureRoute = {
   max_tokens: number | null;
   fallback_provider_id: number | null;
   fallback_model_name: string | null;
+  fallback_provider_ids?: number[];
+  fallback_model_names?: string[];
   is_active: boolean;
 };
 
@@ -245,6 +247,8 @@ export default function AdminProvidersPanel({
     providerId: number,
     modelName: string,
     temperature: number,
+    fallbackProviderIds: number[],
+    fallbackModelNames: string[],
   ) {
     setError("");
     setMessage("");
@@ -257,6 +261,8 @@ export default function AdminProvidersPanel({
         provider_id: providerId,
         model_name: modelName,
         temperature,
+        fallback_provider_ids: fallbackProviderIds,
+        fallback_model_names: fallbackModelNames,
         is_active: true,
       }),
     });
@@ -524,21 +530,59 @@ function RouteMatrix({
 }: {
   payload: RouteListPayload | null;
   providers: AdminProvider[];
-  onSave: (featureKey: string, providerId: number, modelName: string, temperature: number) => Promise<void>;
+  onSave: (
+    featureKey: string,
+    providerId: number,
+    modelName: string,
+    temperature: number,
+    fallbackProviderIds: number[],
+    fallbackModelNames: string[],
+  ) => Promise<void>;
 }) {
   const [drafts, setDrafts] = useState<
-    Record<string, { providerId: string; modelName: string; temperature: string }>
+    Record<
+      string,
+      {
+        providerId: string;
+        modelName: string;
+        temperature: string;
+        fallbackProviderIds: string[];
+        fallbackModelNames: string[];
+      }
+    >
   >({});
 
   useEffect(() => {
     if (!payload) return;
-    const next: Record<string, { providerId: string; modelName: string; temperature: string }> = {};
+    const next: Record<
+      string,
+      {
+        providerId: string;
+        modelName: string;
+        temperature: string;
+        fallbackProviderIds: string[];
+        fallbackModelNames: string[];
+      }
+    > = {};
     for (const feature of payload.feature_keys) {
       const existing = payload.routes.find((route) => route.feature_key === feature.key);
+      const fallbackIds =
+        existing?.fallback_provider_ids?.length
+          ? existing.fallback_provider_ids
+          : existing?.fallback_provider_id
+            ? [existing.fallback_provider_id]
+            : [];
       next[feature.key] = {
         providerId: existing ? String(existing.provider_id) : "",
         modelName: existing?.model_name ?? "",
         temperature: existing ? String(existing.temperature) : "0.2",
+        fallbackProviderIds: fallbackIds.map(String),
+        fallbackModelNames:
+          existing?.fallback_model_names?.length === fallbackIds.length
+            ? [...existing.fallback_model_names]
+            : fallbackIds.map((_, index) =>
+                index === 0 ? existing?.fallback_model_name ?? "" : "",
+              ),
       };
     }
     const timer = window.setTimeout(() => setDrafts(next), 0);
@@ -568,6 +612,8 @@ function RouteMatrix({
               providerId: "",
               modelName: "",
               temperature: "0.2",
+              fallbackProviderIds: [],
+              fallbackModelNames: [],
             };
             return (
               <tr key={feature.key}>
@@ -583,7 +629,17 @@ function RouteMatrix({
                     onChange={(event) =>
                       setDrafts((prev) => ({
                         ...prev,
-                        [feature.key]: { ...draft, providerId: event.target.value },
+                        [feature.key]: {
+                          ...draft,
+                          providerId: event.target.value,
+                          fallbackProviderIds: draft.fallbackProviderIds.filter(
+                            (id) => id !== event.target.value,
+                          ),
+                          fallbackModelNames: draft.fallbackModelNames.filter(
+                            (_name, index) =>
+                              draft.fallbackProviderIds[index] !== event.target.value,
+                          ),
+                        },
                       }))
                     }
                   >
@@ -594,6 +650,138 @@ function RouteMatrix({
                       </option>
                     ))}
                   </select>
+                  <div className="admin-muted" style={{ marginTop: 8 }}>
+                    <span>زنجیرهٔ جایگزین (به ترتیب اجرا)</span>
+                    <select
+                      value=""
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (!value || draft.fallbackProviderIds.includes(value)) return;
+                        setDrafts((prev) => ({
+                          ...prev,
+                          [feature.key]: {
+                            ...draft,
+                            fallbackProviderIds: [...draft.fallbackProviderIds, value],
+                            fallbackModelNames: [...draft.fallbackModelNames, ""],
+                          },
+                        }));
+                      }}
+                    >
+                      <option value="">افزودن ارائه‌دهندهٔ جایگزین</option>
+                      {providers
+                        .filter(
+                          (provider) =>
+                            String(provider.id) !== draft.providerId &&
+                            !draft.fallbackProviderIds.includes(String(provider.id)),
+                        )
+                        .map((provider) => (
+                          <option key={provider.id} value={provider.id}>
+                            {provider.name}
+                          </option>
+                        ))}
+                    </select>
+                    {draft.fallbackProviderIds.map((id, index) => {
+                      const provider = providers.find((item) => String(item.id) === id);
+                      return (
+                        <div
+                          key={feature.key + "-" + id}
+                          className="admin-chip-row"
+                          style={{ marginTop: 6, alignItems: "center" }}
+                        >
+                          <span>{index + 1}. {provider?.name ?? "Provider " + id}</span>
+                          <input
+                            dir="ltr"
+                            aria-label={"Fallback model " + (index + 1)}
+                            value={draft.fallbackModelNames[index] ?? ""}
+                            placeholder={draft.modelName || "مدل پیش‌فرض"}
+                            onChange={(event) =>
+                              setDrafts((prev) => ({
+                                ...prev,
+                                [feature.key]: {
+                                  ...draft,
+                                  fallbackModelNames: draft.fallbackProviderIds.map(
+                                    (_item, itemIndex) =>
+                                      itemIndex === index
+                                        ? event.target.value
+                                        : draft.fallbackModelNames[itemIndex] ?? "",
+                                  ),
+                                },
+                              }))
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="admin-theme-chip"
+                            disabled={index === 0}
+                            aria-label="Move fallback up"
+                            onClick={() =>
+                              setDrafts((prev) => {
+                                const ids = [...draft.fallbackProviderIds];
+                                const models = [...draft.fallbackModelNames];
+                                [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
+                                [models[index - 1], models[index]] = [models[index], models[index - 1]];
+                                return {
+                                  ...prev,
+                                  [feature.key]: {
+                                    ...draft,
+                                    fallbackProviderIds: ids,
+                                    fallbackModelNames: models,
+                                  },
+                                };
+                              })
+                            }
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="admin-theme-chip"
+                            disabled={index === draft.fallbackProviderIds.length - 1}
+                            aria-label="Move fallback down"
+                            onClick={() =>
+                              setDrafts((prev) => {
+                                const ids = [...draft.fallbackProviderIds];
+                                const models = [...draft.fallbackModelNames];
+                                [ids[index + 1], ids[index]] = [ids[index], ids[index + 1]];
+                                [models[index + 1], models[index]] = [models[index], models[index + 1]];
+                                return {
+                                  ...prev,
+                                  [feature.key]: {
+                                    ...draft,
+                                    fallbackProviderIds: ids,
+                                    fallbackModelNames: models,
+                                  },
+                                };
+                              })
+                            }
+                          >
+                            ↓
+                          </button>
+                          <button
+                            type="button"
+                            className="admin-logout-btn"
+                            aria-label="Remove fallback"
+                            onClick={() =>
+                              setDrafts((prev) => ({
+                                ...prev,
+                                [feature.key]: {
+                                  ...draft,
+                                  fallbackProviderIds: draft.fallbackProviderIds.filter(
+                                    (_item, itemIndex) => itemIndex !== index,
+                                  ),
+                                  fallbackModelNames: draft.fallbackModelNames.filter(
+                                    (_item, itemIndex) => itemIndex !== index,
+                                  ),
+                                },
+                              }))
+                            }
+                          >
+                            ×
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </td>
                 <td>
                   <input
@@ -635,6 +823,8 @@ function RouteMatrix({
                         Number(draft.providerId),
                         draft.modelName.trim(),
                         Number(draft.temperature) || 0.2,
+                        draft.fallbackProviderIds.map(Number),
+                        draft.fallbackModelNames.map((name) => name.trim()),
                       )
                     }
                   >
