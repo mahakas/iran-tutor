@@ -162,9 +162,7 @@ async def resolve_curriculum_book_ids(
         student_book_catalog_clause(),
         Grade.number.in_(grades),
         year_condition,
-        or_(*applicable_links, legacy_field_match)
-        if legacy_field_match is not None
-        else or_(*applicable_links),
+        or_(*applicable_links),
     ]
     statement = (
         select(Book.id)
