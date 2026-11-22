@@ -210,6 +210,7 @@ export default function StudentApp() {
   const appliedDefaultModeRef = useRef(false);
 
   const selectedBook = books.find((book) => String(book.id) === bookId);
+  const currentGrade = grades.find((grade) => grade.number === gradeNumber);
   const isUpperSecondary = gradeNumber !== null && gradeNumber >= 10;
   const hasMajor = Boolean(majorCode);
   const branchRequiresField = isUpperSecondary && (branchCode === "theoretical" || fields.length > 0);
@@ -879,6 +880,8 @@ export default function StudentApp() {
     draft,
     getActiveToken,
     gradeNumber,
+    branchCode,
+    isUpperSecondary,
     hasMajor,
     imageFile,
     lang,
@@ -1564,7 +1567,7 @@ export default function StudentApp() {
               <span>
                 {currentGrade?.title ?? (lang === "en" ? "Select Grade" : "انتخاب پایه")}
                 {hasMajor && majorCode
-                  ? ` · ${majors.find((major) => major.code === majorCode)?.title ?? ""}`
+                  ? ` · ${fields.find((field) => field.code === majorCode)?.title ?? ""}`
                   : ""}
               </span>
             </div>
