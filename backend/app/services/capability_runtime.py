@@ -283,12 +283,18 @@ async def run_capability_text(
     model: str | None = None,
     user: User | None = None,
     enforce: bool = True,
+    load_skill: bool = True,
 ) -> tuple[GatewayResult, list[LearningBlock], Skill | None]:
     """Execute one capability call: skill prompt -> gateway -> typed blocks.
 
     Returns ``(gateway_result, blocks, skill)``. When no active skill exists
     the caller-provided ``extra_system`` (or a generic Persian tutor prompt)
     is used so the capability still works before skills are seeded.
+
+    ``load_skill=False`` keeps quota/flag/audit/gateway identical but skips
+    loading the capability's generation skill — used by sub-flows that need
+    the capability's gate and budget without that skill's output contract
+    (e.g. free-text card explanations for the shared ``flashcards`` skill).
     """
     skill: Skill | None = None
     system_prompt = extra_system or "تو معلم خصوصی فارسیِ دانش‌آموزان ایران هستی."
@@ -296,7 +302,7 @@ async def run_capability_text(
         await enforce_capability_call(
             session, capability_key, user=user, feature_key=feature_key or capability_key
         )
-    if session is not None:
+    if session is not None and load_skill:
         skill = await load_active_skill(
             session, capability_key, subject_scope=subject_scope, grade_scope=grade_scope
         )

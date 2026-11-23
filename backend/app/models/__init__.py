@@ -49,6 +49,7 @@ from app.models.flashcards import (  # noqa: F401
     Flashcard,
     FlashcardDeck,
     FlashcardReview,
+    FlashcardStudySession,
 )
 from app.models.capabilities import (  # noqa: F401
     Capability,
