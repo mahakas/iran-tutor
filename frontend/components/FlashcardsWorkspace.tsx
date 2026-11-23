@@ -1,12 +1,23 @@
 "use client";
 
+/**
+ * Darsyar flashcard workspace — NotebookLM-style study experience.
+ *
+ * Views: "decks" (library + resume banner) → "deck" (detail + study modes +
+ * exports) → "study" (persistent session, flip, Got/Missed, results). Every
+ * action talks to the real backend; study progress lives in PostgreSQL via
+ * /api/v1/flashcards/sessions.
+ */
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BookOpen,
+  BookOpenCheck,
   Download,
   Eye,
-  EyeOff,
-  Lightbulb,
+  FileText,
+  Library,
+  Play,
   Plus,
   RotateCw,
   Sparkles,
@@ -15,14 +26,15 @@ import {
 } from "lucide-react";
 import { buildUserAuthHeaders, useAppContext } from "@/components/AppProvider";
 import MathContent from "@/components/MathContent";
+import FlashcardStudy from "@/components/FlashcardStudy";
 import { fetchMyCapabilities } from "@/lib/capabilities";
 import {
-  RATING_BUTTONS,
   flashcardErrorMessage,
-  type DueQueue,
   type Flashcard,
   type FlashcardDeck,
   type FlashcardDeckDetail,
+  type StudyMode,
+  type StudySession,
 } from "@/lib/flashcards";
 import type { BookOption } from "@/lib/types";
 
@@ -35,24 +47,35 @@ function todayLabel(): string {
   return new Date().toLocaleDateString("fa-IR");
 }
 
+function toFa(value: number): string {
+  return Number(value).toLocaleString("fa-IR", { useGrouping: false });
+}
+
 export default function FlashcardsWorkspace() {
   const { authFetch, getActiveToken } = useAppContext();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [view, setView] = useState<View>("decks");
   const [decks, setDecks] = useState<FlashcardDeck[]>([]);
   const [activeDeck, setActiveDeck] = useState<FlashcardDeckDetail | null>(null);
-  const [queue, setQueue] = useState<Flashcard[]>([]);
-  const [studyTotal, setStudyTotal] = useState(0);
-  const [flipped, setFlipped] = useState(false);
-  const [hintOpen, setHintOpen] = useState(false);
-  const [reviewBusy, setReviewBusy] = useState(false);
+  const [studySession, setStudySession] = useState<StudySession | null>(null);
+  const [activeSessions, setActiveSessions] = useState<StudySession[]>([]);
+  const [studyReturn, setStudyReturn] = useState<"decks" | "deck">("decks");
   const [dueCount, setDueCount] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [startingMode, setStartingMode] = useState<StudyMode | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [newDeckTitle, setNewDeckTitle] = useState("");
   const [generateOpen, setGenerateOpen] = useState(false);
   const [libraryDecks, setLibraryDecks] = useState<FlashcardDeck[]>([]);
+
+  const deckTitleFor = useCallback(
+    (deckId: number | null) => {
+      if (deckId === null) return "همهٔ دسته‌ها";
+      return decks.find((deck) => deck.id === deckId)?.title ?? activeDeck?.title ?? `دستهٔ ${deckId}`;
+    },
+    [decks, activeDeck],
+  );
 
   const loadDecks = useCallback(async () => {
     const response = await authFetch("/api/v1/flashcards/decks");
@@ -71,6 +94,11 @@ export default function FlashcardsWorkspace() {
     if (response.ok) setLibraryDecks((await response.json()) as FlashcardDeck[]);
   }, [authFetch]);
 
+  const loadActiveSessions = useCallback(async () => {
+    const response = await authFetch("/api/v1/flashcards/sessions/active");
+    if (response.ok) setActiveSessions((await response.json()) as StudySession[]);
+  }, [authFetch]);
+
   // Gate the whole page on the capability flag; the API also returns 403 when disabled.
   useEffect(() => {
     let cancelled = false;
@@ -84,7 +112,7 @@ export default function FlashcardsWorkspace() {
       setEnabled(true);
       setLoading(true);
       try {
-        await Promise.all([loadDecks(), loadLibrary()]);
+        await Promise.all([loadDecks(), loadLibrary(), loadActiveSessions()]);
       } catch (caught) {
         if (!cancelled) setError(caught instanceof Error ? caught.message : "خطا در بارگذاری.");
       } finally {
@@ -95,7 +123,7 @@ export default function FlashcardsWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [getActiveToken, loadDecks, loadLibrary]);
+  }, [getActiveToken, loadDecks, loadLibrary, loadActiveSessions]);
 
   async function openDeck(deckId: number) {
     setError("");
@@ -110,55 +138,70 @@ export default function FlashcardsWorkspace() {
     setView("deck");
   }
 
-  async function startStudy(deckId: number | null) {
+  async function startSession(
+    deckId: number | null,
+    mode: StudyMode,
+    options: { shuffle?: boolean; cardIds?: number[] } = {},
+  ) {
     setError("");
     setNotice("");
-    const response = await authFetch("/api/v1/flashcards/due?limit=200");
-    const payload = (await response.json().catch(() => null)) as DueQueue | null;
-    if (!response.ok || !payload) {
-      setError("دریافت کارت‌های امروز ناموفق بود.");
-      return;
-    }
-    const cards = deckId === null ? payload.cards : payload.cards.filter((card) => card.deck_id === deckId);
-    if (!cards.length) {
-      setNotice("برای امروز کارتی برای مرور وجود ندارد. آفرین!");
-      return;
-    }
-    setQueue(cards);
-    setStudyTotal(cards.length);
-    setFlipped(false);
-    setHintOpen(false);
-    setView("study");
-  }
-
-  async function rate(rating: 1 | 2 | 3 | 4) {
-    const card = queue[0];
-    if (!card || reviewBusy) return;
-    setReviewBusy(true);
-    setError("");
+    setStartingMode(mode);
     try {
-      const response = await authFetch(`/api/v1/flashcards/${card.id}/review`, {
+      const body: Record<string, unknown> = { deck_id: deckId, mode, shuffle: Boolean(options.shuffle) };
+      if (options.cardIds && options.cardIds.length) body.card_ids = options.cardIds;
+      const response = await authFetch("/api/v1/flashcards/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rating }),
+        body: JSON.stringify(body),
       });
+      const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        const payload = await response.json().catch(() => null);
-        setError(flashcardErrorMessage(payload, "ثبت مرور ناموفق بود."));
+        setError(flashcardErrorMessage(payload, "شروع جلسهٔ مطالعه ناموفق بود."));
         return;
       }
-      // Rating 1 (forgot) brings the card back later in this session.
-      setQueue((prev) => {
-        const [head, ...rest] = prev;
-        return rating === 1 && head ? [...rest, head] : rest;
-      });
-      setFlipped(false);
-      setHintOpen(false);
+      setStudyReturn(view === "deck" ? "deck" : "decks");
+      setStudySession(payload as StudySession);
+      setView("study");
+      void loadActiveSessions();
     } catch {
       setError("ارتباط با سرور برقرار نشد.");
     } finally {
-      setReviewBusy(false);
+      setStartingMode(null);
     }
+  }
+
+  async function resumeSession(session: StudySession) {
+    setError("");
+    setNotice("");
+    const response = await authFetch(`/api/v1/flashcards/sessions/${session.id}`);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      setError(flashcardErrorMessage(payload, "بازیابی جلسه ناموفق بود."));
+      return;
+    }
+    setStudyReturn("decks");
+    setStudySession(payload as StudySession);
+    setView("study");
+  }
+
+  function mergeSummary(summary: StudySession) {
+    setStudySession((prev) => {
+      if (!prev) return summary;
+      const cards = summary.cards ?? prev.cards;
+      return { ...prev, ...summary, cards };
+    });
+  }
+
+  function replaceSession(next: StudySession) {
+    setStudySession(next);
+    void loadActiveSessions();
+  }
+
+  function exitStudy() {
+    setView(studyReturn === "deck" && activeDeck ? "deck" : "decks");
+    void loadDecks();
+    void loadActiveSessions();
+    if (studyReturn === "deck" && activeDeck) void openDeck(activeDeck.id);
   }
 
   async function downloadAnki(deck: FlashcardDeck) {
@@ -174,6 +217,25 @@ export default function FlashcardsWorkspace() {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `darsyar-${deck.id}.apkg`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function downloadCsv(deck: FlashcardDeck) {
+    setError("");
+    const response = await authFetch(`/api/v1/flashcards/decks/${deck.id}/export/csv`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      setError(flashcardErrorMessage(payload, "خروجی CSV ساخته نشد."));
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `darsyar-${deck.id}.csv`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -208,6 +270,7 @@ export default function FlashcardsWorkspace() {
     setActiveDeck(null);
     setView("decks");
     await loadDecks();
+    await loadActiveSessions();
   }
 
   async function deleteCard(card: Flashcard) {
@@ -231,11 +294,11 @@ export default function FlashcardsWorkspace() {
     await loadDecks();
   }
 
-  const currentCard = queue[0] ?? null;
-  const studyDone = studyTotal - queue.length;
-  const studyPercent = studyTotal ? Math.round((studyDone / studyTotal) * 100) : 0;
-
   const deckCards = useMemo(() => activeDeck?.cards ?? [], [activeDeck]);
+  const activeDeckSession = activeDeck
+    ? activeSessions.find((row) => row.deck_id === activeDeck.id)
+    : undefined;
+  const globalSessions = activeSessions.filter((row) => row.deck_id === null);
 
   if (enabled === false) {
     return (
@@ -249,8 +312,8 @@ export default function FlashcardsWorkspace() {
 
   return (
     <div className="fc-root" dir="rtl">
-      {error && <div className="inline-error fc-alert">{error}</div>}
-      {notice && <div className="fc-notice">{notice}</div>}
+      {error && <div className="inline-error fc-alert" role="alert">{error}</div>}
+      {notice && <div className="fc-notice" role="status">{notice}</div>}
 
       {view === "decks" && (
         <>
@@ -262,11 +325,21 @@ export default function FlashcardsWorkspace() {
             <div className="fc-toolbar-actions">
               <button
                 type="button"
-                className="fc-btn primary"
-                onClick={() => void startStudy(null)}
-                disabled={loading}
+                className="fc-btn"
+                onClick={() => void startSession(null, "full")}
+                disabled={loading || startingMode !== null}
+                title="همهٔ کارت‌ها، مستقل از موعد SM-2"
               >
-                <RotateCw size={16} /> مرور امروز
+                <Play size={16} /> مطالعهٔ کامل همه
+              </button>
+              <button
+                type="button"
+                className="fc-btn primary"
+                onClick={() => void startSession(null, "smart")}
+                disabled={loading || startingMode !== null}
+                title="فقط کارت‌های در موعد SM-2"
+              >
+                <RotateCw size={16} /> مرور هوشمند
                 {dueCount > 0 && <span className="fc-due-badge">{dueCount}</span>}
               </button>
               <button type="button" className="fc-btn" onClick={() => setGenerateOpen(true)}>
@@ -274,6 +347,25 @@ export default function FlashcardsWorkspace() {
               </button>
             </div>
           </header>
+
+          {(activeSessions.length > 0 || globalSessions.length > 0) && (
+            <section className="fc-resume-banner" aria-label="جلسه‌های ناتمام">
+              {activeSessions.map((row) => (
+                <div key={row.id} className="fc-resume-row">
+                  <div>
+                    <strong>ادامهٔ جلسهٔ ناتمام</strong>
+                    <div className="fc-muted fc-small">
+                      {deckTitleFor(row.deck_id)} · کارت {toFa(Math.min(row.position + 1, row.total))} از {toFa(row.total)} ·{" "}
+                      {row.mode === "smart" ? "مرور هوشمند" : "مطالعهٔ کامل"}
+                    </div>
+                  </div>
+                  <button type="button" className="fc-btn small primary" onClick={() => void resumeSession(row)}>
+                    ادامهٔ مطالعه
+                  </button>
+                </div>
+              ))}
+            </section>
+          )}
 
           <div className="fc-create-row">
             <input
@@ -316,10 +408,20 @@ export default function FlashcardsWorkspace() {
                   <button
                     type="button"
                     className="fc-btn small"
-                    onClick={() => void startStudy(deck.id)}
-                    disabled={deck.stats.due === 0}
+                    onClick={() => void startSession(deck.id, "full")}
+                    disabled={deck.stats.total === 0 || startingMode !== null}
+                    title="همهٔ کارت‌های این دسته"
                   >
-                    <RotateCw size={14} /> مرور
+                    <BookOpenCheck size={14} /> مطالعه
+                  </button>
+                  <button
+                    type="button"
+                    className="fc-btn small"
+                    onClick={() => void startSession(deck.id, "smart")}
+                    disabled={deck.stats.due === 0 || startingMode !== null}
+                    title="فقط کارت‌های در موعد SM-2"
+                  >
+                    <RotateCw size={14} /> مرور هوشمند
                   </button>
                 </div>
               </article>
@@ -328,7 +430,9 @@ export default function FlashcardsWorkspace() {
 
           {libraryDecks.length > 0 && (
             <section className="fc-library">
-              <h3>کتابخانهٔ عمومی (تأییدشده)</h3>
+              <h3>
+                <Library size={16} /> کتابخانهٔ عمومی (تأییدشده)
+              </h3>
               <div className="fc-deck-grid">
                 {libraryDecks.map((deck) => (
                   <article key={deck.id} className="fc-deck-card">
@@ -354,17 +458,28 @@ export default function FlashcardsWorkspace() {
               </button>
               <h2>{activeDeck.title}</h2>
               <p className="fc-muted fc-small">
-                {activeDeck.stats.total} کارت · {activeDeck.stats.due} برای امروز
+                {activeDeck.stats.total} کارت · {activeDeck.stats.due} در موعد امروز
               </p>
             </div>
             <div className="fc-toolbar-actions">
               <button
                 type="button"
                 className="fc-btn primary"
-                onClick={() => void startStudy(activeDeck.id)}
-                disabled={activeDeck.stats.due === 0}
+                onClick={() => void startSession(activeDeck.id, "full")}
+                disabled={activeDeck.cards.length === 0 || startingMode !== null}
+                title="همهٔ کارت‌های این دسته، مستقل از موعد SM-2"
               >
-                <RotateCw size={16} /> مرور این دسته
+                <BookOpenCheck size={16} /> مطالعهٔ کامل
+              </button>
+              <button
+                type="button"
+                className="fc-btn"
+                onClick={() => void startSession(activeDeck.id, "smart")}
+                disabled={activeDeck.stats.due === 0 || startingMode !== null}
+                title="فقط کارت‌های در موعد SM-2"
+              >
+                <RotateCw size={16} /> مرور هوشمند
+                {activeDeck.stats.due > 0 && <span className="fc-due-badge">{activeDeck.stats.due}</span>}
               </button>
               <button
                 type="button"
@@ -374,12 +489,33 @@ export default function FlashcardsWorkspace() {
               >
                 <Download size={16} /> خروجی Anki
               </button>
+              <button
+                type="button"
+                className="fc-btn"
+                onClick={() => void downloadCsv(activeDeck)}
+                disabled={activeDeck.cards.length === 0}
+              >
+                <FileText size={16} /> دانلود CSV
+              </button>
               <button type="button" className="fc-btn danger" onClick={() => void deleteDeck(activeDeck)}>
                 <Trash2 size={16} /> حذف دسته
               </button>
             </div>
           </header>
-          <div className="fc-progress wide">
+          {activeDeckSession && (
+            <div className="fc-resume-row standalone">
+              <div>
+                <strong>جلسهٔ ناتمام در این دسته</strong>
+                <div className="fc-muted fc-small">
+                  کارت {toFa(Math.min(activeDeckSession.position + 1, activeDeckSession.total))} از {toFa(activeDeckSession.total)}
+                </div>
+              </div>
+              <button type="button" className="fc-btn small primary" onClick={() => void resumeSession(activeDeckSession)}>
+                ادامهٔ مطالعه
+              </button>
+            </div>
+          )}
+          <div className="fc-progress wide" aria-hidden="true">
             <span style={{ width: `${activeDeck.stats.progress_percent}%` }} />
           </div>
           {deckCards.length === 0 && (
@@ -411,95 +547,21 @@ export default function FlashcardsWorkspace() {
         </>
       )}
 
-      {view === "study" && (
-        <section className="fc-study">
-          <header className="fc-toolbar">
-            <button type="button" className="fc-link" onClick={() => setView(activeDeck ? "deck" : "decks")}>
-              ← بازگشت
-            </button>
-            <span className="fc-muted">
-              {studyDone} از {studyTotal} · {studyPercent}٪
-            </span>
-          </header>
-          <div className="fc-progress wide">
-            <span style={{ width: `${studyPercent}%` }} />
-          </div>
-
-          {currentCard ? (
-            <>
-              <button
-                type="button"
-                className={`fc-flip ${flipped ? "is-flipped" : ""}`}
-                onClick={() => setFlipped((value) => !value)}
-                aria-pressed={flipped}
-                aria-label={flipped ? "نمایش رو" : "نمایش پشت کارت"}
-              >
-                <div className="fc-flip-inner">
-                  <div className="fc-face fc-front">
-                    <MathContent content={currentCard.front_md} />
-                  </div>
-                  <div className="fc-face fc-back">
-                    <MathContent content={currentCard.back_md} />
-                    {currentCard.citations.length > 0 && (
-                      <div className="fc-cite-stack">
-                        {currentCard.citations.map((cite, index) => (
-                          <span key={`${cite.pdf_page_index}-${index}`} className="fc-cite-chip">
-                            <BookOpen size={12} /> {cite.citation}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </button>
-
-              <div className="fc-study-tools">
-                {currentCard.hint_md && (
-                  <button
-                    type="button"
-                    className="fc-btn small"
-                    onClick={() => setHintOpen((value) => !value)}
-                  >
-                    {hintOpen ? <EyeOff size={14} /> : <Lightbulb size={14} />}
-                    {hintOpen ? "پنهان کردن راهنما" : "نمایش راهنما"}
-                  </button>
-                )}
-                {hintOpen && currentCard.hint_md && (
-                  <div className="fc-hint">
-                    <MathContent content={currentCard.hint_md} />
-                  </div>
-                )}
-              </div>
-
-              {flipped ? (
-                <div className="fc-rating-row" role="group" aria-label="امتیاز مرور">
-                  {RATING_BUTTONS.map((item) => (
-                    <button
-                      key={item.rating}
-                      type="button"
-                      className={`fc-rate ${item.tone}`}
-                      disabled={reviewBusy}
-                      onClick={() => void rate(item.rating)}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="fc-muted fc-center">برای دیدن پاسخ کارت را بزنید.</p>
-              )}
-            </>
-          ) : (
-            <div className="fc-empty">
-              مرور امروز تمام شد. {studyTotal} کارت مرور شد.
-              <div className="fc-deck-actions center">
-                <button type="button" className="fc-btn" onClick={() => setView("decks")}>
-                  بازگشت به دسته‌ها
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
+      {view === "study" && studySession && (
+        <FlashcardStudy
+          session={studySession}
+          deckTitle={deckTitleFor(studySession.deck_id)}
+          authFetch={authFetch}
+          onMergeSummary={mergeSummary}
+          onReplaceSession={replaceSession}
+          onExit={exitStudy}
+          onStudyAll={() => void startSession(studySession.deck_id, "full")}
+          onStudyMissed={(cardIds) =>
+            void startSession(studySession.deck_id, "full", { cardIds })
+          }
+          onError={setError}
+          onNotice={setNotice}
+        />
       )}
 
       {generateOpen && (
@@ -518,6 +580,22 @@ export default function FlashcardsWorkspace() {
     </div>
   );
 }
+
+type CountOption = { value: number; label: string; hint: string };
+
+const COUNT_OPTIONS: ReadonlyArray<CountOption> = [
+  { value: 3, label: "کمتر", hint: "۳ کارت" },
+  { value: 5, label: "استاندارد", hint: "۵ کارت" },
+  { value: 10, label: "بیشتر", hint: "۱۰ کارت" },
+];
+
+const DIFFICULTY_OPTIONS: ReadonlyArray<{ value: "easy" | "medium" | "hard"; label: string; hint: string }> = [
+  { value: "easy", label: "آسان", hint: "تعاریف و مفاهیم پایه، سؤال‌های مستقیم" },
+  { value: "medium", label: "متوسط", hint: "مفاهیم اصلی فصل و روابط بین آن‌ها" },
+  { value: "hard", label: "سخت", hint: "نکات عمیق، مقایسهٔ مفاهیم و تحلیل" },
+];
+
+const CUSTOM_PROMPT_MAX = 1000;
 
 type GenerateModalProps = {
   decks: FlashcardDeck[];
@@ -539,7 +617,9 @@ function GenerateModal({ decks, onClose, onGenerated, authFetch }: GenerateModal
   const [pageEnd, setPageEnd] = useState("");
   const [exams, setExams] = useState<ExamRow[]>([]);
   const [examId, setExamId] = useState("");
-  const [count, setCount] = useState(5);
+  const [count, setCount] = useState<number>(5);
+  const [difficulty, setDifficulty] = useState<"easy" | "medium" | "hard">("medium");
+  const [customPrompt, setCustomPrompt] = useState("");
   const [deckChoice, setDeckChoice] = useState<string>("new");
   const [newTitle, setNewTitle] = useState("");
   const [busy, setBusy] = useState(false);
@@ -593,8 +673,11 @@ function GenerateModal({ decks, onClose, onGenerated, authFetch }: GenerateModal
   }, [grade, major, needsMajor]);
 
   async function submit() {
+    if (busy) return; // hard guard against duplicate submissions
     setFormError("");
-    const body: Record<string, unknown> = { source, count };
+    const body: Record<string, unknown> = { source, count, difficulty };
+    const trimmedPrompt = customPrompt.trim();
+    if (trimmedPrompt) body.custom_prompt = trimmedPrompt;
     if (deckChoice === "new") {
       if (newTitle.trim()) body.new_deck_title = newTitle.trim();
     } else {
@@ -620,11 +703,12 @@ function GenerateModal({ decks, onClose, onGenerated, authFetch }: GenerateModal
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
+        // Keep the form intact so the student can retry without re-entering data.
         setFormError(flashcardErrorMessage(payload, "ساخت فلش‌کارت ناموفق بود."));
         return;
       }
       const created = payload as { deck_id: number; created_count: number };
-      await onGenerated(created.deck_id, `${created.created_count} فلش‌کارت با ارجاع به کتاب ساخته شد.`);
+      await onGenerated(created.deck_id, `${created.created_count} فلش‌کارت ساخته شد و به دسته اضافه شد.`);
     } catch {
       setFormError("ارتباط با سرور برقرار نشد.");
     } finally {
@@ -639,7 +723,7 @@ function GenerateModal({ decks, onClose, onGenerated, authFetch }: GenerateModal
           <h2>
             <Sparkles size={18} /> ساخت فلش‌کارت با هوش مصنوعی
           </h2>
-          <button type="button" className="fc-icon-btn" onClick={onClose} aria-label="بستن">
+          <button type="button" className="fc-icon-btn" onClick={onClose} aria-label="بستن" disabled={busy}>
             <X size={18} />
           </button>
         </header>
@@ -742,17 +826,59 @@ function GenerateModal({ decks, onClose, onGenerated, authFetch }: GenerateModal
           </div>
         )}
 
+        <fieldset className="fc-option-fieldset">
+          <legend>تعداد کارت‌ها</legend>
+          <div className="fc-option-cards" role="radiogroup" aria-label="تعداد کارت‌ها">
+            {COUNT_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={count === option.value}
+                className={`fc-option-card${count === option.value ? " active" : ""}`}
+                onClick={() => setCount(option.value)}
+              >
+                <span className="fc-option-title">{option.label}</span>
+                <span className="fc-option-hint">{option.hint}</span>
+              </button>
+            ))}
+          </div>
+        </fieldset>
+
+        <fieldset className="fc-option-fieldset">
+          <legend>سطح دشواری</legend>
+          <div className="fc-option-cards" role="radiogroup" aria-label="سطح دشواری">
+            {DIFFICULTY_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={difficulty === option.value}
+                className={`fc-option-card${difficulty === option.value ? " active" : ""}`}
+                onClick={() => setDifficulty(option.value)}
+              >
+                <span className="fc-option-title">{option.label}</span>
+                <span className="fc-option-hint">{option.hint}</span>
+              </button>
+            ))}
+          </div>
+        </fieldset>
+
+        <label className="fc-custom-prompt">
+          می‌خواهی فلش‌کارت‌ها روی چه موضوعی تمرکز کنند؟
+          <textarea
+            value={customPrompt}
+            onChange={(event) => setCustomPrompt(event.target.value.slice(0, CUSTOM_PROMPT_MAX))}
+            maxLength={CUSTOM_PROMPT_MAX}
+            rows={3}
+            placeholder="مثلاً: فقط نکات مهم و فرمول‌های فصل را پوشش بده؛ یا کارت‌ها برای آمادگی امتحان نهایی باشند…"
+          />
+          <span className="fc-char-counter" aria-live="polite">
+            {customPrompt.length} از {CUSTOM_PROMPT_MAX}
+          </span>
+        </label>
+
         <div className="fc-form-grid">
-          <label>
-            تعداد کارت
-            <select value={count} onChange={(event) => setCount(Number(event.target.value))}>
-              {[3, 5, 8, 10].map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
           <label>
             مقصد
             <select value={deckChoice} onChange={(event) => setDeckChoice(event.target.value)}>
@@ -772,7 +898,7 @@ function GenerateModal({ decks, onClose, onGenerated, authFetch }: GenerateModal
           )}
         </div>
 
-        {formError && <div className="inline-error">{formError}</div>}
+        {formError && <div className="inline-error" role="alert">{formError}</div>}
 
         <div className="fc-modal-actions">
           <button type="button" className="fc-btn" onClick={onClose} disabled={busy}>

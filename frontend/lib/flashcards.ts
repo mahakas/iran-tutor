@@ -57,6 +57,54 @@ export type FlashcardDeckDetail = FlashcardDeck & { cards: Flashcard[] };
 
 export type DueQueue = { due_count: number; cards: Flashcard[] };
 
+export type StudyResult = "got" | "missed";
+export type StudyMode = "full" | "smart";
+export type StudyStatus = "in_progress" | "completed";
+
+export type StudySessionCounts = {
+  total: number;
+  got: number;
+  missed: number;
+  rated: number;
+  remaining: number;
+  percent: number;
+  success_percent: number;
+};
+
+export type StudyCard = Flashcard & { session_result?: StudyResult | null };
+
+export type StudySession = {
+  id: number;
+  deck_id: number | null;
+  mode: StudyMode;
+  card_ids: number[];
+  position: number;
+  results: Record<string, StudyResult>;
+  flipped: boolean;
+  status: StudyStatus;
+  started_at: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
+  counts: StudySessionCounts;
+  total: number;
+  got_count: number;
+  missed_count: number;
+  rated_count: number;
+  success_percent: number;
+  /** Only present on the session-detail endpoint responses. */
+  cards?: StudyCard[];
+};
+
+export type ExplainResponse = {
+  card_id: number;
+  deck_id: number;
+  explanation: string;
+  source_available: boolean;
+  citations: FlashcardCitation[];
+  citation: string | null;
+  audit_id: number | null;
+};
+
 export const RATING_BUTTONS: ReadonlyArray<{ rating: 1 | 2 | 3 | 4; label: string; tone: string }> = [
   { rating: 1, label: "فراموش کردم", tone: "again" },
   { rating: 2, label: "سخت", tone: "hard" },

@@ -22,8 +22,9 @@ from app.api.dependencies import require_student
 from app.db.session import get_session
 from app.models.auth import User
 from app.models.curriculum import Book
-from app.models.flashcards import Flashcard, FlashcardDeck, FlashcardReview
+from app.models.flashcards import Flashcard, FlashcardDeck, FlashcardReview, FlashcardStudySession
 from app.services import flashcard_service as fs
+from app.services import flashcard_csv
 from app.services.learner_memory_service import record_review_outcome
 from app.services.anki_export import build_apkg_bytes
 from app.services.capability_service import require_capability_enabled
@@ -82,9 +83,11 @@ class CardUpdateBody(BaseModel):
 
 class GenerateBody(BaseModel):
     source: Literal["book", "chat", "mistake"]
-    count: int = Field(default=5, ge=1, le=10)
+    count: int = Field(default=5, ge=1, le=fs.MAX_GENERATE_COUNT)
     deck_id: int | None = None
     new_deck_title: str | None = Field(default=None, max_length=255)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    custom_prompt: str | None = Field(default=None, max_length=fs.CUSTOM_PROMPT_MAX_LENGTH)
     # book
     book_id: int | None = None
     chapter_number: int | None = Field(default=None, ge=1, le=99)
@@ -100,6 +103,24 @@ class GenerateBody(BaseModel):
 
 class ReviewBody(BaseModel):
     rating: int = Field(ge=1, le=4)
+    session_id: int | None = None
+
+
+class SessionStartBody(BaseModel):
+    deck_id: int | None = None
+    mode: Literal["full", "smart"] = "full"
+    shuffle: bool = False
+    # Explicit subset (e.g. "only the cards missed in this session").
+    card_ids: list[int] | None = Field(default=None, max_length=500)
+
+
+class SessionPatchBody(BaseModel):
+    position: int | None = Field(default=None, ge=0, le=10000)
+    flipped: bool | None = None
+
+
+class SessionRestartBody(BaseModel):
+    shuffle: bool = False
 
 
 class ModerationBody(BaseModel):
@@ -162,6 +183,7 @@ async def delete_deck(
 ) -> Response:
     deck = await fs.get_owned_deck(session, current_user, deck_id)
     card_ids = list((await session.scalars(select(Flashcard.id).where(Flashcard.deck_id == deck.id))).all())
+    await fs.clean_deck_from_sessions(session, deck.id, card_ids)
     if card_ids:
         for review in (
             await session.scalars(select(FlashcardReview).where(FlashcardReview.card_id.in_(card_ids)))
@@ -221,6 +243,7 @@ async def delete_card(
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     card, _ = await fs.get_owned_card(session, current_user, card_id)
+    await fs.clean_card_from_sessions(session, card.id)
     for review in (await session.scalars(select(FlashcardReview).where(FlashcardReview.card_id == card.id))).all():
         await session.delete(review)
     await session.delete(card)
@@ -281,6 +304,8 @@ async def generate(
         count=body.count,
         deck_id=body.deck_id,
         new_deck_title=body.new_deck_title,
+        difficulty=body.difficulty,
+        custom_prompt=body.custom_prompt,
     )
 
 
@@ -301,38 +326,51 @@ async def review_card(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     card, _ = await fs.get_owned_card(session, current_user, card_id)
-    review = await fs.apply_review(session, current_user, card, body.rating)
+    review, applied = await fs.apply_review(
+        session, current_user, card, body.rating, session_id=body.session_id
+    )
     # Phase 4: review outcomes feed the learner's L2/L3 memory (same transaction).
+    # Skip memory/mastery updates for idempotent replays inside a study session.
     first = (card.citations_json or [{}])[0] if card.citations_json else {}
-    try:
-        await record_review_outcome(
-            session,
-            user_id=current_user.id,
-            book_id=first.get("book_id"),
-            chapter_number=first.get("chapter_number"),
-            topic=first.get("chapter_title") or card.front_md[:60],
-            correct=body.rating >= 3,
-        )
-    except Exception:  # noqa: BLE001 - memory is best-effort, never blocks a review
-        logger.exception("flashcards.memory_update_failed card=%s", card.id)
-    # Phase 5: flashcard reviews feed the chapter mastery score (flash component).
-    try:
-        from app.services import mastery_service
-
-        if first.get("book_id") is not None:
-            await mastery_service.record_component(
+    if applied:
+        try:
+            await record_review_outcome(
                 session,
                 user_id=current_user.id,
-                book_id=int(first["book_id"]),
+                book_id=first.get("book_id"),
                 chapter_number=first.get("chapter_number"),
-                component="flash",
-                correct=1 if body.rating >= 3 else 0,
-                total=1,
+                topic=first.get("chapter_title") or card.front_md[:60],
+                correct=body.rating >= 3,
             )
-    except Exception:  # noqa: BLE001 - mastery is best-effort, never blocks a review
-        logger.exception("flashcards.mastery_update_failed card=%s", card.id)
+        except Exception:  # noqa: BLE001 - memory is best-effort, never blocks a review
+            logger.exception("flashcards.memory_update_failed card=%s", card.id)
+        # Phase 5: flashcard reviews feed the chapter mastery score (flash component).
+        try:
+            from app.services import mastery_service
+
+            if first.get("book_id") is not None:
+                await mastery_service.record_component(
+                    session,
+                    user_id=current_user.id,
+                    book_id=int(first["book_id"]),
+                    chapter_number=first.get("chapter_number"),
+                    component="flash",
+                    correct=1 if body.rating >= 3 else 0,
+                    total=1,
+                )
+        except Exception:  # noqa: BLE001 - mastery is best-effort, never blocks a review
+            logger.exception("flashcards.mastery_update_failed card=%s", card.id)
+    response: dict[str, Any] = {
+        "card_id": card.id,
+        "review": fs.serialize_review(review),
+        "applied": applied,
+    }
+    if body.session_id is not None:
+        study_session = await session.get(FlashcardStudySession, body.session_id)
+        if study_session is not None:
+            response["session"] = fs.serialize_session(study_session)
     await session.commit()
-    return {"card_id": card.id, "review": fs.serialize_review(review)}
+    return response
 
 
 @router.get("/decks/{deck_id}/export/anki")
@@ -351,6 +389,35 @@ async def export_anki(
         content=payload,
         media_type="application/apkg",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/decks/{deck_id}/export/csv")
+async def export_csv(
+    deck_id: int,
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    deck = await fs.get_owned_deck(session, current_user, deck_id)
+    detail = await fs.deck_detail(session, current_user, deck)
+    if not detail["cards"]:
+        raise HTTPException(status_code=422, detail="این دسته کارتی برای خروجی ندارد.")
+    payload = flashcard_csv.build_csv_bytes(detail["cards"])
+    fallback = f"darsyar-deck-{deck.id}.csv"
+    from urllib.parse import quote
+
+    # RFC 5987: keep an ASCII fallback and add UTF-8 filename* for Persian deck titles.
+    utf8_name = quote(f"{deck.title}.csv")
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{utf8_name}"
+        ),
+        "X-Content-Type-Options": "nosniff",
+    }
+    return Response(
+        content=payload,
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
     )
 
 
@@ -375,6 +442,110 @@ async def copy_library_deck(
     await session.commit()
     stats = await fs.deck_stats(session, current_user.id, [deck.id], datetime.now(timezone.utc))
     return fs.serialize_deck(deck, stats=stats[deck.id])
+
+
+# ---------------------------------------------------------------------------
+# Student: persistent study sessions (NotebookLM-style progress)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/sessions/active")
+async def list_active_sessions(
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = await fs.list_active_sessions(session, current_user)
+    return [fs.serialize_session(row) for row in rows]
+
+
+@router.post("/sessions", status_code=201)
+async def start_session(
+    body: SessionStartBody,
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    study_session = await fs.start_or_resume_session(
+        session,
+        current_user,
+        deck_id=body.deck_id,
+        mode=body.mode,
+        shuffle=body.shuffle,
+        card_ids=body.card_ids,
+    )
+    await session.commit()
+    return await fs.serialize_session_detail(session, current_user, study_session)
+
+
+@router.get("/sessions/{session_id}")
+async def get_session_detail(
+    session_id: int,
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    study_session = await fs.get_owned_session(session, current_user, session_id)
+    return await fs.serialize_session_detail(session, current_user, study_session)
+
+
+@router.patch("/sessions/{session_id}")
+async def patch_session(
+    session_id: int,
+    body: SessionPatchBody,
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    study_session = await fs.get_owned_session(session, current_user, session_id)
+    await fs.update_session_progress(
+        session, study_session, position=body.position, flipped=body.flipped
+    )
+    await session.commit()
+    return await fs.serialize_session_detail(session, current_user, study_session)
+
+
+@router.post("/sessions/{session_id}/shuffle")
+async def shuffle_session(
+    session_id: int,
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    study_session = await fs.get_owned_session(session, current_user, session_id)
+    await fs.shuffle_session(session, study_session)
+    await session.commit()
+    return await fs.serialize_session_detail(session, current_user, study_session)
+
+
+@router.post("/sessions/{session_id}/restart")
+async def restart_session(
+    session_id: int,
+    body: SessionRestartBody,
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    study_session = await fs.get_owned_session(session, current_user, session_id)
+    await fs.restart_session(session, study_session, shuffle=body.shuffle)
+    await session.commit()
+    return await fs.serialize_session_detail(session, current_user, study_session)
+
+
+@router.post("/sessions/{session_id}/complete")
+async def complete_session(
+    session_id: int,
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    study_session = await fs.get_owned_session(session, current_user, session_id)
+    await fs.complete_session(session, study_session)
+    await session.commit()
+    return await fs.serialize_session_detail(session, current_user, study_session)
+
+
+@router.post("/cards/{card_id}/explain")
+async def explain_card(
+    card_id: int,
+    current_user: User = Depends(require_flashcards_enabled),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    card, deck = await fs.get_owned_card(session, current_user, card_id)
+    return await fs.explain_card(session, current_user, card, deck)
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +653,7 @@ async def admin_delete_deck(deck_id: int, session: AsyncSession = Depends(get_se
     if deck is None:
         raise HTTPException(status_code=404, detail="دسته یافت نشد.")
     card_ids = list((await session.scalars(select(Flashcard.id).where(Flashcard.deck_id == deck.id))).all())
+    await fs.clean_deck_from_sessions(session, deck.id, card_ids)
     if card_ids:
         for review in (
             await session.scalars(select(FlashcardReview).where(FlashcardReview.card_id.in_(card_ids)))
